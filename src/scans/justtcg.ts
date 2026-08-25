@@ -1,6 +1,7 @@
 import type { Valuation } from "@grailcard/shared";
 import { similarity } from "./similarity.js";
 import { recordUsage } from "./usage.js";
+import { db } from "../db.js";
 
 // JustTCG: prices for 18 TCGs — fills gaps where the free catalog has no
 // prices (Digimon, Union Arena, Dragon Ball, ...). FREE tier: 1,000 req/mo.
@@ -20,6 +21,69 @@ const GAME_MAP: Record<string, string> = {
   riftbound: "riftbound-league-of-legends-trading-card-game",
 };
 
+// JustTCG states its own budget on every response, under _metadata, including
+// which plan the key is on. We were ignoring it and counting our own calls
+// against a hardcoded free-tier ceiling of 1,000/month — so a paid Starter Plan
+// key with 10,000 monthly requests displayed "994/1000", wrong by an order of
+// magnitude and wrong about which period it was even measuring.
+//
+// Persisted, because a snapshot that dies with the process tells you nothing
+// after a restart, which is when people look.
+const QUOTA_KEY = "justtcg:quota";
+const writeKv = db.prepare(
+  "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+);
+const readKv = db.prepare("SELECT value FROM kv WHERE key = ?");
+
+export type JustTcgQuota = {
+  plan: string | null;
+  monthlyLimit: number | null;
+  monthlyUsed: number | null;
+  monthlyRemaining: number | null;
+  dailyLimit: number | null;
+  dailyUsed: number | null;
+  dailyRemaining: number | null;
+  rateLimitPerMin: number | null;
+  observedAt: string | null;
+};
+
+function recordQuota(body: any): void {
+  const m = body?._metadata ?? body?.meta ?? null;
+  if (!m || typeof m !== "object") return;
+  const n = (v: unknown): number | null => {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : null;
+  };
+  const snap: JustTcgQuota = {
+    plan: typeof m.apiPlan === "string" ? m.apiPlan : null,
+    monthlyLimit: n(m.apiRequestLimit),
+    monthlyUsed: n(m.apiRequestsUsed),
+    monthlyRemaining: n(m.apiRequestsRemaining),
+    dailyLimit: n(m.apiDailyLimit),
+    dailyUsed: n(m.apiDailyRequestsUsed),
+    dailyRemaining: n(m.apiDailyRequestsRemaining),
+    rateLimitPerMin: n(m.apiRateLimit),
+    observedAt: new Date().toISOString(),
+  };
+  if (snap.monthlyLimit == null && snap.dailyLimit == null) return;
+  try {
+    writeKv.run(QUOTA_KEY, JSON.stringify(snap));
+  } catch {
+    /* metering must never break a lookup */
+  }
+}
+
+/** The provider's own numbers, as last reported. Null until a call has been
+ *  made — never a guess dressed up as a measurement. */
+export function justTcgQuota(): JustTcgQuota | null {
+  try {
+    const row = readKv.get(QUOTA_KEY) as { value: string } | undefined;
+    return row ? (JSON.parse(row.value) as JustTcgQuota) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function search(key: string, q: string, gameSlug?: string): Promise<any[]> {
   const game = gameSlug ? `&game=${gameSlug}` : "";
   recordUsage("justtcg");
@@ -29,6 +93,7 @@ async function search(key: string, q: string, gameSlug?: string): Promise<any[]>
   );
   if (!res.ok) return [];
   const body = (await res.json()) as any;
+  recordQuota(body);
   return (body?.data ?? body?.cards ?? []) as any[];
 }
 

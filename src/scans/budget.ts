@@ -1,6 +1,7 @@
 import { quotaStatus, CREDITS_PER_LOOKUP } from "./gradedprices.js";
 import { monthStart, usedSince, usedToday } from "./usage.js";
 import { storeStats } from "../cards.store.js";
+import { justTcgQuota } from "./justtcg.js";
 
 // "How many more cards can this system actually scan today?"
 //
@@ -107,24 +108,51 @@ export async function scanBudget(): Promise<ScanBudget> {
     period: "day",
   });
 
-  // ---- JustTCG: raw/ungraded prices, monthly allowance ----
+  // ---- JustTCG: raw/ungraded prices ----
+  //
+  // It states its own budget on every response, including the plan the key is
+  // on, so use that. Counting our own calls against a hardcoded free-tier
+  // ceiling showed a paid Starter Plan key as "994/1000" when it actually had
+  // 9,916 of 10,000 monthly requests left. The daily cap binds first on that
+  // plan, so the daily figure is the one that limits scanning.
   const jConfigured = Boolean(process.env.JUSTTCG_API_KEY);
-  const jUsed = usedSince("justtcg", monthStart());
-  const jRemaining = jConfigured ? Math.max(0, JUSTTCG_MONTHLY - jUsed) : null;
+  const jq = jConfigured ? justTcgQuota() : null;
+  const jReported = Boolean(jq && (jq.dailyLimit != null || jq.monthlyLimit != null));
+  // whichever allowance runs out first is the real constraint
+  const jRemaining = jReported
+    ? Math.min(
+        ...[jq!.dailyRemaining, jq!.monthlyRemaining].filter(
+          (x): x is number => x != null,
+        ),
+      )
+    : jConfigured
+      ? Math.max(0, JUSTTCG_MONTHLY - usedSince("justtcg", monthStart()))
+      : null;
+  const jDailyBinds =
+    jReported && jq!.dailyRemaining != null &&
+    (jq!.monthlyRemaining == null || jq!.dailyRemaining <= jq!.monthlyRemaining);
   providers.push({
     id: "justtcg",
     label: "JustTCG",
     role: "Raw market prices",
     unit: "requests",
-    used: jUsed,
-    limit: jConfigured ? JUSTTCG_MONTHLY : null,
+    used: jReported
+      ? (jDailyBinds ? jq!.dailyUsed : jq!.monthlyUsed) ?? null
+      : usedSince("justtcg", monthStart()),
+    limit: jReported
+      ? (jDailyBinds ? jq!.dailyLimit : jq!.monthlyLimit) ?? null
+      : jConfigured ? JUSTTCG_MONTHLY : null,
     remaining: jRemaining,
     costPerScan: JUSTTCG_PER_SCAN,
     scansLeft: scansFrom(jRemaining, JUSTTCG_PER_SCAN),
-    reported: false,
+    reported: jReported,
     gating: jConfigured,
-    note: "monthly allowance",
-    period: "month",
+    note: jReported
+      ? [jq!.plan, jDailyBinds ? "daily cap binds first" : "monthly allowance"]
+          .filter(Boolean)
+          .join(" · ")
+      : "monthly allowance — assumed, no call made yet",
+    period: jDailyBinds ? "day" : "month",
   });
 
   // ---- CardGrader: graded backup, billed per call rather than a daily cap ----
