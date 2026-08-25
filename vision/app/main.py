@@ -73,12 +73,28 @@ async def analyze(
 
 @app.post("/similarity")
 async def visual_similarity(
-    imageB64: str = Form(...),
     urls: str = Form(...),  # JSON array of candidate image URLs
+    file: UploadFile | None = File(None),
+    imageB64: str | None = Form(None),
 ) -> dict:
-    img = cv2.imdecode(
-        np.frombuffer(base64.b64decode(imageB64), np.uint8), cv2.IMREAD_COLOR
-    )
+    """Score a photographed card against candidate catalogue images.
+
+    Takes the card as a FILE. It used to take base64 in a form field, and
+    starlette caps a non-file field at 1 MB — a warped card is several times
+    that, so every request was rejected as a malformed multipart body before
+    reaching this function. No traceback, no log line beyond "400", and the
+    visual match silently never ran. That left printing selection to text alone,
+    which is the one thing text usually cannot answer.
+
+    The base64 field is still accepted for callers that send a small image.
+    """
+    if file is not None:
+        raw = np.frombuffer(await file.read(), np.uint8)
+    elif imageB64:
+        raw = np.frombuffer(base64.b64decode(imageB64), np.uint8)
+    else:
+        raise HTTPException(status_code=422, detail="send the card as `file`")
+    img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=422, detail="could not decode image")
     img = _fit_input(img, "similarity")

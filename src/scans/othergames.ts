@@ -1,5 +1,6 @@
 import type { Identification, Valuation } from "@grailcard/shared";
 import { bestAgainst } from "./similarity.js";
+import { pickPrinting } from "./printingpicker.js";
 
 const MIN_SCORE = 0.6;
 
@@ -182,17 +183,38 @@ export async function identifySwu(names: string[]): Promise<CatalogMatch | null>
 /** One Piece TCG via optcgapi (free, no key). Looked up by the set code
  *  printed on the card (e.g. OP07-109), which works even on Japanese
  *  printings where the name can't be OCR'd. */
-export async function identifyOnePiece(setCode: string | null | undefined): Promise<CatalogMatch | null> {
+export async function identifyOnePiece(
+  setCode: string | null | undefined,
+  warpedImageB64?: string | null,
+): Promise<CatalogMatch | null> {
   if (!setCode || !/^(OP|ST|EB|PRB)\d{2}-\d{3}$/i.test(setCode)) return null;
   const list = (await fetchJson(
     `https://optcgapi.com/api/sets/card/${encodeURIComponent(setCode.toUpperCase())}/`,
   )) as Record<string, any>[] | null;
-  const c = list?.[0];
-  if (!c?.card_name) return null;
+  const printings = (list ?? []).filter((x) => x?.card_name);
+  if (printings.length === 0) return null;
+
+  // The number is shared; the artwork is not. This used to take printings[0]
+  // unconditionally, so a Koby whose catalogue entry offers both the base art
+  // and the Alternate Art resolved to whichever the API happened to list first
+  // — the base, at $1.81, against about $10 for the card actually photographed.
+  type OpPrinting = Record<string, any> & { imageUrl: string | null; label: string };
+  const choice = await pickPrinting<OpPrinting>(
+    printings.map((x) => ({
+      ...x,
+      imageUrl: (x.card_image as string | undefined) ?? null,
+      label: String(x.card_name ?? ""),
+    })),
+    warpedImageB64,
+  );
+  const c: Record<string, any> = choice?.pick ?? printings[0];
 
   const identification: Identification = {
-    cardId: `optcg-${c.card_set_id}`,
-    name: String(c.card_name).replace(/\s*\(\d+\)\s*$/, ""),
+    // The printing has to be part of the id. Both printings of OP11-119 carry
+    // the same card_set_id, so keying on that alone made them one card to every
+    // cache and every price lookup downstream.
+    cardId: `optcg-${c.card_set_id}${c.card_image && /_p\d+\./.test(String(c.card_image)) ? "-p" : ""}`,
+    name: String(c.card_name).replace(/\s*\((\d+)\)\s*/g, " ").replace(/\s{2,}/g, " ").trim(),
     setId: c.set_id ?? "",
     setName: c.set_name ?? "",
     localId: c.card_set_id ?? setCode,

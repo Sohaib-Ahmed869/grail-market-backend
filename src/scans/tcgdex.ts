@@ -60,7 +60,10 @@ async function visualScores(
   const out = new Map<string, number>();
   try {
     const form = new FormData();
-    form.append("imageB64", warpedImageB64);
+    // As a FILE, not a form field: starlette caps a non-file part at 1 MB and a
+    // warped card is several times that, so every one of these was rejected as a
+    // malformed body before the service saw it.
+    form.append("file", new Blob([Buffer.from(warpedImageB64, "base64")]), "card.png");
     form.append("urls", JSON.stringify(urls));
     const res = await fetch(`${VISION_URL}/similarity`, {
       method: "POST",

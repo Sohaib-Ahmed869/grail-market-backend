@@ -344,7 +344,7 @@ export class ScansService {
           identifyCard(frontRes.ocr, frontRes.warpedImageB64),
           identifyScryfall(names),
           identifyYgo(names),
-          identifyOnePiece(frontRes.ocr.setCode),
+          identifyOnePiece(frontRes.ocr.setCode, frontRes.warpedImageB64),
           identifyLorcana(names),
           identifyDigimon(names),
           identifySwu(names),
