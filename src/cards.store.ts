@@ -158,6 +158,8 @@ export function initStore(): Promise<boolean> {
 }
 
 export type StoredCard = {
+  /** the provider's full response, as stored */
+  payload?: unknown;
   cacheKey: string;
   provider: string;
   providerCardId: string | null;
@@ -217,6 +219,10 @@ export async function readCard(
       counts: { psa8: n(r.psa8_count), psa9: n(r.psa9_count), psa10: n(r.psa10_count) },
       estimated: Boolean(r.estimated),
       isMiss: Boolean(r.is_miss),
+      // The whole provider response, kept so a cache hit is as good as a live
+      // call. Without handing it back, a cached card lost every grade outside
+      // the three legacy PSA columns — which is most of them.
+      payload: r.payload ?? null,
       fetchedAt: new Date(r.fetched_at),
     };
   } catch (err) {

@@ -171,6 +171,21 @@ export function quotaStatus(): QuotaStatus {
   };
 }
 
+/** Bump when the SHAPE of a cached PptPrices changes.
+ *
+ *  A cache that outlives the shape it was written for serves the old shape
+ *  forever. When every grade started being kept rather than three PSA rungs,
+ *  the local layer went on answering with the three — so a card the provider
+ *  had told us about in full came back almost empty, and no amount of fixing
+ *  the code downstream could show what was never returned. The version is part
+ *  of the key, so old entries are simply never found rather than needing to be
+ *  hunted down and deleted.
+ *
+ *  Only the LOCAL layer's key carries it. The shared store holds the
+ *  provider's own response, which we did not shape and cannot invalidate — and
+ *  versioning that key threw away every card already paid for. */
+const CACHE_VERSION = 3;
+
 function cacheGet(key: string): PptPrices | null {
   const row = readCache.get(key) as { fetched_at: number; payload: string } | undefined;
   if (!row) return null;
@@ -246,6 +261,34 @@ function describe(
   };
 }
 
+/** One grade's price point, from the provider's shape.
+ *
+ *  Shared by the live-fetch path and the cache-hit path deliberately: they read
+ *  the same JSON, and when only the live path had this, a cached card came back
+ *  with three PSA numbers and nothing else.
+ *
+ *  Prefers the provider's FILTERED figure over its raw median. The raw median
+ *  is unfiltered, so a mistitled or damaged listing sits in it at full weight —
+ *  on a Deoxys ex PSA 9 that dragged the median to $903 against a filtered
+ *  $1,869, because the sample ran from $80 to $1,882 for the same card at the
+ *  same grade. The median is kept beside it so the two can be compared. */
+function pointFrom(g: any): GradePoint | null {
+  if (!g) return null;
+  const smart = g.smartMarketPrice ?? null;
+  const price = num(smart?.price) ?? num(g.medianPrice) ?? num(g);
+  if (price == null) return null;
+  const conf = typeof smart?.confidence === "string" ? smart.confidence : null;
+  return {
+    price,
+    count: num(g.count),
+    confidence: conf === "high" || conf === "medium" || conf === "low" ? conf : null,
+    method: typeof smart?.method === "string" ? smart.method : null,
+    low: num(g.minPrice),
+    high: num(g.maxPrice),
+    median: num(g.medianPrice),
+  };
+}
+
 export async function fetchGradedPrices(
   cardName: string,
   localId?: string | null,
@@ -255,10 +298,20 @@ export async function fetchGradedPrices(
   const key = process.env.PPT_API_KEY;
   if (!key) return empty;
 
+  // Two keys, because the two layers hold different things.
+  //
+  // The shared store holds the provider's own response, whose shape is not
+  // ours to change, so its key is the card's identity and nothing else — a row
+  // bought once must never be bought again, including after a deploy.
+  //
+  // The local layer holds OUR derived shape, which does change, so its key
+  // carries a version. Versioning both orphaned every row we had already paid
+  // for and sent the next lookup to a provider that answers 429.
   const cacheKey = `${cardName}|${localId ?? ""}|${setName ?? ""}`;
+  const localKey = `v${CACHE_VERSION}|${cacheKey}`;
 
   // 1. local cache — same machine, same day. Free and instant.
-  const hit = cacheGet(cacheKey);
+  const hit = cacheGet(localKey);
   if (hit) return hit;
 
   // 2. shared store — a card any instance has ever bought. Still free: the
@@ -266,6 +319,34 @@ export async function fetchGradedPrices(
   //    never be purchased twice.
   const stored = await readCard(cacheKey, HIT_TTL_MS, MISS_TTL_MS);
   if (stored) {
+    // Rebuild every grade from the stored payload, not just the three legacy
+    // PSA columns.
+    //
+    // A cache hit used to be strictly worse than a live call: it returned
+    // psa8/psa9/psa10 and dropped BGS, CGC, SGC, TAG and every half grade,
+    // even though the whole provider response was sitting in the same row. So
+    // an Umbreon VMAX that reports $4,250 from 412 PSA 10 sales on a live call
+    // reported nothing at all once cached — and cached is what every card is
+    // once the monthly quota is spent, which is exactly when this matters.
+    const stored_ = stored as typeof stored & { payload?: unknown };
+    // Unwrap exactly as the live path does: PPT nests the per-grade sales under
+    // ebay.salesByGrade, and reading one level shallower finds nothing while
+    // looking like it worked.
+    const ebayRoot = (stored_.payload as { ebay?: Record<string, any> } | null)?.ebay ?? null;
+    const cachedGrades = ebayRoot ? (ebayRoot.salesByGrade ?? ebayRoot) : null;
+    const byGraderCached: Record<string, Record<string, GradePoint>> = {};
+    const byGradeCached: Record<string, GradePoint> = {};
+    if (cachedGrades) {
+      for (const [key, raw] of Object.entries(cachedGrades)) {
+        const parsed = parseGradeKey(key);
+        if (!parsed) continue;
+        const pt = pointFrom(raw);
+        if (!pt) continue;
+        (byGraderCached[parsed.grader] ??= {})[parsed.grade] = pt;
+        if (parsed.grader === "PSA") byGradeCached[parsed.grade] = pt;
+      }
+    }
+
     const v: PptPrices = stored.isMiss
       ? { graded: null, rawUsd: null }
       : {
@@ -280,8 +361,10 @@ export async function fetchGradedPrices(
                   estimated: stored.estimated,
                 },
           rawUsd: stored.rawUsd,
+          byGrade: Object.keys(byGradeCached).length ? byGradeCached : null,
+          byGrader: Object.keys(byGraderCached).length ? byGraderCached : null,
         };
-    cacheSet(cacheKey, v); // warm the local layer so the next scan skips the round trip
+    cacheSet(localKey, v); // warm the local layer so the next scan skips the round trip
     console.log(`[store] hit for "${cardName}" — no credits spent`);
     return v;
   }
@@ -410,22 +493,7 @@ export async function fetchGradedPrices(
     // $1,869, because the sample ran from $80 to $1,882 for the same card at
     // the same grade. Prefer the filtered figure and keep the median beside it
     // so the two can be compared.
-    const point = (g: any): GradePoint | null => {
-      if (!g) return null;
-      const smart = g.smartMarketPrice ?? null;
-      const price = num(smart?.price) ?? num(g.medianPrice) ?? num(g);
-      if (price == null) return null;
-      const conf = typeof smart?.confidence === "string" ? smart.confidence : null;
-      return {
-        price,
-        count: num(g.count),
-        confidence: (conf === "high" || conf === "medium" || conf === "low" ? conf : null),
-        method: typeof smart?.method === "string" ? smart.method : null,
-        low: num(g.minPrice),
-        high: num(g.maxPrice),
-        median: num(g.medianPrice),
-      };
-    };
+    const point = pointFrom;
 
     // Read EVERY grade the provider tracks, not three PSA rungs.
     //
@@ -460,7 +528,7 @@ export async function fetchGradedPrices(
       byGrade: Object.keys(byGrade).length ? byGrade : null,
       byGrader: Object.keys(byGrader).length ? byGrader : null,
     };
-    cacheSet(cacheKey, result);
+    cacheSet(localKey, result);
     // keep everything the provider returned, not just the three numbers we
     // render today — re-buying a card to get one extra field is the exact
     // waste this store exists to prevent
