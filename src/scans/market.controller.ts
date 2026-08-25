@@ -3,6 +3,7 @@ import { fxRates } from "./fx.js";
 import { scanBudget } from "./budget.js";
 import { fetchListings } from "./ebaylistings.js";
 import { quotaStatus } from "./gradedprices.js";
+import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { fetchGradedPrices } from "./gradedprices.js";
@@ -24,7 +25,17 @@ export class MarketController {
   // rendering a silent blank
   @Get("quota")
   async quota() {
-    return { ...quotaStatus(), budget: await scanBudget() };
+    // Two different questions, answered separately because conflating them is
+    // what made this number untrustworthy. `scans` is what has actually
+    // happened, counted from an append-only ledger in the shared store.
+    // `budget` is what the metered providers will still allow, which is an
+    // estimate and moves for reasons a user did not cause.
+    const [status, counts, budget] = await Promise.all([
+      quotaStatus(),
+      scanCounts(),
+      scanBudget(),
+    ]);
+    return { ...status, scans: counts, budget };
   }
 
   // Live listings for one card. Kept off the scan response deliberately: a

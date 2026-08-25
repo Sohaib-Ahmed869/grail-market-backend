@@ -30,6 +30,13 @@ export function storeConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL);
 }
 
+/** The shared pool, for modules that persist alongside the price store.
+ *  Exported rather than duplicated so there is one connection pool and one
+ *  place that decides the store is unusable. */
+export function storePool(): Pool | null {
+  return getPool();
+}
+
 function getPool(): Pool | null {
   if (!storeConfigured()) return null;
   pool ??= new Pool({

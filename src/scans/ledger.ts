@@ -1,0 +1,208 @@
+import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { storePool, storeConfigured, initStore } from "../cards.store.js";
+import { db } from "../db.js";
+
+// A record of every scan, and what each one cost.
+//
+// The count used to live in a SQLite file under the working directory. That
+// file is real and it does survive a restart — but it does not survive a
+// deploy on a host with an ephemeral disk, it does not survive the repo moving,
+// and two instances each keep their own. So the number people read drifted from
+// the number that happened, which is worse than having no number.
+//
+// It also answered the wrong question. "16 scans" was never a count of scans
+// performed; it was an estimate of how many MORE the metered quota would allow,
+// derived from a provider's remaining credits. A cached card costs no credits,
+// so scanning one moved the figure not at all and the display looked stuck.
+//
+// So both are recorded, separately and honestly: what we have done, from an
+// append-only ledger, and what we can still do, from provider quotas. The
+// ledger is append-only on purpose — a usage record that can be rewritten
+// cannot be reconciled against a provider's bill.
+
+export type ScanCost = Record<string, number>;
+
+type Ctx = { scanId: string; credits: ScanCost };
+const ctx = new AsyncLocalStorage<Ctx>();
+
+let ready: Promise<boolean> | null = null;
+function ensure(): Promise<boolean> {
+  ready ??= (async () => {
+    if (!storeConfigured() || !(await initStore())) return false;
+    const p = storePool();
+    if (!p) return false;
+    try {
+      await p.query(`
+        CREATE TABLE IF NOT EXISTS scan_ledger (
+          id            TEXT PRIMARY KEY,
+          at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+          instance      TEXT,
+          outcome       TEXT NOT NULL,
+          card_name     TEXT,
+          set_name      TEXT,
+          card_number   TEXT,
+          grader        TEXT,
+          grade         NUMERIC,
+          price_usd     NUMERIC,
+          price_source  TEXT,
+          -- what this scan cost each metered provider; {} means it was served
+          -- entirely from cache and cost nothing
+          credits       JSONB NOT NULL DEFAULT '{}'::jsonb,
+          billable      BOOLEAN NOT NULL DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS scan_ledger_at ON scan_ledger (at DESC);
+      `);
+      return true;
+    } catch (err) {
+      console.warn(`[ledger] unavailable: ${(err as Error).message}`);
+      return false;
+    }
+  })();
+  return ready;
+}
+
+// Local mirror, so a scan is still counted when the shared store is down or
+// unconfigured. Reconciled by id, never double-counted.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS scan_ledger_local (
+    id TEXT PRIMARY KEY,
+    at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    credits TEXT NOT NULL DEFAULT '{}',
+    billable INTEGER NOT NULL DEFAULT 0,
+    synced INTEGER NOT NULL DEFAULT 0
+  );
+`);
+const localInsert = db.prepare(
+  "INSERT OR REPLACE INTO scan_ledger_local (id, at, outcome, credits, billable, synced) VALUES (?, ?, ?, ?, ?, ?)",
+);
+const localCount = db.prepare(
+  "SELECT COUNT(*) AS n FROM scan_ledger_local WHERE at >= ?",
+);
+
+const INSTANCE = process.env.RENDER_INSTANCE_ID ?? process.env.HOSTNAME ?? "local";
+
+/** Run a scan inside a context that collects what it spends. */
+export function withScan<T>(fn: (scanId: string) => Promise<T>): Promise<T> {
+  const scanId = randomUUID();
+  return ctx.run({ scanId, credits: {} }, () => fn(scanId));
+}
+
+/** Charge the scan in flight. Called by recordUsage, so every provider adapter
+ *  gets this for free rather than each remembering to report. */
+export function chargeScan(provider: string, units: number): void {
+  const c = ctx.getStore();
+  if (!c) return; // a call outside a scan — a search, or a warm-up
+  c.credits[provider] = (c.credits[provider] ?? 0) + units;
+}
+
+export type ScanRecord = {
+  id: string;
+  outcome: "identified" | "rejected" | "failed";
+  cardName?: string | null;
+  setName?: string | null;
+  cardNumber?: string | null;
+  grader?: string | null;
+  grade?: number | null;
+  priceUsd?: number | null;
+  priceSource?: string | null;
+};
+
+export async function recordScan(r: ScanRecord): Promise<void> {
+  const credits = ctx.getStore()?.credits ?? {};
+  const billable = Object.values(credits).some((n) => n > 0);
+  const at = new Date().toISOString();
+
+  try {
+    localInsert.run(r.id, at, r.outcome, JSON.stringify(credits), billable ? 1 : 0, 0);
+  } catch {
+    /* counting must never break a scan */
+  }
+
+  if (!(await ensure())) return;
+  const p = storePool();
+  if (!p) return;
+  try {
+    await p.query(
+      `INSERT INTO scan_ledger
+         (id, instance, outcome, card_name, set_name, card_number, grader, grade,
+          price_usd, price_source, credits, billable)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        r.id, INSTANCE, r.outcome, r.cardName ?? null, r.setName ?? null,
+        r.cardNumber ?? null, r.grader ?? null, r.grade ?? null,
+        r.priceUsd ?? null, r.priceSource ?? null,
+        JSON.stringify(credits), billable,
+      ],
+    );
+  } catch (err) {
+    console.warn(`[ledger] write failed: ${(err as Error).message}`);
+  }
+}
+
+export type ScanCounts = {
+  /** true when these come from the shared store rather than one instance's disk */
+  shared: boolean;
+  today: number;
+  month: number;
+  total: number;
+  /** scans that actually spent provider credits; the rest came from cache */
+  billableToday: number;
+  creditsToday: ScanCost;
+  lastScanAt: string | null;
+};
+
+export async function scanCounts(): Promise<ScanCounts> {
+  const dayStart = new Date().toISOString().slice(0, 10);
+  if (await ensure()) {
+    const p = storePool();
+    if (p) {
+      try {
+        const { rows } = await p.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE at >= date_trunc('day',   now()))   AS today,
+            COUNT(*) FILTER (WHERE at >= date_trunc('month', now()))   AS month,
+            COUNT(*)                                                   AS total,
+            COUNT(*) FILTER (WHERE at >= date_trunc('day', now()) AND billable) AS billable_today,
+            MAX(at)                                                    AS last_at
+          FROM scan_ledger
+        `);
+        const spend = await p.query(`
+          SELECT k AS provider, SUM(v::numeric) AS units
+          FROM scan_ledger, jsonb_each_text(credits) AS e(k, v)
+          WHERE at >= date_trunc('day', now())
+          GROUP BY k
+        `);
+        const r = rows[0] ?? {};
+        return {
+          shared: true,
+          today: Number(r.today ?? 0),
+          month: Number(r.month ?? 0),
+          total: Number(r.total ?? 0),
+          billableToday: Number(r.billable_today ?? 0),
+          creditsToday: Object.fromEntries(
+            spend.rows.map((x: any) => [x.provider, Number(x.units)]),
+          ),
+          lastScanAt: r.last_at ? new Date(r.last_at).toISOString() : null,
+        };
+      } catch (err) {
+        console.warn(`[ledger] read failed: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // Local fallback — one instance's view, and labelled as such.
+  const n = (localCount.get(dayStart) as { n: number } | undefined)?.n ?? 0;
+  const all = (db.prepare("SELECT COUNT(*) AS n FROM scan_ledger_local").get() as any)?.n ?? 0;
+  return {
+    shared: false,
+    today: n,
+    month: all,
+    total: all,
+    billableToday: 0,
+    creditsToday: {},
+    lastScanAt: null,
+  };
+}

@@ -1,4 +1,5 @@
 import { db } from "../db.js";
+import { chargeScan } from "./ledger.js";
 
 // Per-provider daily consumption, measured rather than assumed.
 //
@@ -36,6 +37,15 @@ export function recordUsage(provider: string, units = 1): void {
     bump.run(provider, today(), units);
   } catch {
     /* metering must never break a scan */
+  }
+  // Attribute the spend to the scan in flight, if there is one. Doing it here
+  // means every adapter is covered by the call it already makes, rather than
+  // each one having to remember to report separately — which is how a provider
+  // ends up silently uncounted.
+  try {
+    chargeScan(provider, units);
+  } catch {
+    /* ditto */
   }
 }
 

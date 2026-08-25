@@ -14,6 +14,7 @@ import { fetchGradedPrices, type GradePoint } from "./gradedprices.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
+import { recordScan, withScan } from "./ledger.js";
 import { writeGradePrices } from "../cards.store.js";
 
 // Mirrors TIERS in services/vision/app/pipeline/slab.py. Never price across
@@ -66,7 +67,48 @@ export class ScansService {
     front: Express.Multer.File,
     back?: Express.Multer.File,
   ): Promise<Scan> {
-    const id = randomUUID();
+    // Everything below runs inside a context that collects what each provider
+    // charged, so the ledger records a real cost rather than an assumed one.
+    //
+    // The ledger write happens HERE, where every path converges, rather than
+    // beside the final return. runScan returns early for an already-graded
+    // slab, and putting the write next to one of two returns counted one scan
+    // in three — which is precisely the drift this was meant to end.
+    return withScan(async (scanId) => {
+      const scan = await this.runScan(scanId, front, back);
+      const v = scan.valuation;
+      const sold =
+        v?.slabGrader && v?.slabGrade != null
+          ? v.pricesByGrader?.[v.slabGrader]?.[String(v.slabGrade).replace(/\.0$/, "")]?.price ??
+            null
+          : null;
+      // not awaited: worth counting, never worth delaying the answer for
+      void recordScan({
+        id: scanId,
+        outcome:
+          scan.status === "rejected"
+            ? "rejected"
+            : scan.identification
+              ? "identified"
+              : "failed",
+        cardName: scan.identification?.name ?? null,
+        setName: scan.identification?.setName ?? null,
+        cardNumber: scan.identification?.localId ?? null,
+        grader: v?.slabGrader ?? null,
+        grade: v?.slabGrade ?? null,
+        priceUsd: sold ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null,
+        priceSource: sold ? "sold" : v?.liveAsk ? "ask" : v?.tcgplayer?.market ? "catalog" : null,
+      });
+      return scan;
+    });
+  }
+
+  private async runScan(
+    scanId: string,
+    front: Express.Multer.File,
+    back?: Express.Multer.File,
+  ): Promise<Scan> {
+    const id = scanId;
     const createdAt = new Date().toISOString();
     // free text gathered along the way that might name this copy's printing
     const printingHints: string[] = [];
