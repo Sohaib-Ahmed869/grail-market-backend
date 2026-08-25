@@ -1,0 +1,38 @@
+{
+  "name": "grail-market-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GrailCard backend \u2014 card identification, grading-label reading and valuation.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "dev:vision": "node scripts/venv-python.mjs -m uvicorn app.main:app --app-dir vision --port 8100 --reload",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.mjs",
+    "test:vision": "node scripts/venv-python.mjs --cwd vision -m pytest tests -q",
+    "test:all": "npm run test && npm run test:vision",
+    "vision:install": "node scripts/venv-python.mjs -m pip install -r vision/requirements.txt"
+  },
+  "dependencies": {
+    "@grailcard/shared": "*",
+    "@nestjs/common": "^10.4.0",
+    "@nestjs/core": "^10.4.0",
+    "@nestjs/platform-express": "^10.4.0",
+    "express": "^4.19.2",
+    "pg": "^8.23.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

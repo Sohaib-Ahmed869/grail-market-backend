@@ -1,0 +1,79 @@
+# Render Blueprint — brings up the two backend services in one go.
+#   Render dashboard → New → Blueprint → pick this repo.
+#
+# The web app is NOT here: it goes to Vercel (Next.js is native there).
+#
+# Free tier reality: 512MB RAM / 0.1 CPU, and instances spin down after 15
+# minutes idle (~1 min to wake). The vision container is the memory-hungry one
+# — if it OOMs on free, move it to a Hugging Face Docker Space (2 vCPU / 16GB,
+# also free) using the SAME vision/Dockerfile and point VISION_URL at it.
+services:
+  # ── Python CV service ────────────────────────────────────────────────────
+  - type: web
+    name: grailcard-vision
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./vision/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      # Render injects PORT; the Dockerfile CMD reads it.
+      - key: OMP_NUM_THREADS
+        value: "1" # 0.1 CPU — extra OpenCV threads only cause contention
+      # memory tactic for a small instance only — it costs OCR accuracy, so it
+      # is off by default and set explicitly here
+      - key: MAX_INPUT_PX
+        value: "2000"
+
+  # ── NestJS API ───────────────────────────────────────────────────────────
+  - type: web
+    name: grailcard-api
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start --workspace .
+    healthCheckPath: /scans
+    envVars:
+      - key: NODE_VERSION
+        value: "24" # db.ts uses node:sqlite, which needs Node 22.5+
+      # NOT `fromService … property: host` — that injects the bare internal
+      # name ("grailcard-vision"), which becomes an unresolvable
+      # "https://grailcard-vision" once a scheme is added. Point at the real
+      # public host instead.
+      - key: VISION_URL
+        value: https://grailcard-vision.onrender.com
+      # Secrets are NOT in this file. Add them in the Render dashboard, or
+      # mark sync:false and Render will prompt for each on first deploy.
+      - key: XIMILAR_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: JUSTTCG_API_KEY
+        sync: false
+      - key: APITCG_API_KEY
+        sync: false
+      - key: PPT_API_KEY
+        sync: false
+      - key: CARDGRADER_API_KEY
+        sync: false
+      # Shared card store (Neon). Prices bought once are reused by every
+      # instance, so a deploy no longer starts from an empty cache.
+      - key: DATABASE_URL
+        sync: false
+      # eBay. The deletion endpoint below is a COMPLIANCE requirement: eBay
+      # refuses to issue production OAuth tokens until it answers their
+      # challenge, which is why a production keyset shows "Non Compliant".
+      # EBAY_DELETION_ENDPOINT must match the URL saved in the eBay portal
+      # exactly — it is part of the challenge hash.
+      - key: EBAY_APP_ID
+        sync: false
+      - key: EBAY_DEV_ID
+        sync: false
+      - key: EBAY_CERT_ID
+        sync: false
+      - key: EBAY_VERIFICATION_TOKEN
+        sync: false
+      - key: EBAY_DELETION_ENDPOINT
+        value: https://grailcard-api.onrender.com/ebay/deletion

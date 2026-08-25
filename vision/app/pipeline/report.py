@@ -1,0 +1,215 @@
+"""Pipeline orchestration: detect -> gate -> measure -> assemble the
+VisionAnalyzeResponse (camelCase, mirrors packages/shared)."""
+
+import base64
+from dataclasses import asdict
+
+import cv2
+import numpy as np
+
+from .authenticity import digital_source_check
+from .centering import measure_centering
+from .detect import detect_card
+from .grade import compute_grade
+from .identify import read_card_text
+from .quality import run_gate
+
+
+def _b64_png(image: np.ndarray) -> str:
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("png encode failed")
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _draw_findings(overlay, findings) -> None:
+    """Draw surface-mark boxes and corner condition rings on the overlay."""
+    oh, ow = overlay.shape[:2]
+    for c in findings.get("clusters", []):
+        x0, y0 = int(c["x"] * ow), int(c["y"] * oh)
+        x1, y1 = x0 + max(int(c["w"] * ow), 6), y0 + max(int(c["h"] * oh), 6)
+        cv2.rectangle(overlay, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4), (60, 60, 235), 2)
+
+    corner_pts = {"TL": (26, 26), "TR": (ow - 26, 26), "BL": (26, oh - 26), "BR": (ow - 26, oh - 26)}
+    for d in findings.get("corners", []):
+        pt = corner_pts.get(d["corner"])
+        if not pt:
+            continue
+        s = d["score"]
+        color = (80, 200, 60) if s >= 9 else (60, 200, 235) if s >= 7 else (60, 60, 235)
+        cv2.circle(overlay, pt, 20, color, 3)
+        cv2.putText(
+            overlay, f"{s:g}", (pt[0] - 12, pt[1] + 38),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3,
+        )
+        cv2.putText(
+            overlay, f"{s:g}", (pt[0] - 12, pt[1] + 38),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1,
+        )
+
+
+def _quality_dict(q) -> dict:
+    return {
+        "blurScore": q.blur_score,
+        "glarePct": q.glare_pct,
+        "glareRegions": q.glare_regions,
+        "cardAreaPct": q.card_area_pct,
+        "resolutionOk": q.resolution_ok,
+        "lowDetail": q.low_detail,
+    }
+
+
+def run_pipeline(
+    image: np.ndarray, include_images: bool = True, read_text: bool = True
+) -> dict:
+    det = detect_card(image)
+    gate = run_gate(det, image.shape)
+
+    # identification hints need far less resolution than grading, so a
+    # rejected scan can still tell the user which card we saw
+    ocr = read_card_text(det.warped) if (det is not None and read_text) else None
+
+    # A grading label sits OUTSIDE the card, so it is cropped away by the card
+    # detection and can never be read from the warped card alone. The retry on
+    # the full image existed, but was gated on the photo being REJECTED or
+    # low-detail — which is exactly backwards. A good, sharp photo of a slab
+    # passes the gate cleanly, so the retry never fired and the label went
+    # unread: no slab meant no answer-key identification (a Legendary
+    # Collection Charizard resolved to a Dragon Frontiers Gold Star) and no
+    # slab meant we graded a card someone had already graded.
+    #
+    # The real signal is what the comment always claimed: how much of the frame
+    # the card occupies. A slab photo leaves the card at a fraction of the
+    # frame because the case and its label surround it; a raw-card photo fills
+    # it. Below the threshold there is room for a label, so it is worth a look.
+    card_fill = None
+    if det is not None and getattr(det, "quad", None) is not None:
+        frame_area = float(image.shape[0] * image.shape[1])
+        if frame_area > 0:
+            card_fill = cv2.contourArea(det.quad.astype(np.float32)) / frame_area
+    room_for_a_label = card_fill is not None and card_fill < 0.65
+
+    if (
+        ocr is not None
+        and not ocr.get("slab")
+        and (gate.rejection is not None or gate.quality.low_detail or room_for_a_label)
+    ):
+        full_reading = read_card_text(image)
+        if full_reading.get("slab"):
+            ocr = {**ocr, "slab": full_reading["slab"]}
+            # the label also carries the collector number and set, which the
+            # card face may not have given us
+            for k in ("collectorNumber", "setCode"):
+                if not ocr.get(k) and full_reading.get(k):
+                    ocr = {**ocr, k: full_reading[k]}
+
+    if gate.rejection is not None:
+        # A rejected photo used to still return a "provisional" grade. We no
+        # longer grade at all, so there is nothing provisional to offer — the
+        # rejection and its retry hint are the whole answer.
+        return {
+            "ok": False,
+            "quality": _quality_dict(gate.quality) if det is not None else None,
+            "rejection": gate.rejection,
+            "measurement": None,
+            "grade": None,
+            "authenticity": digital_source_check(det.warped) if det is not None else None,
+            "ocr": ocr,
+            "warpedImageB64": _b64_png(det.warped) if include_images and det else None,
+            "overlayImageB64": None,
+        }
+
+    slab_read = (ocr or {}).get("slab")
+
+    # A slab photo that is too degraded to read is worse than no answer. We no
+    # longer grade these cards, so blur and glare do not cost us a grade — they
+    # cost us the LABEL, and an unread label drops the card to fuzzy name
+    # matching, which is what put a Legendary Collection Charizard in Dragon
+    # Frontiers. If the photo looks like a slab but no label came back, decline
+    # and ask for a better one rather than guessing at four figures.
+    if not slab_read and room_for_a_label and (
+        gate.quality.glare_pct >= 2.0 or gate.quality.blur_score < 80.0
+    ):
+        return {
+            "ok": False,
+            "quality": _quality_dict(gate.quality),
+            "rejection": {
+                "reason": "label_unreadable",
+                "userMessage": (
+                    "This looks like a graded card, but the label on the holder "
+                    "couldn't be read."
+                ),
+                "retryHint": (
+                    "Shoot the slab flat-on with the whole label in frame, and tilt "
+                    "it slightly away from the light so the plastic doesn't glare."
+                ),
+            },
+            "measurement": None,
+            "grade": None,
+            "authenticity": None,
+            "ocr": ocr,
+            "warpedImageB64": None,
+            "overlayImageB64": None,
+        }
+
+    # We no longer issue a condition grade for ANY card, slabbed or raw.
+    # For a slab it was second-guessing a professional; for a raw card the
+    # heuristics were producing a 2.5 off 69 "surface marks" on a clean card
+    # and then multiplying the market price by 0.25, turning an $84 card into
+    # $21. Detection quality is not good enough to move money, so it does not.
+    # We identify the card, read any grading label, and price it.
+    if True:
+        return {
+            "ok": True,
+            "quality": _quality_dict(gate.quality),
+            "rejection": None,
+            "measurement": None,
+            "grade": None,
+            "gradingSkipped": "slabbed",
+            "authenticity": digital_source_check(det.warped),
+            "ocr": ocr,
+            "warpedImageB64": _b64_png(det.warped) if include_images else None,
+            "overlayImageB64": None,
+        }
+
+    cen = measure_centering(det.warped)
+    grade = compute_grade(
+        det.warped, cen, low_detail=gate.quality.low_detail, bg_color=det.bg_color
+    )
+    sub = lambda s: {"value": s.value, "confidence": s.confidence} if s else None
+    grade_dict = {
+        "overall": grade.overall,
+        "band": {"low": grade.band_low, "high": grade.band_high},
+        "subgrades": {
+            "centering": sub(grade.centering),
+            "corners": sub(grade.corners),
+            "edges": sub(grade.edges),
+            "surface": sub(grade.surface),
+        },
+        "findings": grade.findings,
+        "method": "heuristic-v0",
+        "notes": grade.notes,
+    }
+
+    # draw detected surface marks and corner rings on the overlay
+    _draw_findings(cen.overlay, grade.findings)
+    measurement = {
+        "centering": {
+            "front": {"lr": cen.lr, "tb": cen.tb, "measurable": cen.measurable},
+            "back": None,
+            "passesAt": {"psa10": cen.passes_psa10, "psa9": cen.passes_psa9},
+            "overlayImageKey": None,  # set by the API when it stores the overlay
+        },
+        "confidence": {"centering": cen.confidence},
+    }
+    return {
+        "ok": True,
+        "quality": _quality_dict(gate.quality),
+        "rejection": None,
+        "measurement": measurement,
+        "grade": grade_dict,
+        "authenticity": digital_source_check(det.warped),
+        "ocr": ocr,
+        "warpedImageB64": _b64_png(det.warped) if include_images else None,
+        "overlayImageB64": _b64_png(cen.overlay) if include_images else None,
+    }

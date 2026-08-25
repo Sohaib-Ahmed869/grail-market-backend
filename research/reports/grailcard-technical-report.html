@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grailcard — Technical Implementation &amp; Competitive Analysis</title>
+<style>
+  @page { size: A4; margin: 22mm 18mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", -apple-system, Arial, sans-serif;
+    color: #1a1d21; font-size: 10.5pt; line-height: 1.55; margin: 0;
+  }
+  h1 { font-size: 24pt; margin: 0 0 2mm; letter-spacing: -0.5px; }
+  h2 { font-size: 14pt; margin: 10mm 0 3mm; padding-bottom: 1.5mm;
+       border-bottom: 2px solid #1a1d21; page-break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 6mm 0 2mm; page-break-after: avoid; }
+  p { margin: 0 0 3mm; }
+  .subtitle { color: #5a6472; font-size: 12pt; margin-bottom: 1mm; }
+  .meta { color: #8a94a2; font-size: 9pt; margin-bottom: 10mm; }
+  table { border-collapse: collapse; width: 100%; margin: 3mm 0 5mm; font-size: 9.5pt; page-break-inside: avoid; }
+  th { background: #1a1d21; color: #fff; text-align: left; padding: 2mm 2.5mm; font-weight: 600; }
+  td { border: 1px solid #d5dae1; padding: 1.8mm 2.5mm; vertical-align: top; }
+  tr:nth-child(even) td { background: #f4f6f9; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .callout { border-left: 4px solid #2f6fbf; background: #eef4fb; padding: 3mm 4mm; margin: 4mm 0; page-break-inside: avoid; }
+  .callout.warn { border-color: #c47f17; background: #fdf5e7; }
+  .callout.good { border-color: #2f9e5f; background: #ecf8f1; }
+  .callout b:first-child { display: block; margin-bottom: 1mm; }
+  code, .mono { font-family: Consolas, "Courier New", monospace; font-size: 9pt; background: #f0f2f5; padding: 0 1mm; border-radius: 2px; }
+  pre { font-family: Consolas, monospace; font-size: 8.5pt; background: #f0f2f5; padding: 3mm; border-radius: 3px;
+        line-height: 1.45; page-break-inside: avoid; overflow: hidden; }
+  ul, ol { margin: 0 0 3mm; padding-left: 6mm; }
+  li { margin-bottom: 1.2mm; }
+  .pagebreak { page-break-before: always; }
+  .pass { color: #1e7a47; font-weight: 700; }
+  .fail { color: #b23636; font-weight: 700; }
+  .warnc { color: #a2690f; font-weight: 700; }
+  .footer-note { color: #8a94a2; font-size: 8.5pt; margin-top: 8mm; border-top: 1px solid #d5dae1; padding-top: 2mm; }
+  .kv td:first-child { font-weight: 600; width: 34%; }
+</style>
+</head>
+<body>
+
+<h1>Grailcard</h1>
+<div class="subtitle">Technical Implementation &amp; Competitive Analysis</div>
+<div class="meta">Version 0.1 (Milestone 1 + Identification) &nbsp;·&nbsp; August 18, 2026 &nbsp;·&nbsp; Internal report</div>
+
+<h2>1. Executive Summary</h2>
+<p>
+Grailcard is a trading-card pre-grading system built on a single thesis: in a market where every
+competitor advertises unfalsifiable accuracy percentages, the defensible position is
+<b>demonstrated trustworthiness</b> — refuse bad input instead of guessing from it, output
+measurements instead of opinions, attach a confidence figure to every claim, and say plainly
+when something cannot be measured.
+</p>
+<p>
+This document describes what has been implemented, how each stage works, the measured accuracy of
+the system against ground truth, and a same-image, head-to-head comparison against
+CardGrader.AI — the most instructive result in this report. On identical input, Grailcard produced
+a small number of verifiable claims (correct identification, a centering measurement with a
+disclosed low-confidence flag, and a market price consistent with live exchange data), while
+CardGrader.AI produced a detailed, authoritative-looking report containing a misidentification
+worth a ~300× valuation error, sub-grades for physical defects on an image of a card that
+does not physically exist, and internally contradictory price estimates.
+</p>
+
+<h2>2. Design Thesis and Market Context</h2>
+<p>
+The AI pre-grading market (PreGradeCards, CardGrade.io, CardMintAI, TCGrader, ZeroPop,
+CardGrading.app, SnapGradeAI, CardGrader.AI, and others) is crowded and priced to the floor:
+entry plans near $4.99/month, per-card pricing around $0.25, free scans used for acquisition.
+Vendors self-report 87–95% accuracy on their own test sets; independent observation puts
+photo-based AI grading at roughly 70–85% agreement with PSA, usually "within one grade" — a
+tolerance that is commercially meaningless at the top of the scale, where the difference between
+a 9 and a 10 is the entire economic question.
+</p>
+<p>Grailcard's differentiation is structural, not incremental:</p>
+<ul>
+  <li><b>Refuse bad input.</b> A quality gate rejects blurry, glared, small, or low-resolution photos
+      with a specific retry instruction, at no charge — instead of returning a number from data that
+      cannot support one.</li>
+  <li><b>Measure, don't opine.</b> Centering is computed geometrically from the printed border and
+      reported as ratios (e.g. 52/48), with the measured border lines drawn on the image so the user
+      can see exactly where the measurement was taken.</li>
+  <li><b>Report uncertainty.</b> Every measurement carries a confidence score derived from signal
+      quality, and it is shown to the user — including when it is low.</li>
+  <li><b>Honest non-answers.</b> Borderless/full-art cards return "centering not measurable"
+      rather than a fabricated ratio. Claims the system cannot yet make (corners, edges, surface)
+      are absent, not invented.</li>
+</ul>
+
+<h2>3. System Architecture</h2>
+<table>
+  <tr><th>Component</th><th>Stack</th><th>Responsibility</th></tr>
+  <tr><td><b>apps/web</b> (port 3000)</td><td>Next.js 15, React 19</td>
+      <td>Scanner UI: front/back capture slots with corner brackets, animated scan sweep,
+          result report (identity, detection-line viewer, centering, valuation), recent scans.</td></tr>
+  <tr><td><b>apps/api</b> (port 8180)</td><td>NestJS, Node 24 built-in SQLite, local disk storage</td>
+      <td>Scan orchestration and persistence; calls the vision service per capture; catalog
+          identification + valuation via TCGdex; serves stored images.</td></tr>
+  <tr><td><b>services/vision</b> (port 8100)</td><td>Python 3.12, FastAPI, OpenCV, RapidOCR (ONNX)</td>
+      <td>All computer vision: detection &amp; perspective normalization, quality gate,
+          centering measurement, on-card text reading. Stateless: image in, JSON out.</td></tr>
+  <tr><td><b>packages/shared</b></td><td>TypeScript + Zod</td>
+      <td>The scan-record contract shared by web and API and mirrored by the vision service.</td></tr>
+</table>
+<p>
+All computer vision is in-house. No third-party vision API is used in production — a deliberate
+decision (§7): building on a vendor such as Ximilar (~€0.06–0.10 per graded scan) caps accuracy at
+the vendor's model, makes the product a reseller of calls every competitor can buy, and forecloses
+the differentiators above, none of which a generic API exposes. External services are limited to
+<b>commodity data</b>: the free TCGdex catalog (identification + market prices), fetched
+server-side with graceful degradation.
+</p>
+
+<h2>4. Pipeline Implementation</h2>
+
+<h3>4.1 Detection and normalization (<span class="mono">detect.py</span>)</h3>
+<p>
+The card quad is located with a two-strategy contour search: Canny edges (dilated) first, then an
+Otsu binarization fallback that still separates a light card from a darker background when heavy
+blur destroys the edge response — so a blurry photo is <i>found</i> and then rejected for the true
+reason (blur) rather than misreported as "no card". Candidate contours are filtered by area
+(2–95% of frame) and aspect ratio (0.55–0.90 short/long, around the 63×88&nbsp;mm card's 0.716), then
+perspective-warped to a canonical 750×1050 crop. Landscape shots are auto-rotated.
+</p>
+
+<h3>4.2 Quality gate (<span class="mono">quality.py</span>)</h3>
+<p>Applied most-fundamental-failure-first; every rejection carries a plain-language reason and a concrete retry hint. All thresholds live in a single config file.</p>
+<table>
+  <tr><th>Check</th><th>Method</th><th>Threshold</th><th>Rejection</th></tr>
+  <tr><td>Card present</td><td>Quad search (above)</td><td>—</td><td><span class="mono">card_not_found</span></td></tr>
+  <tr><td>Card size in frame</td><td>Quad area / frame area</td><td class="num">≥ 10%</td><td><span class="mono">card_too_small</span></td></tr>
+  <tr><td>Resolution</td><td>Card short side in source pixels</td><td class="num">≥ 450 px</td><td><span class="mono">resolution_too_low</span></td></tr>
+  <tr><td>Focus</td><td>Laplacian variance on warped crop</td><td class="num">≥ 40</td><td><span class="mono">too_blurry</span></td></tr>
+  <tr><td>Glare</td><td>Specular clusters (HSV V≥250, S≤40, connected components)</td><td class="num">≤ 4% of card</td><td><span class="mono">too_much_glare</span>, hint names the glare's location</td></tr>
+</table>
+
+<h3>4.3 Centering measurement (<span class="mono">centering.py</span>)</h3>
+<p>
+On the canonical crop the card's outer edge <i>is</i> the image edge, so centering reduces to
+locating the inner print border on each side. For each side, the mean absolute Sobel gradient is
+profiled across the central 70% band (corners excluded) within a search window covering the outer
+25% of the card; the dominant peak marks the border. Ratios are pure pixel arithmetic. The peak's
+strength relative to the profile median yields both a <b>measurability verdict</b> (ratio ≥ 3
+required — borderless cards honestly fail this) and a <b>confidence score</b>. PSA pass verdicts
+apply published standards: front ≤60/40 for a 10, ≤65/35 for a 9; back ≤75/25 and ≤90/10 when a
+back capture is provided. An annotated overlay (the four measured border lines drawn on the card)
+is returned with every measurement.
+</p>
+
+<h3>4.4 Identification (<span class="mono">identify.py</span> + API <span class="mono">tcgdex.ts</span>)</h3>
+<p>
+RapidOCR (offline ONNX; no per-call cost) reads the warped front. The title is taken from prominent
+text in the top band, cleaned of OCR artifacts (merged spaces are split on case boundaries; mangled
+"ex/GX" logo fragments are stripped); the collector number is regex-matched in the bottom band.
+The API then queries the free TCGdex catalog with progressive seeds and scores candidates by
+character-bigram Dice similarity, with a bonus when the printed collector number agrees; matches
+below 0.45 are discarded rather than guessed. Identification intentionally runs even when the
+grading gate rejects the photo — reading a title needs far less resolution than measuring a border,
+so a rejected photo still tells the user which card was seen and what it is worth. The UI always
+shows the raw OCR text and the match percentage.
+</p>
+
+<h3>4.5 Valuation</h3>
+<p>
+TCGdex card records carry live TCGplayer (USD low/mid/high/market, per print variant) and
+Cardmarket (EUR low/trend/30-day average) prices with update timestamps; these are displayed
+explicitly labeled <b>raw / ungraded</b>, with the price date. The production plan replaces
+per-request fetching with nightly snapshot ingestion into Postgres (PriceCharting for graded-slab
+prices, JustTCG for raw condition-specific prices), keeping data costs flat (&lt;$60/month) and
+independent of scan volume while accumulating proprietary price history.
+</p>
+
+<h2 class="pagebreak">5. Verification and Measured Accuracy</h2>
+<p>
+The vision pipeline is verified by a golden-fixture suite (20 tests, all passing) built on a
+synthetic generator that renders a card with <b>exactly known</b> border ratios, rotated 8° like a
+handheld shot, then composited and re-measured through the full pipeline. Because ground truth is
+exact, accuracy claims below are measurements, not estimates.
+</p>
+<table>
+  <tr><th>True L/R</th><th>True T/B</th><th>Measured L/R</th><th>Measured T/B</th><th>Error L/R (pp)</th><th>Error T/B (pp)</th></tr>
+  <tr><td class="num">50/50</td><td class="num">50/50</td><td class="num">49.5/50.5</td><td class="num">49.6/50.4</td><td class="num">0.5</td><td class="num">0.4</td></tr>
+  <tr><td class="num">60/40</td><td class="num">40/60</td><td class="num">58.7/41.3</td><td class="num">40.0/60.0</td><td class="num">1.3</td><td class="num">0.0</td></tr>
+  <tr><td class="num">40/60</td><td class="num">60/40</td><td class="num">39.1/60.9</td><td class="num">58.9/41.1</td><td class="num">0.9</td><td class="num">1.1</td></tr>
+  <tr><td class="num">55/45</td><td class="num">45/55</td><td class="num">53.6/46.4</td><td class="num">45.4/54.6</td><td class="num">1.4</td><td class="num">0.4</td></tr>
+  <tr><td class="num">35/65</td><td class="num">50/50</td><td class="num">35.5/64.5</td><td class="num">49.6/50.4</td><td class="num">0.5</td><td class="num">0.4</td></tr>
+  <tr><td class="num">65/35</td><td class="num">55/45</td><td class="num">63.6/36.4</td><td class="num">54.6/45.4</td><td class="num">1.4</td><td class="num">0.4</td></tr>
+  <tr><td class="num">58/42</td><td class="num">50/50</td><td class="num">56.4/43.6</td><td class="num">49.6/50.4</td><td class="num">1.6</td><td class="num">0.4</td></tr>
+  <tr><td class="num">64/36</td><td class="num">50/50</td><td class="num">62.7/37.3</td><td class="num">49.6/50.4</td><td class="num">1.3</td><td class="num">0.4</td></tr>
+  <tr><td class="num">72/28</td><td class="num">50/50</td><td class="num">70.0/30.0</td><td class="num">49.6/50.4</td><td class="num">2.0</td><td class="num">0.4</td></tr>
+</table>
+<p>
+<b>Mean absolute error 0.8 percentage points; maximum 2.0.</b> PSA pass/fail verdicts were correct
+in all cases, including the deliberately borderline 58/42 (passes 10) and 64/36 (9 only).
+The gate tests verify each rejection reason fires for its true cause, and that a borderless card
+returns "not measurable" rather than a number. End-to-end over HTTP (web → API → vision → SQLite →
+report), a front/back pair measured 59/41 front (true 60/40) and 68/32 back (true 70/30), with the
+combined PSA verdict correctly applying the looser back standard.
+</p>
+<div class="callout warn">
+<b>Disclosed limitation — modern thin-border cards.</b>
+On a modern ME-era card (Mega Slowbro ex) with a very thin silver frame, the border scan locked
+onto an artwork edge and reported 23/77 where truth is ~50/50. Classic-border cards measure
+correctly. Per-era border calibration is the top roadmap item; until then the product's own
+confidence score is the guardrail — thin, ambiguous border peaks produce low confidence, and that
+figure is always displayed.
+</div>
+
+<h2>6. Case Study: Same Image, Grailcard vs CardGrader.AI</h2>
+<p>
+A single test image — the official Base Set Charizard #4 render (Unlimited edition), composited
+onto a dark background at a slight angle — was submitted to both systems on August 18, 2026.
+The image is perfectly centered by construction and depicts <b>no physical card at all</b>.
+</p>
+<table>
+  <tr><th style="width:24%">Dimension</th><th>Grailcard</th><th>CardGrader.AI</th></tr>
+  <tr><td>Identification</td>
+      <td><span class="pass">Charizard, Base Set #4, Rare</span> — correct edition; OCR text and
+          100% match score shown.</td>
+      <td><span class="fail">"1999 Base Set 1st Edition Charizard Holo 4/102"</span> — the render
+          carries no 1st Edition stamp. This single error drives the entire valuation narrative.</td></tr>
+  <tr><td>Condition claims</td>
+      <td>Centering only: 52/48 L/R, 41/59 T/B, <span class="warnc">confidence 27% displayed</span>.
+          No corner/edge/surface claims — the system does not measure them yet, so it says nothing.</td>
+      <td><span class="fail">CG 9.3 with sub-grades</span> (Centering 9.1, Corners 9.3, Edges 10,
+          Surface 10) and a specific defect narrative ("one corner on the back bottom-left is not
+          perfectly crisp") — physical-condition findings, including a back analysis, for a digital
+          image with no physical card and no back photo.</td></tr>
+  <tr><td>Valuation</td>
+      <td>$852.43 TCGplayer market / €312.69 Cardmarket trend, labeled raw/ungraded, dated —
+          consistent with live exchange data for the Unlimited card.</td>
+      <td>Raw baseline $222.61 from eBay comps the report itself describes as "heavily polluted
+          with counterfeit 'PRXY' and custom-made cards"; graded estimates
+          <span class="fail">PSA&nbsp;9 = $67,000 while PSA&nbsp;10 = $10,000</span> (a 10 priced at
+          15% of a 9); headline "Potential ROI 29,997%" beside the recommendation "Don't Grade It";
+          a CG&nbsp;9.3 condition verdict valued "conservatively" at a PSA&nbsp;6–7.</td></tr>
+  <tr><td>Input scrutiny</td>
+      <td>Passed the gate (high-resolution, sharp, no glare) — see limitation below.</td>
+      <td>None apparent.</td></tr>
+</table>
+<div class="callout">
+<b>What the comparison actually shows.</b>
+The failure mode is not "their model is less accurate." It is architectural: a system designed to
+always deliver a rich answer will fabricate whatever the answer requires — an edition it cannot
+verify, corner wear that does not exist, a coherent-sounding narrative wrapped around incoherent
+numbers. A misidentified edition alone turned a ~$850 card into a "$67,000" one. Grailcard's design
+makes fewer claims, and each is traceable: the OCR text is shown, the measured border lines are
+drawn on the image, the confidence is printed, and the capabilities it lacks are simply absent
+from the report.
+</div>
+<div class="callout warn">
+<b>Grailcard's own errors in this test, disclosed.</b>
+(1) The T/B measurement of 41/59 on a perfectly centered render is ~9pp off — the composite's
+JPEG compression and the render's border profile produced weak gradient peaks, and the system
+flagged exactly that by reporting 27% confidence; the number should be read accordingly.
+(2) More fundamentally, <b>both</b> systems analyzed a picture of a digital image as though it
+were a physical card. Grailcard should detect and refuse screen photos, prints, and renders
+(no print grain, no paper texture); this authenticity gate is on the roadmap and is precisely the
+kind of refusal the product's thesis demands.
+</div>
+
+<h2 class="pagebreak">7. Competitive Landscape</h2>
+<table>
+  <tr><th>Competitor</th><th>Model</th><th>Pricing signal (2026)</th><th>Structural position</th></tr>
+  <tr><td>CardGrader.AI</td><td>Photo app + eBay comps + conversational "Carl"; grade, ROI, listing automation</td>
+      <td>Freemium; eBay affiliate revenue</td>
+      <td>Maximal-answer design: always returns full grade + valuation narrative (see §6).</td></tr>
+  <tr><td>PreGradeCards, CardGrade.io, TCGrader, ZeroPop, SnapGradeAI, CardGrading.app, et al.</td>
+      <td>Photo → PSA-style 1–10 estimate</td>
+      <td>~$4.99/mo entry; ~$0.25/card; one vendor offers unlimited $10/mo</td>
+      <td>Undifferentiated; compete on self-reported accuracy (87–95% on internal sets).</td></tr>
+  <tr><td>CardGrade "Forensic" tier</td><td>Guided per-corner capture, premium price</td><td>Premium per-card</td>
+      <td>Validates that capture quality is the real bottleneck; also offers a 2-grade credit-back guarantee.</td></tr>
+  <tr><td>Ximilar</td><td>B2B vision API (identify, grade, centering)</td>
+      <td>Metered credits: full grade ≈ €0.06–0.10/scan at plan rates</td>
+      <td>Supplies the "generic wrapper" tier; does not store images; no input gate, bands, or confidence surface.</td></tr>
+  <tr><td>TAG / AGS</td><td>Mail-in machine grading (physical scanners)</td><td>Per-slab fees, days–weeks turnaround</td>
+      <td>High accuracy, zero instant-answer utility; complementary rather than competitive.</td></tr>
+</table>
+<p>
+Grailcard's cost structure against this field: all vision in-house at ~$0.003 marginal cost per scan
+(compute + storage), identification and valuation on free catalog data, and a planned flat
+&lt;$60/month for premium price feeds — versus €0.06–0.10/scan perpetual COGS and a shared accuracy
+ceiling for every wrapper built on the same vendor API.
+</p>
+
+<h2>8. Current Limitations</h2>
+<ul>
+  <li><b>Centering only.</b> Corners, edges, and surface are not yet analyzed; the product makes no
+      claims about them. (Corner-macro capture and trained per-criterion models are Phases 3–4.)</li>
+  <li><b>Modern thin-border cards</b> can mislead the border scan (§5); low confidence is the
+      current guardrail, per-era calibration the fix.</li>
+  <li><b>No authenticity / digital-source detection.</b> A high-quality render or screen photo passes
+      the gate (§6). Planned: texture/print-grain analysis to refuse non-physical sources.</li>
+  <li><b>Valuation is raw-market only.</b> Graded-slab prices, population reports, and the
+      submit-or-not expected-value calculation await the paid data integrations.</li>
+  <li><b>Identification is OCR-driven.</b> Extremely low-resolution or non-Latin cards can fail to
+      match; the embedding-based visual index (DINOv2 + pgvector) is the Phase 2 upgrade.</li>
+</ul>
+
+<h2>9. Roadmap</h2>
+<ol>
+  <li>Per-era border calibration keyed off identification (fixes modern thin-border centering).</li>
+  <li>Authenticity gate: refuse renders, screen photos, and prints.</li>
+  <li>Live guided capture in-browser (corner brackets with real-time quality checks before the shot).</li>
+  <li>Embedding-based identification index; corner-macro captures; corner/edge analyzers.</li>
+  <li>Graded-price data + population reports → grade-band probabilities and submission ROI.</li>
+  <li>Public prediction-vs-actual dashboard verified against PSA cert numbers — the falsifiable
+      accuracy claim no competitor currently publishes.</li>
+</ol>
+
+<div class="footer-note">
+Grailcard internal technical report, August 18, 2026. Accuracy figures in §5 are reproducible via
+<span class="mono">npm run test:vision</span> (20 tests) and the synthetic generator in
+<span class="mono">services/vision/tests/synth.py</span>. CardGrader.AI output in §6 quoted from a
+user session of August 18, 2026 on the same test image; market context (§2, §7) from vendor sites
+and public documentation retrieved August 2026 — pricing in this space changes monthly and should be
+re-verified before external use. Market data: TCGdex (tcgdex.dev), prices updated August 17, 2026.
+</div>
+
+</body>
+</html>

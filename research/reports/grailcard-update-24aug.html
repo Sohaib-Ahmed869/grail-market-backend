@@ -1,0 +1,269 @@
+<title>GrailCard Accuracy Update</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+  :root {
+    --ground:#FFFFFF; --surface:#FFFFFF; --surface-2:#F6F8FB;
+    --ink:#111721; --ink-soft:#2C3542; --muted:#5C6779;
+    --hair:#DCE2EC; --hair-strong:#C3CCDA;
+    --gold:#9A6408; --gold-wash:rgba(154,100,8,.08);
+    --good:#0E6640; --good-wash:rgba(14,102,64,.09);
+    --bad:#A33830;  --bad-wash:rgba(163,56,48,.07);
+  }
+  @page { size: 1240px 1754px; margin: 0; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:"Outfit",ui-sans-serif,system-ui,sans-serif;
+    font-size:12.5px; line-height:1.48; -webkit-font-smoothing:antialiased;
+  }
+  .page { width:1240px; height:1754px; padding:40px 52px 26px; overflow:hidden; }
+  h1 { margin:0; font-size:34px; font-weight:800; letter-spacing:-.028em; line-height:1.05; }
+  h2 { margin:0 0 10px; font-size:16px; font-weight:700; letter-spacing:-.01em; }
+  p { margin:0; }
+  .mono { font-family:"JetBrains Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+  .eyebrow { font-family:"JetBrains Mono",monospace; font-size:10px; letter-spacing:.18em;
+             text-transform:uppercase; color:var(--gold); font-weight:700; }
+  .sub { color:var(--ink-soft); font-size:14px; font-weight:300; max-width:92ch; margin-top:8px; }
+  .rule { height:3px; border-radius:2px; margin:12px 0 14px; max-width:220px;
+          background:linear-gradient(90deg,#E0A23C,#C7568B 30%,#6534E0 60%,#34B98A); }
+  .head-meta { display:flex; gap:24px; flex-wrap:wrap; margin-top:10px; padding-top:10px;
+               border-top:1px solid var(--hair); font-size:12px; color:var(--muted); }
+  .head-meta b { color:var(--ink); }
+
+  section { margin-top:18px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+
+  .stat { border:1px solid var(--hair); border-radius:11px; padding:11px 13px; background:var(--surface-2); }
+  .stat-n { font-family:"JetBrains Mono",monospace; font-size:23px; font-weight:700;
+            letter-spacing:-.03em; color:var(--gold); line-height:1.1; }
+  .stat-l { font-size:11.5px; color:var(--muted); margin-top:3px; line-height:1.4; }
+
+  table { border-collapse:collapse; width:100%; font-size:11.5px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--hair); vertical-align:top; }
+  th { font-family:"JetBrains Mono",monospace; font-size:9.5px; letter-spacing:.12em;
+       text-transform:uppercase; color:var(--muted); font-weight:500; white-space:nowrap; }
+  tbody tr:last-child td { border-bottom:0; }
+  td.num { font-family:"JetBrains Mono",monospace; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .wrap { border:1px solid var(--hair); border-radius:11px; overflow:hidden; }
+  .was { color:var(--bad); text-decoration:line-through; }
+  .now { color:var(--good); font-weight:700; }
+  .pill { display:inline-block; font-family:"JetBrains Mono",monospace; font-size:9.5px;
+          font-weight:700; letter-spacing:.06em; padding:2px 7px; border-radius:999px;
+          border:1px solid currentColor; white-space:nowrap; }
+  .pill.ok { color:var(--good); background:var(--good-wash); }
+  .pill.no { color:var(--bad);  background:var(--bad-wash); }
+
+  ul { margin:0; padding-left:17px; display:flex; flex-direction:column; gap:5px; }
+  li { line-height:1.5; }
+  .card { border:1px solid var(--hair); border-radius:11px; padding:12px 14px; background:var(--surface-2); }
+  .card.good { border-color:var(--good); background:var(--good-wash); }
+  .card.bad  { border-color:var(--bad);  background:var(--bad-wash); }
+  .card h2 { margin-bottom:7px; }
+  .note { font-size:11px; color:var(--muted); line-height:1.5; }
+  footer { margin-top:16px; padding-top:10px; border-top:1px solid var(--hair);
+           font-size:11px; color:var(--muted); }
+</style>
+
+<div class="page">
+
+  <div class="eyebrow">GrailCard · Engineering update · 24 August 2026</div>
+  <h1>Valuation accuracy: measured against Collectr</h1>
+  <div class="rule"></div>
+  <p class="sub">
+    Today's work addressed six defects raised from client testing. The system no longer
+    grades cards; it identifies the printing, reads the grading label, and prices that
+    exact grade from completed sales. Accuracy is stated against Collectr as the
+    reference, on the cards where a direct comparison exists.
+  </p>
+  <div class="head-meta">
+    <span><b>13</b> commits</span>
+    <span><b>55</b> automated tests, all passing</span>
+    <span><b>24</b> new slab fixtures</span>
+    <span><b>14</b> grading companies recognised</span>
+  </div>
+
+  <!-- ── HEADLINE ACCURACY ─────────────────────────────────────────── -->
+  <section>
+    <h2>Accuracy against the reference</h2>
+    <div class="wrap">
+      <table>
+        <thead>
+          <tr><th>Card</th><th>Grade read</th><th>Collectr</th><th>GrailCard now</th><th>Variance</th><th>Before today</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Deoxys ex</b> · EX Emerald #93</td>
+            <td class="num">PSA 9</td>
+            <td class="num">$1,864.96</td>
+            <td class="num now">$1,868.84</td>
+            <td class="num"><span class="pill ok">+0.21%</span></td>
+            <td class="num was">$903.24</td>
+          </tr>
+          <tr>
+            <td><b>Charizard ☆ δ Gold Star</b> · EX Dragon Frontiers #100</td>
+            <td class="num">BGS 8.5</td>
+            <td class="num">$15,000.00</td>
+            <td class="num now">$14,299.00</td>
+            <td class="num"><span class="pill ok">−4.7%</span></td>
+            <td class="num was">$15.56</td>
+          </tr>
+          <tr>
+            <td><b>Umbreon VMAX</b> alt-art · Evolving Skies #215</td>
+            <td class="num">PSA 10</td>
+            <td class="num">—</td>
+            <td class="num now">$4,250.00</td>
+            <td class="num note">no reference</td>
+            <td class="num was">$200 (wrong card #95)</td>
+          </tr>
+          <tr>
+            <td><b>Charizard</b> · Legendary Collection #3</td>
+            <td class="num">PSA 5</td>
+            <td class="num">—</td>
+            <td class="num now">$529.59 <span class="note">(PSA 8 rung)</span></td>
+            <td class="num note">no reference</td>
+            <td class="num was">wrong card entirely</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:9px">
+      The Gold Star variance is expected and disclosed in-product: it is a <b>Beckett</b> slab and
+      every sale comp available to us is a <b>PSA</b> sale, so the figure is the nearest PSA tier
+      rather than a recorded BGS sale. The interface says so rather than presenting it as a match.
+    </p>
+  </section>
+
+  <!-- ── CLIENT ISSUES ─────────────────────────────────────────────── -->
+  <section>
+    <h2>Issues raised by the client, and what each turned out to be</h2>
+    <div class="wrap">
+      <table>
+        <thead><tr><th style="width:20%">Reported</th><th style="width:42%">Actual cause</th><th>Resolution</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Wrong card identified</b></td>
+            <td>The grading label was read but discarded. Where the label's grade digit was unreadable, the whole label was thrown away, dropping the card to fuzzy name matching — a Legendary Collection Charizard resolved to Dragon Frontiers, and a Deoxys ex to POP Series 4.</td>
+            <td>Failing to read a grade is no longer treated as evidence the card is ungraded. The label's set and number stay available for identification, and every plausible label line is scored against the catalogue.</td>
+          </tr>
+          <tr>
+            <td><b>Beckett shown as PSA</b></td>
+            <td>When the company logo failed to OCR, the code <i>guessed</i>, and the guess defaulted to PSA.</td>
+            <td>Detection now keys on markers Beckett prints and PSA never does — the four subgrade captions and the “+” suffix. Where nothing indicates a company it reports unknown instead of inventing one.</td>
+          </tr>
+          <tr>
+            <td><b>Grading wildly wrong</b><br><span class="note">51 marks on a clean card</span></td>
+            <td>The v0 heuristics were not fit to move money, and their output was also being applied as a price multiplier.</td>
+            <td>Grading removed entirely — see below.</td>
+          </tr>
+          <tr>
+            <td><b>PSA 9 priced at ~$150</b></td>
+            <td>Two faults stacked: the wrong card, and a raw price quoted for a card known to be slabbed.</td>
+            <td>A raw price is never quoted for a slabbed card. Where the grade cannot be read the price is withheld and the state is named.</td>
+          </tr>
+          <tr>
+            <td><b>Raw card under-valued</b><br><span class="note">$84 shown as $21</span></td>
+            <td>Our own grade of 2.5 was applied as a 0.25 multiplier against the market price.</td>
+            <td>Condition adjustment removed with the grade that produced it. A raw card is quoted at the raw market price.</td>
+          </tr>
+          <tr>
+            <td><b>Prices showing <span class="mono">$NaN</span></b></td>
+            <td>Deploy skew — the browser held an older bundle expecting a plain number while the API had moved to a richer object.</td>
+            <td>Tiles accept either shape. A stale price is recoverable; a price reading NaN is not.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── ROOT CAUSE ────────────────────────────────────────────────── -->
+  <section>
+    <h2>The two changes that produced most of the accuracy gain</h2>
+    <div class="grid2">
+      <div class="card">
+        <h2>Reading the provider's filtered price</h2>
+        <p class="note">
+          The price source publishes two figures per grade: a raw median and a filtered,
+          recency-weighted price. We were reading the raw one. On the Deoxys, the sample
+          ran from <span class="mono">$80.63</span> to <span class="mono">$1,882.55</span>
+          for the same card at the same grade — mistitled and damaged listings sitting in
+          the median at full weight. The filtered figure is
+          <span class="mono">$1,868.84</span>. Across the tested set the two differ by
+          <b>−51% to +107%</b>.
+        </p>
+      </div>
+      <div class="card">
+        <h2>Reading the grade word, not the digit</h2>
+        <p class="note">
+          PSA prints the same fact twice, and the two are not equally legible. OCR read the
+          isolated <span class="mono">9</span> on a MINT label as a
+          <span class="mono">6</span>, and sometimes dropped it entirely. PSA's scale is
+          published and fixed — MINT is always 9 — so the multi-character word now decides
+          and the digit only confirms.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── REMOVED / ADDED ───────────────────────────────────────────── -->
+  <section>
+    <div class="grid2">
+      <div class="card bad">
+        <h2>Removed</h2>
+        <ul class="note">
+          <li><b>Our condition grading</b>, on every card — slabbed and raw</li>
+          <li><b>Sub-grades</b> for corners, edges and surface</li>
+          <li><b>Surface-mark detection</b> and the annotated detection view</li>
+          <li><b>Centering measurement</b> and its PSA pass/fail verdict</li>
+          <li><b>The condition multiplier</b> that discounted market prices</li>
+          <li><b>Grade / don't-grade recommendations</b> and net-profit tables</li>
+          <li><b>Provisional grades</b> previously returned on rejected photos</li>
+        </ul>
+        <p class="note" style="margin-top:8px">
+          A card already certified by PSA or Beckett does not need our opinion, and for a raw
+          card the heuristics were not accurate enough to influence a price.
+        </p>
+      </div>
+      <div class="card good">
+        <h2>Added</h2>
+        <ul class="note">
+          <li><b>A grade tuple</b> — company, grade, qualifier, label variant, sub-grades, tier — replacing a single number</li>
+          <li><b>14 grading companies</b>, including Beckett half-grades, BVG, BCCG, Black Label, CGC's two tens and SGC's legacy 100-point scale</li>
+          <li><b>Guards</b> against “PSA 10 candidate”, multi-card lots and Raw Card Review being read as certifications</li>
+          <li><b>Prices per grading company</b>, with an honest empty state where we hold no data for that company</li>
+          <li><b>Sample size and confidence</b> on every figure; a single-sale price is flagged as an anecdote</li>
+          <li><b>Rejection of unreadable slab photos</b> rather than guessing</li>
+          <li><b>Paste-a-screenshot</b> capture</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── EXTRACTION ────────────────────────────────────────────────── -->
+  <section>
+    <h2>Label-reading accuracy, measured</h2>
+    <div class="grid4">
+      <div class="stat"><div class="stat-n">21%</div><div class="stat-l">slab fixtures passing before today <span class="mono">(5/24)</span></div></div>
+      <div class="stat"><div class="stat-n">100%</div><div class="stat-l">passing now <span class="mono">(24/24)</span></div></div>
+      <div class="stat"><div class="stat-n">4/4</div><div class="stat-l">real client photos identified and graded correctly</div></div>
+      <div class="stat"><div class="stat-n">55</div><div class="stat-l">automated tests, all passing</div></div>
+    </div>
+    <p class="note" style="margin-top:9px">
+      The fixture set encodes the failure catalogue: Beckett 9.5 with sub-grades, Black Label,
+      BCCG (a discount tier that a naive parser prices as a gem 10 — a 10–50× overvaluation),
+      BVG, Raw Card Review, PSA qualifiers, CGC's ambiguous 10, SGC 88 on the legacy scale, and
+      decimal grades from emerging graders.
+    </p>
+  </section>
+
+  <footer>
+    Figures are estimates of market value drawn from completed sales, not appraisals.
+    Comparison prices observed on Collectr, 24 August 2026. Beckett-certified cards are
+    priced from the nearest PSA tier because no Beckett sales feed is currently available;
+    this is disclosed in-product on every affected card.
+  </footer>
+</div>

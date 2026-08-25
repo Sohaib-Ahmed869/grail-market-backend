@@ -1,0 +1,22 @@
+# Build context is the REPO ROOT (see vision/Dockerfile).
+# Everything here is uploaded to the builder before anything runs, so keep the
+# heavy local-only directories out of it.
+**/node_modules/
+**/.next/
+**/.venv/
+**/.toolchain/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+
+apps/
+packages/
+scripts/
+docs/
+samples/
+vision/tests/
+vision/pytest.ini
+
+.git/
+.github/
+*.md

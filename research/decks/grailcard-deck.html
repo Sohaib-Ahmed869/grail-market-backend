@@ -1,0 +1,920 @@
+<title>Inside GrailCard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+  /* ============================================================
+     TOKENS — light is the designed default (cool acrylic slab).
+     Dark is a considered counterpart, not an inversion.
+     ============================================================ */
+  :root {
+    --ground:      #EEF1F6;
+    --surface:     #FFFFFF;
+    --surface-2:   #F6F8FB;
+    --ink:         #111721;
+    --ink-soft:    #2C3542;
+    --muted:       #67728A;
+    --hair:        #DCE2EC;
+    --hair-strong: #C3CCDA;
+    --gold:        #B0730A;
+    --gold-wash:   rgba(176, 115, 10, 0.09);
+    --verified:    #12724A;
+    --verified-wash: rgba(18, 114, 74, 0.10);
+    --estimated:   #A2580C;
+    --estimated-wash: rgba(162, 88, 12, 0.10);
+    --stop:        #B23B33;
+    --shadow: 0 1px 2px rgba(17, 23, 33, .04), 0 12px 32px rgba(17, 23, 33, .07);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E1219;
+      --surface:     #161C26;
+      --surface-2:   #1D2531;
+      --ink:         #ECEFF4;
+      --ink-soft:    #C7CEDA;
+      --muted:       #8D99AD;
+      --hair:        #29323F;
+      --hair-strong: #3A4553;
+      --gold:        #E9A93C;
+      --gold-wash:   rgba(233, 169, 60, 0.12);
+      --verified:    #46C88C;
+      --verified-wash: rgba(70, 200, 140, 0.13);
+      --estimated:   #E2A24E;
+      --estimated-wash: rgba(226, 162, 78, 0.13);
+      --stop:        #E8776C;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.45);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E1219;
+    --surface:     #161C26;
+    --surface-2:   #1D2531;
+    --ink:         #ECEFF4;
+    --ink-soft:    #C7CEDA;
+    --muted:       #8D99AD;
+    --hair:        #29323F;
+    --hair-strong: #3A4553;
+    --gold:        #E9A93C;
+    --gold-wash:   rgba(233, 169, 60, 0.12);
+    --verified:    #46C88C;
+    --verified-wash: rgba(70, 200, 140, 0.13);
+    --estimated:   #E2A24E;
+    --estimated-wash: rgba(226, 162, 78, 0.13);
+    --stop:        #E8776C;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.45);
+  }
+
+  /* ============================================================ BASE */
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Outfit", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 17px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .deck { scroll-snap-type: y proximity; }
+  .slide {
+    scroll-snap-align: start; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 40px 24px;
+  }
+  .sheet {
+    width: min(1100px, 100%);
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 20px; box-shadow: var(--shadow);
+    padding: 0 0 clamp(30px, 4vw, 48px); overflow: hidden;
+  }
+  .label-strip {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding: 14px clamp(22px, 4vw, 46px);
+    border-bottom: 1px solid var(--hair); background: var(--surface-2);
+  }
+  .strip-eyebrow {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px;
+    font-weight: 500; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  }
+  .strip-grade {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px;
+    font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums;
+  }
+  .body-pad { padding: clamp(26px, 3.6vw, 42px) clamp(22px, 4vw, 46px) 0; }
+
+  /* ============================================================ TYPE */
+  h1, h2, h3 { margin: 0; text-wrap: balance; letter-spacing: -0.025em; font-weight: 700; }
+  h1 { font-size: clamp(38px, 6vw, 68px); line-height: 1.04; font-weight: 800; }
+  h2 { font-size: clamp(26px, 3.4vw, 38px); line-height: 1.12; }
+  h3 { font-size: 18px; line-height: 1.3; font-weight: 600; }
+  p { margin: 0; }
+  .lede { font-size: clamp(17px, 1.9vw, 20px); color: var(--ink-soft); max-width: 64ch; font-weight: 300; }
+  .note { font-size: 14.5px; color: var(--muted); max-width: 70ch; }
+  .stack { display: flex; flex-direction: column; gap: 16px; }
+  .stack-sm { display: flex; flex-direction: column; gap: 8px; }
+  .stack-lg { display: flex; flex-direction: column; gap: 28px; }
+  strong { font-weight: 600; color: var(--ink); }
+  em { font-style: normal; color: var(--gold); font-weight: 600; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  /* ============================================================ COVER */
+  .wordmark {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px;
+    font-weight: 700; letter-spacing: .32em; color: var(--gold); text-transform: uppercase;
+  }
+  .holo-seam {
+    height: 4px; border-radius: 999px; margin: 24px 0 28px; max-width: 340px;
+    background: linear-gradient(90deg,#E0A23C 0%,#C7568B 22%,#6534E0 44%,#2E8FD0 66%,#34B98A 84%,#E0A23C 100%);
+    opacity: .92;
+  }
+  .cover-meta {
+    display: flex; flex-wrap: wrap; gap: 14px 34px;
+    margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--hair);
+  }
+  .cover-meta div { display: flex; flex-direction: column; gap: 1px; }
+  .cover-meta dt {
+    font-family: "JetBrains Mono", monospace; font-size: 10px;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  }
+  .cover-meta dd { margin: 0; font-size: 15px; font-weight: 500; }
+
+  /* ============================================================ PARTS */
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; }
+
+  .tile {
+    background: var(--surface-2); border: 1px solid var(--hair);
+    border-radius: 13px; padding: 18px; display: flex; flex-direction: column; gap: 7px;
+  }
+  .tile-top {
+    font-family: "JetBrains Mono", monospace; font-size: 10px;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  }
+
+  .steps { display: flex; flex-direction: column; gap: 11px; }
+  .step {
+    display: grid; grid-template-columns: 34px 1fr; gap: 16px; align-items: start;
+    background: var(--surface-2); border: 1px solid var(--hair);
+    border-left: 3px solid var(--hair-strong); border-radius: 12px; padding: 15px 17px;
+  }
+  .step.is-key { border-left-color: var(--gold); background: var(--gold-wash); }
+  .step-n {
+    font-family: "JetBrains Mono", monospace; font-size: 14px; font-weight: 700;
+    color: var(--muted); padding-top: 1px; font-variant-numeric: tabular-nums;
+  }
+  .step.is-key .step-n { color: var(--gold); }
+  .step-fact {
+    font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--ink-soft);
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 7px; padding: 6px 9px; display: inline-block; margin-top: 3px;
+  }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .chip.verified  { color: var(--verified);  background: var(--verified-wash); }
+  .chip.estimated { color: var(--estimated); background: var(--estimated-wash); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; padding: 11px 13px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  th {
+    font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--muted); font-weight: 500; white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .scroll-x { overflow-x: auto; border: 1px solid var(--hair); border-radius: 13px; }
+  .scroll-x table { min-width: 720px; }
+
+  /* price ladder */
+  .price-rows { display: flex; flex-direction: column; gap: 1px; background: var(--hair);
+                border: 1px solid var(--hair); border-radius: 13px; overflow: hidden; }
+  .price-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+               background: var(--surface); padding: 14px 18px; }
+  .price-row.is-hero { background: var(--gold-wash); }
+  .price-row .k { font-size: 15px; color: var(--muted); }
+  .price-row.is-hero .k { color: var(--ink); font-weight: 600; }
+  .price-row .v { font-family: "JetBrains Mono", monospace; font-size: 19px; font-weight: 700;
+                  font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .price-row.is-hero .v { color: var(--gold); font-size: 23px; }
+
+  /* evidence panel */
+  .sample { border: 1px solid var(--hair); border-radius: 13px; overflow: hidden; }
+  .sample-head {
+    background: var(--verified-wash); border-bottom: 1px solid var(--hair); padding: 13px 17px;
+    display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  }
+  .sample-v { font-family: "JetBrains Mono", monospace; font-size: 25px; font-weight: 700;
+              color: var(--verified); font-variant-numeric: tabular-nums; }
+  .sample-body { padding: 15px 17px; display: flex; flex-direction: column; gap: 11px; }
+  .spread { display: flex; flex-direction: column; gap: 5px; }
+  .spread-bar { position: relative; height: 26px; background: var(--surface-2);
+                border: 1px solid var(--hair); border-radius: 7px; overflow: hidden; }
+  .spread-fill { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
+  .spread-tick { position: absolute; top: -2px; bottom: -2px; width: 2px; }
+  .spread-ends { display: flex; justify-content: space-between;
+                 font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted); }
+
+  .rule-list { border: 1px solid var(--hair); border-radius: 13px; overflow: hidden; }
+  .rule { display: grid; grid-template-columns: 22px 1fr; gap: 13px; padding: 14px 17px;
+          border-bottom: 1px solid var(--hair); background: var(--surface); }
+  .rule:last-child { border-bottom: 0; }
+  .rule-x { color: var(--stop); font-weight: 700; font-size: 15px; line-height: 1.55; }
+
+  figure { margin: 0; }
+  figcaption { margin-top: 13px; font-size: 14px; color: var(--muted); max-width: 76ch; }
+  .diagram-wrap { overflow-x: auto; padding: 4px 0 8px; }
+  svg.arch { display: block; width: 100%; min-width: 900px; height: auto; color: var(--ink); }
+  .fig-box { fill: var(--surface-2); stroke: var(--hair-strong); }
+  .fig-box-key { fill: var(--gold-wash); stroke: var(--gold); }
+  .fig-t  { fill: var(--ink); font-family: "Outfit", sans-serif; font-size: 13px; font-weight: 500; }
+  .fig-tb { fill: var(--ink); font-family: "Outfit", sans-serif; font-size: 14px; font-weight: 700; }
+  .fig-tm { fill: var(--muted); font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: .1em; }
+  .fig-ta { fill: var(--muted); font-family: "Outfit", sans-serif; font-size: 11.5px; font-weight: 500; }
+  .fig-gold { fill: var(--gold); }
+  .fig-line { stroke: var(--hair-strong); stroke-width: 1.6; fill: none; }
+  .fig-line-key { stroke: var(--gold); stroke-width: 2; fill: none; }
+  .fig-line-stop { stroke: var(--stop); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+  .fig-lane { fill: none; stroke: var(--hair-strong); stroke-dasharray: 3 4; }
+
+  footer.end { text-align: center; padding: 36px 24px 60px; color: var(--muted); font-size: 14px; }
+
+  @media (max-width: 860px) {
+    .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    .slide { min-height: auto; padding: 18px 14px; }
+    body { font-size: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="deck">
+
+  <!-- ============ 01 COVER ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Grailcard · System overview</span>
+        <span class="strip-grade">01</span>
+      </div>
+      <div class="body-pad">
+        <div class="wordmark">Grailcard</div>
+        <div class="holo-seam"></div>
+        <h1>Photograph a card.<br>Know what it is,<br>and what it's worth.</h1>
+        <p class="lede" style="margin-top:22px">
+          The system identifies the exact printing, measures the card's condition against the
+          professional grading standard, and values it from real completed sales — in
+          Australian dollars.
+        </p>
+        <dl class="cover-meta">
+          <div><dt>Time per card</dt><dd>About 45 seconds</dd></div>
+          <div><dt>Condition</dt><dd>Measured to PSA tolerance</dd></div>
+          <div><dt>Valuation</dt><dd>From completed sales, in AUD</dd></div>
+          <div><dt>Coverage</dt><dd>8 card games</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 02 WHAT IT DOES ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">What the system does</span>
+        <span class="strip-grade">02</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Three questions, answered in order</h2>
+          <p class="lede">
+            Each stage depends on the one before it. Getting the printing wrong makes every
+            number after it meaningless, so identification comes first.
+          </p>
+        </div>
+
+        <div class="grid-3">
+          <div class="tile">
+            <span class="tile-top">Stage one</span>
+            <h3>Which card is this?</h3>
+            <p class="note">
+              Down to the set and the collector number. Two cards can share a name and differ in
+              value a thousandfold, so this is settled before anything else.
+            </p>
+          </div>
+          <div class="tile">
+            <span class="tile-top">Stage two</span>
+            <h3>What condition is it in?</h3>
+            <p class="note">
+              Centering measured from the printed border and compared to the PSA standard.
+              Surface marks found and shown on the card itself.
+            </p>
+          </div>
+          <div class="tile">
+            <span class="tile-top">Stage three</span>
+            <h3>What is it worth?</h3>
+            <p class="note">
+              Graded value if it is in a slab, raw value if it is not — taken from real completed
+              sales and converted to Australian dollars.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="tile" style="border-color:var(--gold); background:var(--gold-wash)">
+            <span class="tile-top" style="color:var(--gold)">The commercial point</span>
+            <p class="note">
+              A card in a grading slab is worth its <strong>graded</strong> price. Most price
+              guides quote the raw, ungraded figure. For the card on slide 06 that difference is
+              A$5,580 against A$19,949 — the same object, described two ways.
+            </p>
+          </div>
+          <div class="tile">
+            <span class="tile-top">What it does not claim</span>
+            <p class="note">
+              The system identifies a card; it does not authenticate one. It can tell you which
+              card this is meant to be, not that it is genuine. High-value cards should still go
+              to a grading company.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 03 ARCHITECTURE ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">The system on one page</span>
+        <span class="strip-grade">03</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>How the pieces fit together</h2>
+          <p class="lede">
+            Condition is measured on our own infrastructure and never leaves it. Only the card's
+            identity and its price reach outside, and both are stored so the same card is never
+            looked up twice.
+          </p>
+        </div>
+
+        <figure>
+          <div class="diagram-wrap">
+            <svg class="arch" viewBox="0 0 1280 560" role="img"
+                 aria-label="A photo enters a measurement stage that finds the card, checks photo quality, measures the borders and reads the slab label. Identification tries the slab label first, then catalogue matching, then an assisted match that is re-verified against the catalogue. Pricing checks stored prices before fetching completed sale prices and raw market prices, then converts to Australian dollars. The result carries the grade, the value and the evidence. Photos that fail the quality check stop early without a grade, and condition passes straight to the result without leaving our infrastructure.">
+              <defs>
+                <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+                </marker>
+                <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" class="fig-gold"/>
+                </marker>
+                <marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#B23B33"/>
+                </marker>
+              </defs>
+
+              <rect x="20" y="182" width="128" height="76" rx="10" class="fig-box"/>
+              <text x="84" y="212" text-anchor="middle" class="fig-tb">Photo</text>
+              <text x="84" y="232" text-anchor="middle" class="fig-ta">front + back</text>
+
+              <rect x="188" y="60" width="272" height="300" rx="14" class="fig-box"/>
+              <text x="208" y="86" class="fig-tm">STAYS ON OUR INFRASTRUCTURE</text>
+              <text x="208" y="108" class="fig-tb">Measure the card</text>
+              <rect x="208" y="122" width="232" height="44" rx="9" class="fig-box"/>
+              <text x="224" y="149" class="fig-t">Find and straighten it</text>
+              <rect x="208" y="176" width="232" height="44" rx="9" class="fig-box"/>
+              <text x="224" y="203" class="fig-t">Check the photo is usable</text>
+              <rect x="208" y="230" width="232" height="44" rx="9" class="fig-box"/>
+              <text x="224" y="250" class="fig-t">Measure the borders</text>
+              <text x="224" y="266" class="fig-ta">and score our confidence</text>
+              <rect x="208" y="284" width="232" height="44" rx="9" class="fig-box-key"/>
+              <text x="224" y="304" class="fig-t">Read the card and label</text>
+              <text x="224" y="320" class="fig-ta">set · number · certificate</text>
+
+              <rect x="500" y="60" width="272" height="300" rx="14" class="fig-box"/>
+              <text x="520" y="86" class="fig-tm">FIRST CONFIDENT ANSWER WINS</text>
+              <text x="520" y="108" class="fig-tb">Identify the printing</text>
+              <rect x="520" y="122" width="232" height="52" rx="9" class="fig-box-key"/>
+              <text x="536" y="142" class="fig-t">The grading label</text>
+              <text x="536" y="160" class="fig-ta">set + number = one exact card</text>
+              <rect x="520" y="184" width="232" height="52" rx="9" class="fig-box"/>
+              <text x="536" y="204" class="fig-t">Catalogue match</text>
+              <text x="536" y="222" class="fig-ta">8 games + artwork comparison</text>
+              <rect x="520" y="246" width="232" height="52" rx="9" class="fig-box"/>
+              <text x="536" y="266" class="fig-t">Assisted match</text>
+              <text x="536" y="284" class="fig-ta">for angled or foreign printings</text>
+              <path d="M 636 298 L 636 326" class="fig-line" marker-end="url(#ah)"/>
+              <text x="646" y="322" class="fig-ta">confirmed against the catalogue</text>
+
+              <rect x="812" y="60" width="272" height="300" rx="14" class="fig-box"/>
+              <text x="832" y="86" class="fig-tm">STORED PRICES CHECKED FIRST</text>
+              <text x="832" y="108" class="fig-tb">Value it</text>
+              <rect x="832" y="122" width="232" height="44" rx="9" class="fig-box-key"/>
+              <text x="848" y="149" class="fig-t">Priced already today?</text>
+              <rect x="832" y="176" width="232" height="52" rx="9" class="fig-box"/>
+              <text x="848" y="196" class="fig-t">Completed sale prices</text>
+              <text x="848" y="214" class="fig-ta">PSA 8 / 9 / 10, real sales</text>
+              <rect x="832" y="238" width="232" height="52" rx="9" class="fig-box"/>
+              <text x="848" y="258" class="fig-t">Raw market prices</text>
+              <text x="848" y="276" class="fig-ta">ungraded, 18 card games</text>
+              <rect x="832" y="300" width="232" height="40" rx="9" class="fig-box"/>
+              <text x="848" y="325" class="fig-t">Convert to Australian dollars</text>
+
+              <rect x="1124" y="152" width="136" height="136" rx="12" class="fig-box-key"/>
+              <text x="1192" y="182" text-anchor="middle" class="fig-tb">Result</text>
+              <text x="1192" y="206" text-anchor="middle" class="fig-ta">grade + range</text>
+              <text x="1192" y="226" text-anchor="middle" class="fig-ta">value in AUD</text>
+              <text x="1192" y="246" text-anchor="middle" class="fig-ta">marked-up card</text>
+              <text x="1192" y="266" text-anchor="middle" class="fig-ta">links to the sales</text>
+
+              <path d="M 152 220 L 182 220" class="fig-line" marker-end="url(#ah)"/>
+              <path d="M 464 220 L 494 220" class="fig-line-key" marker-end="url(#ahg)"/>
+              <text x="479" y="205" text-anchor="middle" class="fig-ta">label</text>
+              <path d="M 776 220 L 806 220" class="fig-line" marker-end="url(#ah)"/>
+              <text x="791" y="205" text-anchor="middle" class="fig-ta">exact card</text>
+              <path d="M 1088 220 L 1118 220" class="fig-line" marker-end="url(#ah)"/>
+
+              <path d="M 324 328 L 324 400 L 306 400" class="fig-line-stop" marker-end="url(#ahs)"/>
+              <rect x="60" y="378" width="246" height="44" rx="9" class="fig-box"/>
+              <text x="76" y="399" class="fig-t">Unusable photo → stop</text>
+              <text x="76" y="414" class="fig-ta">reason given, no grade issued</text>
+
+              <rect x="832" y="400" width="232" height="44" rx="9" class="fig-box"/>
+              <text x="848" y="427" class="fig-t">Stored prices</text>
+              <path d="M 918 396 L 918 348" class="fig-line" marker-end="url(#ah)"/>
+              <path d="M 978 348 L 978 396" class="fig-line" marker-end="url(#ah)"/>
+              <text x="1074" y="425" text-anchor="end" class="fig-ta">re-scans are instant</text>
+
+              <path d="M 324 122 L 324 100 L 1192 100 L 1192 146" class="fig-line" marker-end="url(#ah)"/>
+              <text x="758" y="92" text-anchor="middle" class="fig-ta">condition goes straight to the result — no outside service sees the card</text>
+
+              <line x1="20" y1="480" x2="1260" y2="480" class="fig-lane"/>
+              <rect x="20" y="500" width="14" height="14" rx="4" class="fig-box-key"/>
+              <text x="44" y="512" class="fig-ta">the high-confidence path — a graded card identifies itself</text>
+              <line x1="470" y1="507" x2="500" y2="507" class="fig-line-stop"/>
+              <text x="510" y="512" class="fig-ta">early stop — the system declines rather than guesses</text>
+            </svg>
+          </div>
+          <figcaption>
+            The gold path is the one tried first on every scan. The alternatives exist because
+            photographs of real cards, taken on real phones, frequently do not cooperate.
+          </figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 04 MEASURING ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Stage two · measuring condition</span>
+        <span class="strip-grade">04</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>How the grading actually works</h2>
+          <p class="lede">
+            Centering is a measurement, not an opinion, and this is the sequence that produces it.
+          </p>
+        </div>
+
+        <div class="steps">
+          <div class="step">
+            <span class="step-n">1</span>
+            <div class="stack-sm">
+              <h3>Find the card and correct the angle</h3>
+              <p class="note">
+                A card is 63 × 88 mm, so anything whose shape falls outside a sensible window
+                around that ratio is a table edge or a sleeve, not the card. Once found, the
+                perspective is corrected onto a fixed canvas — a card photographed at an angle
+                then measures the same as one shot straight down.
+              </p>
+            </div>
+          </div>
+
+          <div class="step">
+            <span class="step-n">2</span>
+            <div class="stack-sm">
+              <h3>Decide whether the photo can be trusted at all</h3>
+              <p class="note">
+                Focus is scored, glare is measured as a percentage of the card surface, and the
+                available detail is checked. Failing any one stops the scan with a plain reason
+                and a re-shoot instruction, and no grade is issued.
+              </p>
+              <span class="step-fact">glare above 4% of the surface · not enough detail · out of focus</span>
+            </div>
+          </div>
+
+          <div class="step is-key">
+            <span class="step-n">3</span>
+            <div class="stack-sm">
+              <h3>Walk inward from each edge to find the printed border</h3>
+              <p class="note">
+                Starting at the card edge, the colour is followed pixel by pixel inward. The
+                moment it departs from the border colour and stays departed, the print edge has
+                been found. Only the middle of each side is sampled, so rounded corners cannot
+                skew the result. Four edges give four distances, and those give the centering.
+              </p>
+              <span class="step-fact">sampled across the central 15–85% of each side</span>
+            </div>
+          </div>
+
+          <div class="step is-key">
+            <span class="step-n">4</span>
+            <div class="stack-sm">
+              <h3>Score the measurement before reporting it</h3>
+              <p class="note">
+                A reading is only as good as its evidence. The border ring is checked for
+                uniformity and real contrast. Where a card has no printed border, or the lighting
+                has destroyed it, the result is marked unmeasurable rather than published as a
+                number — and a confidence percentage travels with every figure that is published.
+              </p>
+              <span class="step-fact">confidence published 0–100% alongside the measurement</span>
+            </div>
+          </div>
+
+          <div class="step">
+            <span class="step-n">5</span>
+            <div class="stack-sm">
+              <h3>Compare to the professional standard and show the marks</h3>
+              <p class="note">
+                The worst side decides it: 60/40 or better passes PSA 10, 65/35 passes PSA 9.
+                Every scratch and print line on the surface is found and boxed on the image, so
+                the owner can look at what was detected rather than take a score on trust.
+              </p>
+              <span class="step-fact">PSA 10 ≤ 60/40 · PSA 9 ≤ 65/35</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="tile" style="border-color:var(--verified); background:var(--verified-wash)">
+            <span class="tile-top" style="color:var(--verified)">Measured</span>
+            <p class="note">Centering — geometry taken from the printed border, with a confidence score attached to every reading.</p>
+          </div>
+          <div class="tile" style="border-color:var(--estimated); background:var(--estimated-wash)">
+            <span class="tile-top" style="color:var(--estimated)">Detected, then estimated</span>
+            <p class="note">Corners, edges and surface — every mark is found and shown. Converting marks into a sub-grade is rule-based today, and labelled as an estimate in the product.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 05 IDENTIFYING ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Stage one · identifying the printing</span>
+        <span class="strip-grade">05</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Three ways to name a card, best first</h2>
+          <p class="lede">
+            The system stops at the first method that gives a confident answer, so the most
+            reliable evidence always wins.
+          </p>
+        </div>
+
+        <div class="steps">
+          <div class="step is-key">
+            <span class="step-n">1</span>
+            <div class="stack-sm">
+              <h3>Read the grading label</h3>
+              <p class="note">
+                A graded card carries its own answer key. The label prints the year, the set and
+                the collector number, and those three together resolve to exactly one card — no
+                name matching and no interpretation. This is tried first on every scan.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <span class="step-n">2</span>
+            <div class="stack-sm">
+              <h3>Match the card itself against the catalogues</h3>
+              <p class="note">
+                For raw cards, the text on the card is read and eight game catalogues are searched
+                at once. The photograph is then compared against each catalogue's own artwork to
+                settle which printing it is.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <span class="step-n">3</span>
+            <div class="stack-sm">
+              <h3>Fall back to an assisted match — then confirm it</h3>
+              <p class="note">
+                For steep angles, heavy glare or Japanese printings, an image model proposes a
+                name. That proposal is never shown on its own: it goes back through the real
+                catalogue, and only a confirmed catalogue entry reaches the screen.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <p class="note">
+          Where none of the three produces a confident answer, the system reports what it read
+          off the card and shows no price — rather than attaching a plausible figure from the
+          wrong set.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 06 VALUATION ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Stage three · valuation</span>
+        <span class="strip-grade">06</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Graded and raw are different markets</h2>
+          <p class="lede">
+            A real card the system valued — a Charizard ☆ δ from EX Dragon Frontiers, certified
+            BGS 8.5. All figures in Australian dollars.
+          </p>
+        </div>
+
+        <div class="price-rows">
+          <div class="price-row">
+            <span class="k">Raw and ungraded — the figure most price guides quote</span>
+            <span class="v" style="color:var(--muted)">A$5,580</span>
+          </div>
+          <div class="price-row is-hero">
+            <span class="k">In its BGS 8.5 slab — what the card is actually worth</span>
+            <span class="v">A$19,949</span>
+          </div>
+          <div class="price-row">
+            <span class="k">The same card at PSA 9</span>
+            <span class="v">A$21,101</span>
+          </div>
+          <div class="price-row">
+            <span class="k">The same card at PSA 10</span>
+            <span class="v">A$81,924</span>
+          </div>
+        </div>
+
+        <p class="note">
+          Quoting the raw figure for this card understates it by roughly three and a half times.
+          Recognising that the card is slabbed, reading which grade it holds, and pricing that
+          grade is the difference between a useful valuation and a misleading one.
+        </p>
+
+        <div class="grid-3">
+          <div class="tile">
+            <span class="tile-top">Provenance on every figure</span>
+            <div style="display:flex; gap:7px; flex-wrap:wrap; margin:2px 0 3px">
+              <span class="chip verified">Verified sales</span>
+              <span class="chip estimated">Estimated</span>
+            </div>
+            <p class="note">Green means real completed sales. Amber means a calculated figure. Every number carries one of the two.</p>
+          </div>
+          <div class="tile">
+            <span class="tile-top">Currency</span>
+            <p class="note">Australian dollars by default, converted at daily central-bank reference rates. The original figure stays visible so nothing is hidden behind the conversion.</p>
+          </div>
+          <div class="tile">
+            <span class="tile-top">Checkable</span>
+            <p class="note">Every result links straight out to the completed sold listings, so the figure can be verified against the open market in one click.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 07 EVIDENCE ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Proof · behind a single number</span>
+        <span class="strip-grade">07</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Every valuation can show its working</h2>
+          <p class="lede">
+            The A$19,949 on the previous slide is not an estimate. It is the median of real
+            completed sales, and the sample behind it travels with the figure.
+          </p>
+        </div>
+
+        <div class="grid-2">
+          <div class="sample">
+            <div class="sample-head">
+              <div>
+                <div class="tile-top" style="color:var(--verified)">PSA 8 · the tier this BGS 8.5 sits in</div>
+                <div class="sample-v">A$19,949</div>
+              </div>
+              <span class="chip verified">29 sales</span>
+            </div>
+            <div class="sample-body">
+              <div class="spread">
+                <div class="spread-bar">
+                  <div class="spread-fill" style="background:var(--verified-wash)"></div>
+                  <div class="spread-tick" style="left:50.9%; background:var(--verified)"></div>
+                </div>
+                <div class="spread-ends"><span>A$11,719</span><span>median</span><span>A$27,902</span></div>
+              </div>
+              <p class="note">
+                Twenty-nine completed sales. The median is published rather than the average, so
+                a single outlier auction cannot move a valuation.
+              </p>
+            </div>
+          </div>
+
+          <div class="sample">
+            <div class="sample-head" style="background:var(--estimated-wash)">
+              <div>
+                <div class="tile-top" style="color:var(--estimated)">PSA 10 · same card, top grade</div>
+                <div class="sample-v" style="color:var(--estimated)">A$81,924</div>
+              </div>
+              <span class="chip estimated">4 sales only</span>
+            </div>
+            <div class="sample-body">
+              <div class="spread">
+                <div class="spread-bar">
+                  <div class="spread-fill" style="background:var(--estimated-wash)"></div>
+                  <div class="spread-tick" style="left:81.5%; background:var(--estimated)"></div>
+                </div>
+                <div class="spread-ends"><span>A$43,248</span><span></span><span>A$90,682</span></div>
+              </div>
+              <p class="note">
+                Four sales across a wide spread. A thin sample is itself information, so the
+                count and the range are shown alongside the number rather than hidden behind it.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <p class="note">
+          Where no completed sales exist for a card, the system shows the raw market price and
+          says so. It does not manufacture a graded figure to fill the space.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 08 REAL SCANS ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Proof · cards put through the system</span>
+        <span class="strip-grade">08</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Actual output, unedited</h2>
+          <p class="lede">
+            Certificate numbers, measurements and valuations exactly as the running system
+            produced them.
+          </p>
+        </div>
+
+        <div class="scroll-x">
+          <table>
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Read from the label</th>
+                <th>Centering measured</th>
+                <th>Value returned</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Charizard ☆ δ</strong><br><span class="note">EX Dragon Frontiers #100</span></td>
+                <td class="num">BGS 8.5<br><span class="note">cert 0011755115</span></td>
+                <td class="num">50 / 50 &nbsp;·&nbsp; 56 / 44<br><span class="note">passes PSA 10 · 100% confidence</span></td>
+                <td class="num"><strong>A$19,949</strong><br><span class="chip verified">Verified sales</span></td>
+              </tr>
+              <tr>
+                <td><strong>Umbreon VMAX</strong><br><span class="note">Evolving Skies #215 · alternate art secret</span></td>
+                <td class="num">PSA GEM MT 10<br><span class="note">cert 85183760</span></td>
+                <td class="num">51.5 / 48.5<br><span class="note">read through slab plastic · flagged low confidence</span></td>
+                <td class="num"><strong>A$5,929</strong><br><span class="chip verified">Verified sales</span></td>
+              </tr>
+              <tr>
+                <td><strong>Charizard δ</strong><br><span class="note">Crystal Guardians #4</span></td>
+                <td class="num">raw card<br><span class="note">no label present</span></td>
+                <td class="num">54.2 / 45.8 &nbsp;·&nbsp; 51.0 / 49.0<br><span class="note">passes PSA 10 · 59% confidence</span></td>
+                <td class="num">A$207 raw<br><span class="chip estimated">Estimated</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="tile" style="border-color:var(--gold); background:var(--gold-wash)">
+          <span class="tile-top" style="color:var(--gold)">Note the confidence column</span>
+          <p class="note">
+            The three cards were read at 100%, low, and 59% confidence respectively. A card
+            measured through slab plastic at an angle gives a less reliable reading than one
+            photographed flat, and the system says so on the result rather than presenting every
+            measurement as equally certain. <strong>Knowing when a reading is soft is as
+            important as the reading itself.</strong> Note also that the Umbreon is the
+            <b>#215 alternate art</b>, not the ordinary #95 from the same set — the two differ
+            roughly thirtyfold in value, which is why the printing is settled before any price
+            is fetched.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 09 PRINCIPLES ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">How the system handles doubt</span>
+        <span class="strip-grade">09</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>What it will not do</h2>
+          <p class="lede">
+            A valuation tool is only useful if its numbers can be relied on. These are the limits
+            the system holds to, even when holding to them means showing less.
+          </p>
+        </div>
+
+        <div class="rule-list">
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not grade a photograph it cannot read.</strong> A clear reason and a re-shoot instruction are more useful than a number nobody should trust.</p>
+          </div>
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not let an image model set a price.</strong> A model may propose a card's name, and that proposal is confirmed against a real catalogue. Prices come only from market feeds and completed sales.</p>
+          </div>
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not present an estimate as a sale.</strong> Calculated figures are labelled everywhere they appear, including in the headline value.</p>
+          </div>
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not price a card it cannot confirm.</strong> Where the exact printing is uncertain, no price is shown at all.</p>
+          </div>
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not guess at centering with nothing to measure.</strong> Full-art cards have no printed border, and the system reports that rather than inventing a figure.</p>
+          </div>
+          <div class="rule">
+            <span class="rule-x">✕</span>
+            <p class="note"><strong>It will not leave a blank unexplained.</strong> Wherever a value is missing, the interface states the reason on the card itself.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 10 STANDING ============ -->
+  <section class="slide">
+    <div class="sheet">
+      <div class="label-strip">
+        <span class="strip-eyebrow">Where it stands</span>
+        <span class="strip-grade">10</span>
+      </div>
+      <div class="body-pad stack-lg">
+        <div class="stack">
+          <h2>Working now, and what follows</h2>
+        </div>
+
+        <div class="grid-2">
+          <div class="tile" style="border-color:var(--verified)">
+            <span class="tile-top" style="color:var(--verified)">Working today</span>
+            <div class="stack-sm" style="margin-top:3px">
+              <p class="note"><strong>Grading label reading</strong> — company, grade and certificate number taken straight from the photograph</p>
+              <p class="note"><strong>Centering</strong> — measured against the PSA standard with published confidence</p>
+              <p class="note"><strong>Exact printing identification</strong> across eight card games</p>
+              <p class="note"><strong>Graded valuation</strong> from completed sales, with the sample shown</p>
+              <p class="note"><strong>Photo quality gate</strong> that declines rather than guesses</p>
+              <p class="note"><strong>Australian dollars</strong> at daily central-bank rates, plus 29 other currencies</p>
+            </div>
+          </div>
+          <div class="tile" style="border-color:var(--gold)">
+            <span class="tile-top" style="color:var(--gold)">Next</span>
+            <div class="stack-sm" style="margin-top:3px">
+              <p class="note"><strong>Certificate lookup.</strong> Read the certificate number directly from the grading company, collapsing identification and grade into a single confirmed fact.</p>
+              <p class="note"><strong>Trained condition models.</strong> Replace rule-based corner, edge and surface scoring with models trained against real graded outcomes.</p>
+              <p class="note"><strong>Graded valuation beyond Pokémon.</strong> Extend slab pricing to Magic, One Piece and Lorcana.</p>
+              <p class="note"><strong>Collection submission.</strong> Scan a full collection and rank it by what is worth grading first.</p>
+            </div>
+          </div>
+        </div>
+
+        <p class="note">
+          Identification and centering are production quality today. Condition sub-grades are a
+          working first version and are labelled as estimates in the product. Valuation is real
+          and sourced, and its precision improves as the depth of completed-sales data grows.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="end">Grailcard · system overview</footer>
+</div>

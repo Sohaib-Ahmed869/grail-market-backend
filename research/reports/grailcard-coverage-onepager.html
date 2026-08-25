@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grailcard — Card Coverage Map</title>
+<style>
+  @page { size: A4; margin: 11mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1a1d21; font-size: 8.6pt; line-height: 1.35; margin: 0; }
+  h1 { font-size: 17pt; margin: 0; letter-spacing: -0.3px; }
+  .sub { color: #5a6472; font-size: 9.5pt; margin: 1mm 0 4mm; }
+  h2 { font-size: 10pt; margin: 3.5mm 0 1.5mm; padding: 1mm 2mm; border-radius: 2mm; }
+  h2.done { background: #e7f6ee; color: #157347; }
+  h2.paid { background: #fdf3e3; color: #9a6a10; }
+  h2.ai { background: #eaf1fb; color: #2757a8; }
+  table { border-collapse: collapse; width: 100%; font-size: 8.2pt; }
+  th { text-align: left; padding: 1mm 2mm; color: #5a6472; font-size: 7.4pt; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1.5px solid #1a1d21; }
+  td { padding: 1mm 2mm; border-bottom: 1px solid #e3e7ec; vertical-align: top; }
+  .pill { display: inline-block; padding: 0 1.8mm; border-radius: 999px; font-size: 7.2pt; font-weight: 700; }
+  .ok { background: #d9f2e4; color: #157347; }
+  .pay { background: #fbe9c9; color: #9a6a10; }
+  .free { background: #e2ecfb; color: #2757a8; }
+  .cost { font-weight: 700; white-space: nowrap; }
+  .two-col { display: flex; gap: 4mm; }
+  .two-col > div { flex: 1; }
+  .note { color: #5a6472; font-size: 7.6pt; margin-top: 1mm; }
+  .footer { margin-top: 3.5mm; padding-top: 1.5mm; border-top: 2px solid #1a1d21; font-size: 8.6pt; }
+  .footer b { font-size: 9.5pt; }
+</style>
+</head>
+<body>
+
+<h1>Grailcard — Total Card Coverage Map</h1>
+<div class="sub">Every collectible card category · what's live, what a paid tier unlocks, and how the rest is handled &nbsp;·&nbsp; August 19, 2026</div>
+
+<h2 class="done">✔ COVERED TODAY — LIVE &amp; FREE (identification + live market prices)</h2>
+<table>
+  <tr><th>Category</th><th>Source</th><th>Prices</th><th>Status</th></tr>
+  <tr><td><b>Pokémon TCG</b> (EN + set-code/visual match)</td><td>TCGdex</td><td>TCGplayer + Cardmarket, daily</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Magic: The Gathering</b></td><td>Scryfall</td><td>USD + EUR</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Yu-Gi-Oh!</b></td><td>YGOPRODeck</td><td>TCGplayer + Cardmarket + eBay</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>One Piece Card Game</b> (incl. Japanese, via printed set codes)</td><td>optcgapi</td><td>Market, daily</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Disney Lorcana</b></td><td>Lorcast</td><td>USD</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Star Wars: Unlimited</b></td><td>swu-db</td><td>Market</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Digimon Card Game</b></td><td>digimoncard.io</td><td>— (JustTCG free key adds them)</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>Graded slabs — PSA / BGS / CGC / SGC</b>: label read, certified grade shown, cert linked to registry</td><td>OCR + registry links</td><td>via cert page</td><td><span class="pill ok">LIVE</span></td></tr>
+  <tr><td><b>eBay sold comps — every category</b>: one-click links to real completed sales for the exact card (raw / PSA / PSA 10)</td><td>eBay sold-search deep links</td><td>real sold prices</td><td><span class="pill ok">LIVE</span></td></tr>
+</table>
+<div class="note">Also live free: AI vision identification (Gemini) for anything unusual, trained-model grading pipeline (Ximilar — credits currently depleted, heuristic fallback active), centering measurement, scratch detection, grade-or-not recommendation.</div>
+
+<h2 class="paid">$ UNLOCKED BY PAID / KEY TIERS</h2>
+<table>
+  <tr><th>Category unlocked</th><th>Where</th><th class="cost">Cost</th><th>Notes</th></tr>
+  <tr><td><b>ALL sports cards + prices</b> — baseball, basketball, football (NFL), soccer, hockey, <b>cricket (Futera)</b>, F1, golf, tennis, wrestling, UFC, rugby, AFL, NASCAR…</td><td>PriceCharting / SportsCardsPro</td><td class="cost">~$6 / mo</td><td>Full DB + raw &amp; graded prices + CSV. Biggest single unlock.</td></tr>
+  <tr><td><b>Sports card photo-ID</b> (millions of cards: player, set, year, number) + <b>restores trained grading</b></td><td>Ximilar credit pack</td><td class="cost">€10 one-time</td><td>≈1,000 sport IDs or ≈90 grades; €59/mo at volume</td></tr>
+  <tr><td><b>PSA 8/9/10 sold prices (Pokémon)</b> → powers grade-or-not profit table</td><td>PokemonPriceTracker</td><td class="cost">FREE tier</td><td>100 calls/day, no card</td></tr>
+  <tr><td><b>Population reports</b> (PSA-10 scarcity math), multi-game graded prices</td><td>Scrydex</td><td class="cost">$29 / mo</td><td>Optional, later</td></tr>
+  <tr><td><b>eBay comps in-app</b> (parsed averages instead of links)</td><td>eBay Partner Network + Browse API</td><td class="cost">FREE (application)</td><td>Links are LIVE above; the application upgrades them to in-app averages</td></tr>
+  <tr><td><b>Union Arena · Dragon Ball · Gundam · Riftbound</b> — <i>code already wired, activates on key</i></td><td>apitcg.com</td><td class="cost">FREE key</td><td>Paste APITCG_API_KEY</td></tr>
+  <tr><td><b>Multi-game price gap-fill</b> — <i>code already wired, activates on key</i></td><td>JustTCG</td><td class="cost">FREE key</td><td>Paste JUSTTCG_API_KEY</td></tr>
+</table>
+
+<h2 class="ai">◈ NO DATABASE EXISTS ANYWHERE — HANDLED BY AI VISION (already live)</h2>
+<div class="two-col">
+  <div>
+    <table>
+      <tr><td>Top Trumps (all themes) — <i>proven: identified "Spider-Man — Top Trumps Marvel"</i></td><td><span class="pill free">AI ID</span></td></tr>
+      <tr><td>Dead TCGs: Harry Potter, WoW TCG, Chaotic, Duel Masters, Star Trek/Star Wars CCG…</td><td><span class="pill free">AI ID</span></td></tr>
+      <tr><td>Movie / TV / comic cards (vintage Star Wars, Marvel Fleer/SkyBox, GPK)</td><td><span class="pill free">AI ID</span></td></tr>
+    </table>
+  </div>
+  <div>
+    <table>
+      <tr><td>K-pop photocards (BTS, NewJeans…)</td><td><span class="pill free">AI ID</span></td></tr>
+      <tr><td>Cigarette / tobacco-era &amp; Victorian trade cards</td><td><span class="pill free">AI ID</span></td></tr>
+      <tr><td>Weiß Schwarz, Vanguard, FaB, indie TCGs (until catalogs added)</td><td><span class="pill free">AI ID</span></td></tr>
+    </table>
+  </div>
+</div>
+<div class="note">These get identified &amp; described by AI world knowledge, graded by the vision pipeline, and honestly labeled "no market data exists" — no competitor does better here, and most invent prices instead. Next build (free): a visual-search index of ~80k catalog images so textless/foreign cards match by artwork alone, offline.</div>
+
+<div class="footer">
+  <b>Totals:</b> &nbsp;$0 spent to date &nbsp;·&nbsp; <b>~$17 first month</b> (€10 Ximilar + $6 PriceCharting) = trained grading + all sports coverage &nbsp;·&nbsp; ~$6/mo steady state until volume &nbsp;·&nbsp; ~$100–140/mo at real user volume &nbsp;·&nbsp; marginal cost ~8–10¢/graded scan vs ~25¢ market price.
+</div>
+
+</body>
+</html>
