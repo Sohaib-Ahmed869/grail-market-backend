@@ -10,20 +10,24 @@ import { normaliseVisionUrl } from "./visionurl.js";
 import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
-import { fetchGradedPrices, type GradePoint } from "./gradedprices.js";
+import {
+  fetchGradedPrices,
+  gradePointsFromStore,
+  type GradePoint,
+} from "./gradedprices.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
 import { recordScan, withScan } from "./ledger.js";
-import { writeGradePrices } from "../cards.store.js";
+import { graderTier } from "./graders.js";
+import {
+  writeGradePrices,
+  readGradePrices,
+  noteCatalogCard,
+  readRawPrice,
+  writeRawPrice,
+} from "../cards.store.js";
 
-// Mirrors TIERS in services/vision/app/pipeline/slab.py. Never price across
-// tiers: a BCCG 10 and a BGS 10 are not comparable goods.
-const GRADER_TIER: Record<string, string> = {
-  PSA: "premium", BGS: "premium", BVG: "premium", CGC: "premium", SGC: "premium",
-  TAG: "emerging", ACE: "emerging", AGS: "emerging", MNT: "emerging",
-  BCCG: "discount", GMA: "discount", KSA: "discount", HGA: "discount", CSG: "discount",
-};
 import {
   identifyDigimon,
   identifyLorcana,
@@ -55,6 +59,15 @@ function titleCase(s: string): string {
 
 const VISION_URL = normaliseVisionUrl(process.env.VISION_URL);
 const STORAGE_ROOT = join(process.cwd(), "storage");
+
+// How old a stored price may be before a scan is willing to buy a fresh one.
+//
+// Longer than it looks, on purpose: the refresh job is what keeps prices
+// current now, and it re-prices a busy card daily. This is the backstop for a
+// card the job has not reached yet, so it wants to be generous — a price from
+// last week with its age shown is a better answer than a credit spent on the
+// request path, and far better than a blank.
+const STORE_TTL_MS = Number(process.env.PRICE_STORE_TTL_HOURS ?? 24 * 14) * 3600 * 1000;
 
 @Injectable()
 export class ScansService {
@@ -473,32 +486,85 @@ export class ScansService {
     let pptByGrade: Record<string, GradePoint> | null = null;
     let pptByGrader: Record<string, Record<string, GradePoint>> | null = null;
     const ident = scan.identification;
+
+    // Register the card before pricing it, for EVERY game rather than just the
+    // one we can price today. The refresh job's work list is this table, so a
+    // card that is never registered is a card that never gets a batch price —
+    // and the games with no price source right now are exactly the ones we
+    // most want queued for when they get one.
+    if (ident) {
+      void noteCatalogCard({
+        catalogId: ident.cardId,
+        game: ident.game,
+        name: ident.name,
+        setName: ident.setName,
+        cardNumber: ident.localId,
+      });
+    }
+
     if (
       ident &&
       ident.game === "pokemon" &&
       ident.cardId !== "llm" &&
       ident.cardId !== "described"
     ) {
-      const ppt = await fetchGradedPrices(ident.name, ident.localId, ident.setName);
-      pptByGrade = ppt.byGrade ?? null;
-      pptByGrader = ppt.byGrader ?? null;
-      if (ppt.graded) {
-        scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-        scan.valuation.graded = ppt.graded;
+      // Prices are READ from our own store first, and bought only when the
+      // store cannot answer.
+      //
+      // This is the inversion the whole cost model turns on. Asking the
+      // provider on the request path means the bill scales with traffic; the
+      // refresh job means it scales with the catalogue, which is roughly
+      // fixed. A warm store also takes the provider off the critical path
+      // entirely, so a PPT outage stops being a scan with no price on it.
+      const held = await readGradePrices(ident.cardId, STORE_TTL_MS);
+      if (held) {
+        pptByGrader = gradePointsFromStore(held);
+        pptByGrade = pptByGrader?.PSA ?? null;
+        if (pptByGrade) {
+          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+          scan.valuation.graded = {
+            source: "grailcard-store",
+            psa8: pptByGrade["8"]?.price ?? null,
+            psa9: pptByGrade["9"]?.price ?? null,
+            psa10: pptByGrade["10"]?.price ?? null,
+            estimated: false,
+          };
+        }
+        const rawHeld = await readRawPrice(ident.cardId, STORE_TTL_MS);
+        if (rawHeld != null && !scan.valuation?.tcgplayer?.market) {
+          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+          scan.valuation.source = "grailcard-store";
+          scan.valuation.tcgplayer = {
+            unit: "USD", variant: "market",
+            low: null, mid: null, high: null, market: rawHeld,
+          };
+        }
       }
-      // vintage sets often have NO price in the free catalogs — PPT's raw
-      // market price fills the gap from the same call
-      if (ppt.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
-        scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-        scan.valuation.source = "pokemonpricetracker";
-        scan.valuation.tcgplayer = {
-          unit: "USD",
-          variant: "market",
-          low: null,
-          mid: null,
-          high: null,
-          market: ppt.rawUsd,
-        };
+
+      // Nothing held, or nothing fresh enough — now it is worth a credit.
+      if (!pptByGrader) {
+        const ppt = await fetchGradedPrices(ident.name, ident.localId, ident.setName);
+        pptByGrade = ppt.byGrade ?? null;
+        pptByGrader = ppt.byGrader ?? null;
+        if (ppt.graded) {
+          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+          scan.valuation.graded = ppt.graded;
+        }
+        // vintage sets often have NO price in the free catalogs — PPT's raw
+        // market price fills the gap from the same call
+        if (ppt.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
+          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+          scan.valuation.source = "pokemonpricetracker";
+          scan.valuation.tcgplayer = {
+            unit: "USD",
+            variant: "market",
+            low: null,
+            mid: null,
+            high: null,
+            market: ppt.rawUsd,
+          };
+        }
+        if (ppt.rawUsd != null) void writeRawPrice(ident.cardId, ppt.rawUsd);
       }
     }
 
@@ -605,7 +671,7 @@ export class ScansService {
           rows.map(({ grader, grade, pt }) => ({
             grader,
             grade: Number(grade),
-            tier: GRADER_TIER[grader] ?? null,
+            tier: graderTier(grader),
             price: pt.price ?? null,
             sampleSize: pt.count ?? null,
             confidence: pt.confidence ?? null,

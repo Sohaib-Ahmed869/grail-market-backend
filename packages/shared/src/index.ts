@@ -158,6 +158,15 @@ export const GradePoint = z.object({
   high: z.number().nullish(),
   /** unfiltered median, kept so a filtered figure can be sanity-checked */
   median: z.number().nullish(),
+  /** when WE fetched this figure, ISO-8601.
+   *
+   *  A price carries confidence and sample size already; this is the third
+   *  leg. Without it a figure cached six days ago renders identically to one
+   *  fetched a second ago, and the reader has no way to tell — which for a
+   *  market that moves on a weekly cadence is the difference between evidence
+   *  and a rumour. Null means the figure came straight from the source in this
+   *  request. */
+  asOf: z.string().nullish(),
 });
 export type GradePoint = z.infer<typeof GradePoint>;
 

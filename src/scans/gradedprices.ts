@@ -28,6 +28,9 @@ export type GradePoint = {
   low?: number | null;
   high?: number | null;
   median?: number | null;
+  /** when we fetched it, ISO-8601. Null means it came live from the source in
+   *  this request; a value means it came from the store and is that old. */
+  asOf?: string | null;
 };
 
 export type PptPrices = {
@@ -293,6 +296,13 @@ export async function fetchGradedPrices(
   cardName: string,
   localId?: string | null,
   setName?: string | null,
+  /** Skip both cache layers and buy a fresh answer.
+   *
+   *  Only the refresh job sets this. Its whole purpose is to replace a figure
+   *  we already hold, so reading the cache first would make it a no-op — but
+   *  it is also the one caller that must never be reachable from a request,
+   *  because a `force` on the scan path is just an uncapped bill. */
+  opts?: { force?: boolean },
 ): Promise<PptPrices> {
   const empty: PptPrices = { graded: null, rawUsd: null };
   const key = process.env.PPT_API_KEY;
@@ -311,13 +321,13 @@ export async function fetchGradedPrices(
   const localKey = `v${CACHE_VERSION}|${cacheKey}`;
 
   // 1. local cache — same machine, same day. Free and instant.
-  const hit = cacheGet(localKey);
+  const hit = opts?.force ? null : cacheGet(localKey);
   if (hit) return hit;
 
   // 2. shared store — a card any instance has ever bought. Still free: the
   //    provider bills per card returned, so anything already purchased must
   //    never be purchased twice.
-  const stored = await readCard(cacheKey, HIT_TTL_MS, MISS_TTL_MS);
+  const stored = opts?.force ? null : await readCard(cacheKey, HIT_TTL_MS, MISS_TTL_MS);
   if (stored) {
     // Rebuild every grade from the stored payload, not just the three legacy
     // PSA columns.
@@ -431,7 +441,7 @@ export async function fetchGradedPrices(
       Array.isArray(body) ? body : (body.data ?? body.cards ?? body.results ?? [])
     ) as Record<string, unknown>[];
     if (items.length === 0) {
-      cacheSet(cacheKey, empty);
+      cacheSet(localKey, empty);
       void writeCard({
         cacheKey,
         query: { name: cardName, number: localId, set: setName },
@@ -461,7 +471,7 @@ export async function fetchGradedPrices(
       items.find(numberMatches) ??
       items.find(setMatches);
     if (!pick) {
-      cacheSet(cacheKey, empty);
+      cacheSet(localKey, empty);
       void writeCard({
         cacheKey,
         query: { name: cardName, number: localId, set: setName },
@@ -479,7 +489,7 @@ export async function fetchGradedPrices(
     > | null;
     if (!ebayRoot) {
       const v: PptPrices = { graded: null, rawUsd };
-      cacheSet(cacheKey, v);
+      cacheSet(localKey, v);
       void writeCard({ ...describe(pick, cacheKey, cardName, localId, setName), rawUsd });
       return v;
     }
@@ -560,4 +570,52 @@ export async function fetchGradedPrices(
     console.warn(`[ppt] lookup failed for "${cardName}": ${(err as Error).message}`);
     return empty;
   }
+}
+
+/** Reshape stored rows into the per-grade evidence the valuation chain reads.
+ *
+ *  Two invariants live here, both learned the hard way:
+ *
+ *  - A grade with no price is DROPPED, not carried through as a null. A row
+ *    can exist with a null price (the source tracked the grade and had no
+ *    sales); rendering it puts an empty figure under a grader badge, which
+ *    reads as "worthless" rather than "unknown".
+ *  - A grader left with no usable grades disappears entirely, so the interface
+ *    shows an honest empty Beckett tab instead of PSA numbers wearing a BGS
+ *    label.
+ *
+ *  Every surviving figure carries the time WE fetched it, so its age is the
+ *  reader's to judge rather than ours to hide.
+ */
+export function gradePointsFromStore(
+  held: Record<string, Record<string, {
+    price: number | null;
+    sampleSize?: number | null;
+    confidence?: string | null;
+    method?: string | null;
+    low?: number | null;
+    high?: number | null;
+    median?: number | null;
+    fetchedAt?: string | null;
+  }>>,
+): Record<string, Record<string, GradePoint>> | null {
+  const out: Record<string, Record<string, GradePoint>> = {};
+  for (const [grader, grades] of Object.entries(held)) {
+    const kept: Record<string, GradePoint> = {};
+    for (const [grade, r] of Object.entries(grades)) {
+      if (r.price == null) continue;
+      kept[grade] = {
+        price: r.price,
+        count: r.sampleSize ?? null,
+        confidence: (r.confidence as GradePoint["confidence"]) ?? null,
+        method: r.method ?? null,
+        low: r.low ?? null,
+        high: r.high ?? null,
+        median: r.median ?? null,
+        asOf: r.fetchedAt ?? null,
+      };
+    }
+    if (Object.keys(kept).length) out[grader] = kept;
+  }
+  return Object.keys(out).length ? out : null;
 }
