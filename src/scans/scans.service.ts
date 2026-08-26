@@ -7,7 +7,7 @@ import { db } from "../db.js";
 import { identifyApiTcg } from "./apitcg.js";
 import { fetchWebPrices } from "./geminiprice.js";
 import { normaliseVisionUrl } from "./visionurl.js";
-import { estimateGradedFromRaw, fetchCardGraderMarket } from "./cardgrader.js";
+import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
 import { fetchGradedPrices, type GradePoint } from "./gradedprices.js";
@@ -32,12 +32,11 @@ import {
   identifySwu,
   identifyYgo,
 } from "./othergames.js";
-import { buildRecommendation, conditionMultiplier } from "./recommend.js";
+import { buildRecommendation } from "./recommend.js";
 import { similarity } from "./similarity.js";
 import { fetchRelated } from "./related.js";
 import { buildSummary } from "./summarize.js";
 import { identifyCard, identifyFromSlabLabel } from "./tcgdex.js";
-import { gradeWithXimilar } from "./ximilar.js";
 
 const BRAND_HINTS: [RegExp, string][] = [
   [/top\s*trumps/i, "Top Trumps"],
@@ -56,10 +55,6 @@ function titleCase(s: string): string {
 
 const VISION_URL = normaliseVisionUrl(process.env.VISION_URL);
 const STORAGE_ROOT = join(process.cwd(), "storage");
-
-// PSA centering standards for the BACK are looser than the front
-const BACK_PSA10_MAX = 75;
-const BACK_PSA9_MAX = 90;
 
 @Injectable()
 export class ScansService {
@@ -171,64 +166,6 @@ export class ScansService {
       recommendation: null,
     };
 
-    this.saveImages(id, "front", frontRes, scan);
-    if (backRes) this.saveImages(id, "back", backRes, scan);
-
-    // trained grading (Ximilar) upgrades the heuristic grade when available.
-    // Send the ORIGINAL photo — their detector handles perspective itself.
-    // Only for gate-passing scans: each call costs real credits.
-    if (frontRes.ok && scan.grade) {
-      const trained = await gradeWithXimilar(front.buffer.toString("base64"));
-      if (trained) {
-        // keep our scratch findings (drawn on the overlay) and our honesty
-        // notes about photo conditions alongside their trained sub-grades.
-        // Drop heuristic bookkeeping notes that no longer apply — the trained
-        // model fills sub-grades the heuristics had declared unassessable.
-        trained.grade.findings = scan.grade.findings ?? null;
-        trained.grade.notes.push(
-          ...scan.grade.notes.filter(
-            (n) =>
-              !n.startsWith("Corner, edge, and surface") &&
-              !n.includes("excluded from the overall grade"),
-          ),
-        );
-        scan.grade = trained.grade;
-
-        // their measured centering ratios fill in when our geometric
-        // measurement declined (full-art designs)
-        const front_ = scan.measurement?.centering.front;
-        if (front_ && !front_.measurable && trained.centeringRatios) {
-          front_.lr = trained.centeringRatios.lr;
-          front_.tb = trained.centeringRatios.tb;
-          front_.measurable = true;
-          const worst = Math.max(
-            front_.lr,
-            100 - front_.lr,
-            front_.tb,
-            100 - front_.tb,
-          );
-          scan.measurement!.centering.passesAt.psa10 = worst <= 60;
-          scan.measurement!.centering.passesAt.psa9 = worst <= 65;
-          scan.measurement!.confidence.centering = 0.6;
-        }
-      }
-    }
-
-    // merge back centering into the front measurement + combined pass verdicts
-    if (scan.measurement && backRes?.measurement) {
-      const backCentering = backRes.measurement.centering.front;
-      scan.measurement.centering.back = backCentering;
-      if (backCentering.measurable) {
-        const worst = Math.max(
-          backCentering.lr,
-          100 - backCentering.lr,
-          backCentering.tb,
-          100 - backCentering.tb,
-        );
-        scan.measurement.centering.passesAt.psa10 &&= worst <= BACK_PSA10_MAX;
-        scan.measurement.centering.passesAt.psa9 &&= worst <= BACK_PSA9_MAX;
-      }
-    }
 
     // identification runs even for rejected fronts — a bad photo can still
     // tell the user which card we saw (and what it's worth). All supported
@@ -633,8 +570,6 @@ export class ScansService {
     // say so. The live listings panel still shows what the market is asking,
     // which is real data, and the interface names the gap instead of filling
     // it with arithmetic.
-    void estimateGradedFromRaw;
-
     // Separate the graded prices by the company that actually issued them.
     // Everything we can buy today is PSA sale data, so PSA is the only key that
     // gets populated — and that is precisely the point: a Beckett card now
@@ -851,7 +786,6 @@ export class ScansService {
     // market price by our own condition opinion turned an $84 card into $21 on
     // the strength of a 2.5 the heuristics should never have issued. Raw cards
     // are now quoted at the raw market price, which is what that price is.
-    void conditionMultiplier; // retained for reference; no longer applied
 
     // a slabbed card is already professionally graded — say so, link the cert,
     // and mark our through-the-plastic estimate as non-authoritative
@@ -929,27 +863,6 @@ export class ScansService {
       .prepare("SELECT record FROM scans ORDER BY created_at DESC LIMIT ?")
       .all(limit) as { record: string }[];
     return rows.map((r) => JSON.parse(r.record) as Scan);
-  }
-
-  private saveImages(
-    id: string,
-    side: "front" | "back",
-    res: VisionAnalyzeResponse,
-    scan: Scan,
-  ) {
-    if (res.warpedImageB64) {
-      writeFileSync(
-        join(STORAGE_ROOT, `${id}/${side}_warped.png`),
-        Buffer.from(res.warpedImageB64, "base64"),
-      );
-    }
-    if (res.overlayImageB64) {
-      const key = `${id}/${side}_overlay.png`;
-      writeFileSync(join(STORAGE_ROOT, key), Buffer.from(res.overlayImageB64, "base64"));
-      if (side === "front" && scan.measurement) {
-        scan.measurement.centering.overlayImageKey = key;
-      }
-    }
   }
 
   private async analyze(

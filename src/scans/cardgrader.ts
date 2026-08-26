@@ -1,11 +1,28 @@
 import type { GradedPrices } from "@grailcard/shared";
-import { recordUsage } from "./usage.js";
+import { recordUsage, usedToday } from "./usage.js";
 
 // CardGrader.AI market module as a graded-price BACKUP (their comps come
 // from eBay sold data). Costs 1 credit (~$0.20) per call — used only when
 // PPT has nothing. Skips silently on 402 (no credits) or timeout.
+//
+// OFF BY DEFAULT, and deliberately so. This was the single largest line in the
+// bill: $0.20 a call, no cache, no cap, and a guard (`!valuation.graded`) that
+// matches every non-Pokemon card — which is most of the catalogue we can
+// identify. At 30k scans/day it was ~$14k/month on its own. It also polls for
+// up to 70 SECONDS inside the scan request, so it costs latency as well as
+// money.
+//
+// A card with no graded price still gets the live-asks panel, which is real
+// market data. Per the house rule, a missing answer is cheap and a confident
+// wrong one is expensive — so the default is to go without rather than to
+// spend $0.20 and a minute of the user's time on every unpriced card.
+//
+// Set CARDGRADER_DAILY_MAX to a positive number of calls/day to switch it on.
 
 const BASE = "https://cardgrader.ai";
+
+/** Calls per UTC day. 0 disables the provider outright. */
+const DAILY_MAX = Number(process.env.CARDGRADER_DAILY_MAX ?? 0);
 
 export async function fetchCardGraderMarket(
   frontB64: string,
@@ -13,6 +30,17 @@ export async function fetchCardGraderMarket(
 ): Promise<GradedPrices | null> {
   const key = process.env.CARDGRADER_API_KEY;
   if (!key) return null;
+  if (!(DAILY_MAX > 0)) return null;
+  // Counted rather than assumed: usage is recorded per UTC day in SQLite, so
+  // the cap survives a restart. A provider that bills per call and has no cap
+  // of its own needs one here or the ceiling is whatever traffic happens to be.
+  const spent = usedToday("cardgrader");
+  if (spent >= DAILY_MAX) {
+    console.warn(
+      `[cardgrader] daily cap reached (${spent}/${DAILY_MAX}) — skipping, card priced from asks instead`,
+    );
+    return null;
+  }
 
   try {
     const bytes = Buffer.from(frontB64, "base64");

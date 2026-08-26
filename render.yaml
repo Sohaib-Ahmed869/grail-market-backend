@@ -46,8 +46,6 @@ services:
         value: https://grailcard-vision.onrender.com
       # Secrets are NOT in this file. Add them in the Render dashboard, or
       # mark sync:false and Render will prompt for each on first deploy.
-      - key: XIMILAR_API_KEY
-        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: JUSTTCG_API_KEY
