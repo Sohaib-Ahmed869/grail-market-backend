@@ -52,6 +52,42 @@ function ensure(): Promise<boolean> {
           billable      BOOLEAN NOT NULL DEFAULT false
         );
         CREATE INDEX IF NOT EXISTS scan_ledger_at ON scan_ledger (at DESC);
+
+        -- The backlog.
+        --
+        -- House rule: log every result below MEDIUM confidence with its
+        -- inputs. Without it, the cards we answer badly are invisible — a
+        -- weak answer looks exactly like a strong one from the outside, and
+        -- the only cases we ever hear about are the ones a user bothers to
+        -- complain about. That is a terrible sampling strategy for a system
+        -- whose whole promise is that it would rather say nothing than say
+        -- something wrong.
+        --
+        -- Inputs, not just outcomes: the point is to be able to reproduce the
+        -- case as a fixture later, and a row that records only "low
+        -- confidence" tells you nothing you can act on.
+        CREATE TABLE IF NOT EXISTS low_confidence_log (
+          id           TEXT PRIMARY KEY,
+          at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+          scan_id      TEXT,
+          reason       TEXT NOT NULL,
+          card_name    TEXT,
+          set_name     TEXT,
+          card_number  TEXT,
+          catalog_id   TEXT,
+          game         TEXT,
+          grader       TEXT,
+          grade        NUMERIC,
+          confidence   TEXT,
+          sample_size  INTEGER,
+          price_usd    NUMERIC,
+          price_source TEXT,
+          -- everything that went in: ocr candidates, set code, which sources
+          -- were tried and what each said
+          inputs       JSONB NOT NULL DEFAULT '{}'::jsonb
+        );
+        CREATE INDEX IF NOT EXISTS low_confidence_at ON low_confidence_log (at DESC);
+        CREATE INDEX IF NOT EXISTS low_confidence_reason ON low_confidence_log (reason);
       `);
       return true;
     } catch (err) {
@@ -205,4 +241,59 @@ export async function scanCounts(): Promise<ScanCounts> {
     creditsToday: {},
     lastScanAt: null,
   };
+}
+
+export type WeakResult = {
+  scanId: string;
+  /** why this is in the backlog: no-price | low-confidence | tiny-sample |
+   *  no-identification | estimated-only */
+  reason: string;
+  cardName?: string | null;
+  setName?: string | null;
+  cardNumber?: string | null;
+  catalogId?: string | null;
+  game?: string | null;
+  grader?: string | null;
+  grade?: number | null;
+  confidence?: string | null;
+  sampleSize?: number | null;
+  priceUsd?: number | null;
+  priceSource?: string | null;
+  inputs?: Record<string, unknown>;
+};
+
+/** Record a result we are not confident in, with enough of its inputs to
+ *  rebuild it as a fixture. Best-effort and never awaited by a scan. */
+export async function recordWeakResult(r: WeakResult): Promise<void> {
+  // Always say it out loud too. The table needs the shared store to be up, and
+  // the cases worth studying most are often the ones where something was down.
+  console.warn(
+    `[weak] ${r.reason} :: ${r.cardName ?? "unidentified"}` +
+      (r.setName ? ` (${r.setName})` : "") +
+      (r.grader && r.grade != null ? ` ${r.grader} ${r.grade}` : "") +
+      (r.sampleSize != null ? ` n=${r.sampleSize}` : ""),
+  );
+  if (!(await ensure())) return;
+  const p = storePool();
+  if (!p) return;
+  try {
+    await p.query(
+      `INSERT INTO low_confidence_log
+         (id, scan_id, reason, card_name, set_name, card_number, catalog_id,
+          game, grader, grade, confidence, sample_size, price_usd, price_source, inputs)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        randomUUID(), r.scanId, r.reason,
+        r.cardName ?? null, r.setName ?? null, r.cardNumber ?? null,
+        r.catalogId ?? null, r.game ?? null,
+        r.grader ?? null, r.grade ?? null,
+        r.confidence ?? null, r.sampleSize ?? null,
+        r.priceUsd ?? null, r.priceSource ?? null,
+        JSON.stringify(r.inputs ?? {}),
+      ],
+    );
+  } catch (err) {
+    console.warn(`[weak] log write failed: ${(err as Error).message}`);
+  }
 }

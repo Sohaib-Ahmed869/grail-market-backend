@@ -25,6 +25,18 @@ npm run dev                     # api on :8180  (needs vision up)
 The api will start without vision, but every scan will fail — it has nothing to
 read the card with.
 
+## Refreshing prices
+
+```bash
+npm run ingest -- --dry-run     # show the work list, spend nothing
+npm run ingest                  # refresh, tiered, within the credit budget
+npm run ingest -- --backfill    # register priced cards we never catalogued
+```
+
+Prices are read from our own store, not bought per scan. This job is what keeps
+the store current — run it on a cron. It re-prices busy cards daily and the
+long tail monthly, and it leaves a quarter of the daily credits for live scans.
+
 ## Tests
 
 ```bash
@@ -41,6 +53,7 @@ misreading that caused it, so the same mistake cannot come back quietly.
 ```
 src/            api — NestJS
   scans/        identification and valuation. The interesting code is here.
+  ingest/       batch price refresh, run from cron rather than a request
 vision/         python service
 packages/shared zod schemas shared between the two halves of the api
 docs/           architecture, and the grading domain primer

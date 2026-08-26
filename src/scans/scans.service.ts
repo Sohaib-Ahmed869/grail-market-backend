@@ -15,7 +15,7 @@ import { gradedPricesFor } from "./pricing.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
-import { recordScan, withScan } from "./ledger.js";
+import { recordScan, recordWeakResult, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
 import { visionGate, GateSaturated } from "./gate.js";
 import {
@@ -97,6 +97,42 @@ export class ScansService {
         priceUsd: sold ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null,
         priceSource: sold ? "sold" : v?.liveAsk ? "ask" : v?.tcgplayer?.market ? "catalog" : null,
       });
+
+      // House rule: every result below MEDIUM confidence goes in the backlog,
+      // with its inputs. A weak answer is indistinguishable from a strong one
+      // from the outside, so without this the only bad cases we ever learn
+      // about are the ones somebody complains about — which is a terrible
+      // sample for a system whose promise is that it would rather say nothing
+      // than say something wrong. Each row should be enough to rebuild the
+      // case as a fixture.
+      const weak = classifyWeakness(scan, sold);
+      if (weak) {
+        void recordWeakResult({
+          scanId,
+          reason: weak.reason,
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          cardNumber: scan.identification?.localId ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          game: scan.identification?.game ?? null,
+          grader: v?.slabGrader ?? null,
+          grade: v?.slabGrade ?? null,
+          confidence: weak.confidence,
+          sampleSize: weak.sampleSize,
+          priceUsd: sold ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null,
+          priceSource: sold ? "sold" : v?.liveAsk ? "ask" : v?.tcgplayer?.market ? "catalog" : null,
+          inputs: {
+            status: scan.status,
+            rejection: scan.rejection?.reason ?? null,
+            ocrNames: scan.ocrNames ?? [],
+            matchScore: scan.identification?.matchScore ?? null,
+            valuationSource: v?.source ?? null,
+            gradersHeld: v?.pricesByGrader ? Object.keys(v.pricesByGrader) : [],
+            estimated: v?.graded?.estimated ?? null,
+            hasWebEstimate: Boolean(v?.webEstimate),
+          },
+        });
+      }
       return scan;
     });
   }
@@ -1142,6 +1178,56 @@ export function sealedArtwork(lines: (string | null | undefined)[]): string | nu
       String(raw).trim(),
     );
     if (m) return m[1].trim();
+  }
+  return null;
+}
+
+/** Is this answer weak enough to belong in the backlog, and why?
+ *
+ *  Ordered by severity: the worst thing we can do is not know what the card
+ *  is, then to know the card and have no number for it, then to have a number
+ *  we cannot stand behind. A confident answer from a real sale returns null
+ *  and is never logged — the backlog is for work, not for volume.
+ */
+export function classifyWeakness(
+  scan: { status?: string; identification?: unknown; valuation?: any },
+  soldPrice: number | null,
+): { reason: string; confidence: string | null; sampleSize: number | null } | null {
+  if (scan.status === "rejected") return null; // a declined photo is not a weak answer
+  if (!scan.identification) {
+    return { reason: "no-identification", confidence: null, sampleSize: null };
+  }
+
+  const v = scan.valuation;
+  const grader = v?.slabGrader ?? null;
+  const grade = v?.slabGrade ?? null;
+  const point =
+    grader && grade != null
+      ? v?.pricesByGrader?.[grader]?.[String(grade).replace(/\.0$/, "")] ?? null
+      : null;
+
+  const anyPrice = soldPrice ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null;
+  if (anyPrice == null) {
+    return { reason: "no-price", confidence: null, sampleSize: null };
+  }
+
+  // A slab we can name but hold no sales for at ITS grade. The number on
+  // screen is an ask or a raw price standing in for a graded one, which is
+  // exactly the substitution the grader-keyed model exists to prevent.
+  if (grader && grade != null && soldPrice == null) {
+    return { reason: "no-sales-at-grade", confidence: null, sampleSize: null };
+  }
+
+  if (v?.graded?.estimated || v?.webEstimate) {
+    return { reason: "estimated-only", confidence: "low", sampleSize: null };
+  }
+
+  const confidence = point?.confidence ?? null;
+  const sampleSize = point?.count ?? null;
+  if (confidence === "low") return { reason: "low-confidence", confidence, sampleSize };
+  // A median over three sales is arithmetic, not evidence.
+  if (sampleSize != null && sampleSize < 5) {
+    return { reason: "tiny-sample", confidence, sampleSize };
   }
   return null;
 }
