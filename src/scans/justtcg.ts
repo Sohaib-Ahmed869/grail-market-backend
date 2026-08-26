@@ -2,6 +2,7 @@ import type { Valuation } from "@grailcard/shared";
 import { similarity } from "./similarity.js";
 import { recordUsage } from "./usage.js";
 import { db } from "../db.js";
+import { TtlCache } from "./ttlcache.js";
 
 // JustTCG: prices for 18 TCGs — fills gaps where the free catalog has no
 // prices (Digimon, Union Arena, Dragon Ball, ...). FREE tier: 1,000 req/mo.
@@ -97,8 +98,11 @@ async function search(key: string, q: string, gameSlug?: string): Promise<any[]>
   return (body?.data ?? body?.cards ?? []) as any[];
 }
 
-const priceCache = new Map<string, { at: number; v: Valuation | null }>();
 const CACHE_TTL = 12 * 3600 * 1000;
+const priceCache = new TtlCache<Valuation | null>(
+  CACHE_TTL,
+  Number(process.env.JUSTTCG_CACHE_MAX ?? 2000),
+);
 
 export async function fetchJustTcgPrice(
   cardName: string,
@@ -109,8 +113,8 @@ export async function fetchJustTcgPrice(
   if (!key) return null;
 
   const cacheKey = `${game}|${cardName}|${setName ?? ""}`;
-  const hit = priceCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.v;
+  const hit = priceCache.entry(cacheKey);
+  if (hit) return hit.v;
 
   try {
     const mapped = GAME_MAP[game];
@@ -129,7 +133,7 @@ export async function fetchJustTcgPrice(
     });
     const first = items[0];
     if (!first) {
-      priceCache.set(cacheKey, { at: Date.now(), v: null });
+      priceCache.set(cacheKey, null);
       return null;
     }
     const variant = (first.variants ?? [])[0] ?? first;
@@ -149,7 +153,7 @@ export async function fetchJustTcgPrice(
       },
       cardmarket: null,
     };
-    priceCache.set(cacheKey, { at: Date.now(), v });
+    priceCache.set(cacheKey, v);
     return v;
   } catch {
     return null;

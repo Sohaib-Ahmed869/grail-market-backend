@@ -10,16 +10,14 @@ import { normaliseVisionUrl } from "./visionurl.js";
 import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
-import {
-  fetchGradedPrices,
-  gradePointsFromStore,
-  type GradePoint,
-} from "./gradedprices.js";
+import type { GradePoint } from "./gradedprices.js";
+import { gradedPricesFor } from "./pricing.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
 import { recordScan, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
+import { visionGate, GateSaturated } from "./gate.js";
 import {
   writeGradePrices,
   readGradePrices,
@@ -60,14 +58,6 @@ function titleCase(s: string): string {
 const VISION_URL = normaliseVisionUrl(process.env.VISION_URL);
 const STORAGE_ROOT = join(process.cwd(), "storage");
 
-// How old a stored price may be before a scan is willing to buy a fresh one.
-//
-// Longer than it looks, on purpose: the refresh job is what keeps prices
-// current now, and it re-prices a busy card daily. This is the backstop for a
-// card the job has not reached yet, so it wants to be generous — a price from
-// last week with its age shown is a better answer than a credit spent on the
-// request path, and far better than a blank.
-const STORE_TTL_MS = Number(process.env.PRICE_STORE_TTL_HOURS ?? 24 * 14) * 3600 * 1000;
 
 @Injectable()
 export class ScansService {
@@ -509,62 +499,38 @@ export class ScansService {
       ident.cardId !== "described"
     ) {
       // Prices are READ from our own store first, and bought only when the
-      // store cannot answer.
-      //
-      // This is the inversion the whole cost model turns on. Asking the
-      // provider on the request path means the bill scales with traffic; the
-      // refresh job means it scales with the catalogue, which is roughly
-      // fixed. A warm store also takes the provider off the critical path
-      // entirely, so a PPT outage stops being a scan with no price on it.
-      const held = await readGradePrices(ident.cardId, STORE_TTL_MS);
-      if (held) {
-        pptByGrader = gradePointsFromStore(held);
-        pptByGrade = pptByGrader?.PSA ?? null;
-        if (pptByGrade) {
-          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-          scan.valuation.graded = {
-            source: "grailcard-store",
-            psa8: pptByGrade["8"]?.price ?? null,
-            psa9: pptByGrade["9"]?.price ?? null,
-            psa10: pptByGrade["10"]?.price ?? null,
-            estimated: false,
-          };
-        }
-        const rawHeld = await readRawPrice(ident.cardId, STORE_TTL_MS);
-        if (rawHeld != null && !scan.valuation?.tcgplayer?.market) {
-          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-          scan.valuation.source = "grailcard-store";
-          scan.valuation.tcgplayer = {
-            unit: "USD", variant: "market",
-            low: null, mid: null, high: null, market: rawHeld,
-          };
-        }
-      }
+      // store cannot answer. The order lives in pricing.ts because the search
+      // path needs exactly the same one — a scan and a search that land on the
+      // same card must not quote two different figures for it.
+      const looked = await gradedPricesFor({
+        catalogId: ident.cardId,
+        name: ident.name,
+        number: ident.localId,
+        setName: ident.setName,
+      });
+      pptByGrader = looked.byGrader;
+      pptByGrade = looked.byGrade;
 
-      // Nothing held, or nothing fresh enough — now it is worth a credit.
-      if (!pptByGrader) {
-        const ppt = await fetchGradedPrices(ident.name, ident.localId, ident.setName);
-        pptByGrade = ppt.byGrade ?? null;
-        pptByGrader = ppt.byGrader ?? null;
-        if (ppt.graded) {
-          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-          scan.valuation.graded = ppt.graded;
-        }
-        // vintage sets often have NO price in the free catalogs — PPT's raw
-        // market price fills the gap from the same call
-        if (ppt.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
-          scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-          scan.valuation.source = "pokemonpricetracker";
-          scan.valuation.tcgplayer = {
-            unit: "USD",
-            variant: "market",
-            low: null,
-            mid: null,
-            high: null,
-            market: ppt.rawUsd,
-          };
-        }
-        if (ppt.rawUsd != null) void writeRawPrice(ident.cardId, ppt.rawUsd);
+      if (pptByGrade) {
+        scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+        scan.valuation.graded = {
+          source: looked.source === "store" ? "grailcard-store" : "pokemonpricetracker",
+          psa8: pptByGrade["8"]?.price ?? null,
+          psa9: pptByGrade["9"]?.price ?? null,
+          psa10: pptByGrade["10"]?.price ?? null,
+          estimated: false,
+        };
+      }
+      // vintage sets often have NO price in the free catalogs — the ungraded
+      // market price fills that gap
+      if (looked.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
+        scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+        scan.valuation.source =
+          looked.source === "store" ? "grailcard-store" : "pokemonpricetracker";
+        scan.valuation.tcgplayer = {
+          unit: "USD", variant: "market",
+          low: null, mid: null, high: null, market: looked.rawUsd,
+        };
       }
     }
 
@@ -932,6 +898,27 @@ export class ScansService {
   }
 
   private async analyze(
+    file: Express.Multer.File,
+    kind: "front" | "back",
+  ): Promise<VisionAnalyzeResponse> {
+    // Bounded, because the vision process is a single copy of a 350 MB model
+    // and nothing else stands between it and however many people press the
+    // button at once. Waiting for a slot is fine; waiting in an unbounded
+    // queue is just a slower way to time out, so past a point we refuse.
+    try {
+      return await visionGate.run(() => this.callVision(file, kind));
+    } catch (err) {
+      if (err instanceof GateSaturated) {
+        console.warn(`[vision] ${err.message}`);
+        throw new ServiceUnavailableException(
+          "too many scans in progress — try again in a moment",
+        );
+      }
+      throw err;
+    }
+  }
+
+  private async callVision(
     file: Express.Multer.File,
     kind: "front" | "back",
   ): Promise<VisionAnalyzeResponse> {

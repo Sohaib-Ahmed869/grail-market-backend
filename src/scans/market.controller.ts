@@ -6,7 +6,7 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
-import { fetchGradedPrices } from "./gradedprices.js";
+import { gradedPricesFor } from "./pricing.js";
 import { readPrinting } from "./printing.js";
 
 @Controller("market")
@@ -95,6 +95,9 @@ export class MarketController {
   @Get("price")
   async price(
     @Query("name") name?: string,
+    // the catalogue id, when the caller has one. Search results carry it, and
+    // with it the answer comes from our own store instead of a paid lookup.
+    @Query("cardId") cardId?: string,
     @Query("set") setName?: string,
     @Query("number") number?: string,
     @Query("grader") grader?: string,
@@ -106,7 +109,15 @@ export class MarketController {
     const g = grade != null && grade !== "" ? Number(grade) : null;
     const grade_ = Number.isFinite(g) ? (g as number) : null;
 
-    const ppt = await fetchGradedPrices(name, number ?? null, setName ?? null);
+    // Same lookup the scan path uses — our store first, the provider only on a
+    // miss. Calling the provider directly here is how a search came to quote a
+    // freshly-bought figure for a card a scan was pricing from the store.
+    const ppt = await gradedPricesFor({
+      catalogId: cardId ?? null,
+      name,
+      number: number ?? null,
+      setName: setName ?? null,
+    });
     const sold =
       grader && grade_ != null
         ? ppt.byGrader?.[grader.toUpperCase()]?.[String(grade_).replace(/\.0$/, "")] ?? null

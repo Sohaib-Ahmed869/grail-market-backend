@@ -1,5 +1,6 @@
 import { recordUsage } from "./usage.js";
 import { comparePrinting, describePrinting, readPrinting, type Printing } from "./printing.js";
+import { TtlCache } from "./ttlcache.js";
 
 // Live eBay listings for a card, shown in-product rather than as a link out.
 //
@@ -75,7 +76,7 @@ const NOT_ONE_CARD =
  *  listing that has been seen by the whole market and refused by it. */
 const STALE_DAYS = 60;
 
-const cache = new Map<string, { at: number; v: ListingResult }>();
+const cache = new TtlCache<ListingResult>(TTL_MS, Number(process.env.LISTINGS_CACHE_MAX ?? 2000));
 let token: { value: string; expires: number } | null = null;
 
 async function getToken(): Promise<string | null> {
@@ -182,7 +183,7 @@ export async function fetchListings(opts: {
   else if (opts.language && !cardPrinting.language) cardPrinting.language = opts.language;
   const key = `${query}|${show}|${cardPrinting.family ?? ""}|${cardPrinting.language ?? ""}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.v;
+  if (hit) return hit;
 
   const tok = await getToken();
   if (!tok) return null;
@@ -354,7 +355,7 @@ export async function fetchListings(opts: {
       filteredToPrinting,
       otherPrintings,
     };
-    cache.set(key, { at: Date.now(), v });
+    cache.set(key, v);
     return v;
   } catch (err) {
     console.warn(`[ebay] listings failed for "${query}": ${(err as Error).message}`);

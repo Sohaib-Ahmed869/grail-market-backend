@@ -11,6 +11,7 @@
 
 import { similarity } from "./similarity.js";
 import { fetchListings } from "./ebaylistings.js";
+import { TtlCache } from "./ttlcache.js";
 
 const TCGDEX_ROOT = (process.env.TCGDEX_URL ?? "https://api.tcgdex.net/v2/en").replace(
   /\/(en|ja|fr|de|es|it|pt)$/,
@@ -62,7 +63,7 @@ export function readQuery(raw: string): { name: string; code: string | null; var
 }
 
 const TTL_MS = 60 * 60 * 1000;
-const cache = new Map<string, { at: number; v: SearchHit[] }>();
+const cache = new TtlCache<SearchHit[]>(TTL_MS, Number(process.env.SEARCH_CACHE_MAX ?? 5000));
 
 async function getJson(url: string, ms = 9000): Promise<any | null> {
   try {
@@ -252,7 +253,7 @@ export async function searchCards(q: string, limit = 24): Promise<SearchHit[]> {
   if (raw.length < 2) return [];
   const key = `${raw.toLowerCase()}|${limit}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.v;
+  if (hit) return hit;
 
   // Search the NAME, not the pasted title. "Son Gohan : Adolescence - FB08-001
   // (Alternate Art)" matches nothing in any catalogue as written.
@@ -310,6 +311,6 @@ export async function searchCards(q: string, limit = 24): Promise<SearchHit[]> {
     });
   }
 
-  cache.set(key, { at: Date.now(), v: all });
+  cache.set(key, all);
   return all;
 }
