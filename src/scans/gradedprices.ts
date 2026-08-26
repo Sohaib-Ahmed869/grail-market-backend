@@ -201,7 +201,25 @@ function cacheGet(key: string): PptPrices | null {
   const isMiss = v.graded == null && v.rawUsd == null;
   const ttl = isMiss ? MISS_TTL_MS : HIT_TTL_MS;
   if (Date.now() - row.fetched_at > ttl) return null;
-  return v;
+  // Stamp the age on the way out. A cached figure that reports no asOf is
+  // indistinguishable from one fetched a second ago, which is the exact
+  // confusion asOf exists to remove — and this layer can serve a price up to a
+  // week old.
+  return stampAge(v, new Date(row.fetched_at).toISOString());
+}
+
+/** Attach when we fetched these figures. Applied at every layer that can
+ *  return something it did not just buy. */
+function stampAge(v: PptPrices, asOf: string): PptPrices {
+  const mark = (pts: Record<string, GradePoint>) =>
+    Object.fromEntries(Object.entries(pts).map(([g, pt]) => [g, { ...pt, asOf }]));
+  return {
+    ...v,
+    byGrade: v.byGrade ? mark(v.byGrade) : v.byGrade,
+    byGrader: v.byGrader
+      ? Object.fromEntries(Object.entries(v.byGrader).map(([g, pts]) => [g, mark(pts)]))
+      : v.byGrader,
+  };
 }
 
 function cacheSet(key: string, v: PptPrices): void {
@@ -376,7 +394,7 @@ export async function fetchGradedPrices(
         };
     cacheSet(localKey, v); // warm the local layer so the next scan skips the round trip
     console.log(`[store] hit for "${cardName}" — no credits spent`);
-    return v;
+    return stampAge(v, stored.fetchedAt.toISOString());
   }
 
   // 3. only now is it worth spending a credit
