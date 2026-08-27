@@ -7,6 +7,7 @@ import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
 
 @Controller("market")
@@ -125,8 +126,7 @@ export class MarketController {
       grader && grade_ != null
         ? ppt.byGrader?.[grader.toUpperCase()]?.[String(grade_).replace(/\.0$/, "")] ?? null
         : null;
-    // the same ladder the scan path uses, so a search and a scan agree
-    const slabPrice = await priceForSlab(ppt.byGrader, grader ?? null, grade_);
+
 
     // Asks fill a gap; they never displace a real figure. For a GRADED card
     // that gap is "no completed sale at this grade". For an ungraded one the
@@ -135,8 +135,21 @@ export class MarketController {
     // the scan path follows, so the two agree.
     const raw = ppt.rawUsd ?? null;
     const specialPrinting = Boolean(printing && readPrinting(printing).family);
+    // A recorded sale normally means we do not need the asking market. It is
+    // not enough when that sale contradicts its own grade ladder — a BGS 8.5
+    // priced below the BGS 8 beneath it — because then the asks are the only
+    // thing that can correct it, and not fetching them leaves the broken
+    // figure standing unopposed.
+    const soldIsSuspect = Boolean(
+      grader &&
+        grade_ != null &&
+        ppt.byGrader &&
+        gradeIsInverted(ppt.byGrader[grader.toUpperCase()] ?? {}, grade_),
+    );
     const wantAsks =
-      grader && grade_ != null ? sold?.price == null : raw == null || specialPrinting;
+      grader && grade_ != null
+        ? sold?.price == null || soldIsSuspect
+        : raw == null || specialPrinting;
 
     const live =
       wantAsks
@@ -151,6 +164,23 @@ export class MarketController {
             japanese: lang === "ja",
           })
         : null;
+
+    // The same ladder the scan path uses, and decided AFTER the listings for
+    // the same reason: the asking market is the only thing that can overrule a
+    // recorded sale which contradicts its own grade ladder, and it is not
+    // known until here. A search and a scan must not answer differently.
+    const slabPrice = await priceForSlab(
+      ppt.byGrader,
+      grader ?? null,
+      grade_,
+      live
+        ? {
+            median: live.medianAsk,
+            count: live.listings.length,
+            filteredToGrade: Boolean(live.filteredToGrade),
+          }
+        : null,
+    );
 
     return {
       name,
