@@ -49,6 +49,25 @@ export function recordUsage(provider: string, units = 1): void {
   }
 }
 
+const readAllToday = db.prepare("SELECT provider, units FROM usage WHERE day = ?");
+
+/** Everything metered today, by provider — INCLUDING work done outside a scan.
+ *
+ *  The scan ledger records what each scan cost, which is the right number for
+ *  "is a scan expensive". It is the wrong number for "what have we spent",
+ *  because the refresh job, key verification and warm-ups all run outside a
+ *  scan context and so are charged to nobody. Today that gap is 6 credits
+ *  attributed against 20 actually spent; once the refresh job is doing its
+ *  job it will be most of the bill, invisible. */
+export function allUsedToday(): Record<string, number> {
+  try {
+    const rows = readAllToday.all(today()) as { provider: string; units: number }[];
+    return Object.fromEntries(rows.map((r) => [r.provider, r.units]));
+  } catch {
+    return {};
+  }
+}
+
 export function usedToday(provider: string): number {
   const row = readDay.get(provider, today()) as { units: number } | undefined;
   return row?.units ?? 0;
