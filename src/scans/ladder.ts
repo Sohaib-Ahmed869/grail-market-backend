@@ -23,6 +23,19 @@ import { modelPrice, type ModelledPrice } from "./ratio.js";
 // Step 2 before step 3 is the whole point. A six-month-old sale from the right
 // company beats a fresh one from the wrong company.
 
+/** Does THIS grade sit on the wrong side of an inversion?
+ *
+ *  Not just "does the ladder contain one somewhere" — the question is whether
+ *  the figure we are about to quote is the broken one. A BGS 8.5 priced below
+ *  the BGS 8 beneath it is not a market fact about 8.5s; it is a statement
+ *  that those particular comps are thin or contaminated. */
+export function gradeIsInverted(
+  grades: Record<string, GradePoint>,
+  grade: number,
+): boolean {
+  return findInversions(grades).some((i) => i.higher === grade);
+}
+
 export type LadderResult = {
   price: number;
   low: number | null;
@@ -30,7 +43,14 @@ export type LadderResult = {
   sampleSize: number | null;
   confidence: "high" | "medium" | "low";
   /** observed = a real sale at this exact key; the rest are derived */
-  basis: "observed" | "same-grader-interpolated" | "same-grader-nearest" | "modelled-cross-grader";
+  basis:
+    | "observed"
+    | "same-grader-interpolated"
+    | "same-grader-nearest"
+    | "modelled-cross-grader"
+    /** the recorded sale for this grade failed a data-quality check and the
+     *  current asking market for the SAME grader and grade was used instead */
+    | "ask-over-suspect-sale";
   method: string;
   /** human-readable provenance, for the "how this number was reached" list */
   explain: string;

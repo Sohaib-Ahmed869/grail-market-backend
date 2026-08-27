@@ -1,6 +1,6 @@
 import { fetchGradedPrices, gradePointsFromStore, type GradePoint } from "./gradedprices.js";
 import { readGradePrices, readRawPrice, writeRawPrice } from "../cards.store.js";
-import { priceForGrade, sanityCheck, type LadderResult } from "./ladder.js";
+import { priceForGrade, sanityCheck, gradeIsInverted, type LadderResult } from "./ladder.js";
 
 // One way to get a graded price, used by every caller.
 //
@@ -77,9 +77,54 @@ export async function priceForSlab(
   byGrader: Record<string, Record<string, GradePoint>> | null,
   grader: string | null | undefined,
   grade: number | null | undefined,
+  /** The current asking market for the SAME grader and grade, when we have
+   *  one that was genuinely filtered to it. */
+  ask?: { median: number | null; count: number; filteredToGrade: boolean } | null,
 ): Promise<LadderResult | null> {
   if (!byGrader || !grader || grade == null) return null;
-  const r = await priceForGrade(byGrader, grader.toUpperCase(), grade);
+  const G = grader.toUpperCase();
+  const r = await priceForGrade(byGrader, G, grade);
   if (!r) return null;
-  return sanityCheck(r, byGrader, grader.toUpperCase(), grade);
+
+  // A recorded sale normally outranks an asking price, and that rule is right:
+  // an ask is what somebody wants, a sale is what somebody paid, and the whole
+  // interface is built on the difference.
+  //
+  // It stops being right when the recorded figure is demonstrably broken. A
+  // Dragon Frontiers Gold Star came back at $10,500 for a BGS 8.5 while its
+  // own BGS 8 sat at $12,400 — within one company's scale a better card does
+  // not sell for less, so that figure is thin or contaminated comps rather
+  // than a market fact. Meanwhile three genuine Gold Star BGS 8.5 listings
+  // were asking $17,476, $23,302 and $30,000.
+  //
+  // Preferring a sale we can see is wrong over asks we can see are right is
+  // deference to a rule rather than to the evidence. So: only when the sale
+  // FAILED a check, only when the asks were filtered to this exact grader and
+  // grade, and always labelled as an asking price.
+  if (
+    r.basis === "observed" &&
+    ask?.median != null &&
+    ask.filteredToGrade &&
+    ask.count >= 2 &&
+    gradeIsInverted(byGrader[G] ?? {}, grade)
+  ) {
+    return {
+      price: ask.median,
+      low: null,
+      high: null,
+      sampleSize: ask.count,
+      confidence: "low",
+      basis: "ask-over-suspect-sale",
+      method: `median ask, ${ask.count} live ${G} ${grade} listings`,
+      explain:
+        `Our recorded ${G} ${grade} sales price this below the ${G} grade beneath it, ` +
+        `which cannot be right and means those comps are too thin or not all this card. ` +
+        `Using the current asking market for ${G} ${grade} instead — ${ask.count} live ` +
+        `listings. This is what sellers want, not what one sold for.`,
+      suspect: r.suspect,
+      suspectReason: r.suspectReason ?? null,
+    };
+  }
+
+  return sanityCheck(r, byGrader, G, grade);
 }

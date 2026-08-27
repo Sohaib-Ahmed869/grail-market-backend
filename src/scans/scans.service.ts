@@ -1024,6 +1024,41 @@ export class ScansService {
               cappedByStale: live.cappedByStale,
               otherPrintings: live.otherPrintings,
             };
+
+            // Re-run the ladder now that the asking market is known. It could
+            // not be consulted the first time — asks are fetched well after
+            // the graded figures — and it is the only thing that can overrule
+            // a recorded sale which contradicts its own grade ladder.
+            if (labelSlab?.grader && labelSlab.grade != null) {
+              const withAsk = await priceForSlab(
+                scan.valuation.pricesByGrader ?? null,
+                labelSlab.grader,
+                labelSlab.grade,
+                {
+                  median: live.medianAsk,
+                  count: live.listings.length,
+                  filteredToGrade: Boolean(live.filteredToGrade),
+                },
+              );
+              if (withAsk && withAsk.basis === "ask-over-suspect-sale") {
+                scan.valuation.slabPrice = {
+                  price: withAsk.price,
+                  low: withAsk.low,
+                  high: withAsk.high,
+                  sampleSize: withAsk.sampleSize,
+                  confidence: withAsk.confidence,
+                  basis: withAsk.basis,
+                  method: withAsk.method,
+                  explain: withAsk.explain,
+                  suspect: withAsk.suspect ?? null,
+                  suspectReason: withAsk.suspectReason ?? null,
+                };
+                console.warn(
+                  `[ladder] ${labelSlab.grader} ${labelSlab.grade}: recorded sale ` +
+                    `contradicts its own ladder — using the ${live.listings.length}-listing ask market instead`,
+                );
+              }
+            }
           }
         } catch {
           // asks are a fallback; failing to get them is not a failed scan

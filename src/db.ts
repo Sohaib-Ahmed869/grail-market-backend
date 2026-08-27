@@ -9,7 +9,11 @@ import { dirname, join } from "node:path";
 // it. Ask how I know.
 const dbPath =
   process.env.GRAILCARD_DB ?? join(process.cwd(), "data", "grailcard.db");
-mkdirSync(dirname(dbPath), { recursive: true });
+// ":memory:" is how the tests get isolation. The test runner puts each file in
+// its own process and runs them in parallel, so a shared file means several
+// processes opening one SQLite database at once and "database is locked"
+// appearing in whichever test happened to be unlucky.
+if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 
 export const db = new DatabaseSync(dbPath);
 

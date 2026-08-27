@@ -231,6 +231,7 @@ export const Valuation = z.object({
         "same-grader-interpolated",
         "same-grader-nearest",
         "modelled-cross-grader",
+        "ask-over-suspect-sale",
       ]),
       method: z.string(),
       /** one sentence for the "how this number was reached" list */

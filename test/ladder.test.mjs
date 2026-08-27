@@ -119,3 +119,46 @@ test("asks far above sold is said out loud, not silently resolved", async () => 
   assert.equal(soldVsAsk(1000, 1300).diverged, false);
   assert.equal(soldVsAsk(null, 17476).diverged, false);
 });
+
+// ---- an ask may overrule a sale, but only a broken one --------------------
+
+test("a broken sale loses to a clean ask at the same grader and grade", async () => {
+  const { priceForSlab } = await import("../src/scans/pricing.js");
+  // the real Gold Star ladder in USD: the 8.5 sits BELOW the 8 beneath it
+  const byGrader = {
+    BGS: { "7.5": pt(6350, 4), 8: pt(12400, 7), "8.5": pt(10500, 9), 9: pt(21300, 4) },
+  };
+  const r = await priceForSlab(byGrader, "BGS", 8.5, {
+    median: 17476.5, count: 3, filteredToGrade: true,
+  });
+  assert.equal(r.basis, "ask-over-suspect-sale");
+  assert.equal(r.price, 17476.5);
+  assert.match(r.explain, /cannot be right/);
+  assert.match(r.explain, /what sellers want, not what one sold for/);
+});
+
+test("a sound sale is never displaced by an ask", async () => {
+  const { priceForSlab } = await import("../src/scans/pricing.js");
+  // monotonic ladder — the recorded sale stands, however high the asks run
+  const byGrader = { BGS: { 8: pt(400, 7), "8.5": pt(800, 9), 9: pt(1500, 4) } };
+  const r = await priceForSlab(byGrader, "BGS", 8.5, {
+    median: 9999, count: 8, filteredToGrade: true,
+  });
+  assert.equal(r.basis, "observed");
+  assert.equal(r.price, 800);
+});
+
+test("an unfiltered or thin ask market cannot overrule anything", async () => {
+  const { priceForSlab } = await import("../src/scans/pricing.js");
+  const byGrader = { BGS: { 8: pt(12400, 7), "8.5": pt(10500, 9) } };
+  // asks not narrowed to this grade — mixing grades is the error we started from
+  const loose = await priceForSlab(byGrader, "BGS", 8.5, {
+    median: 17476, count: 9, filteredToGrade: false,
+  });
+  assert.equal(loose.basis, "observed");
+  // a single listing is an anecdote, not a market
+  const thin = await priceForSlab(byGrader, "BGS", 8.5, {
+    median: 17476, count: 1, filteredToGrade: true,
+  });
+  assert.equal(thin.basis, "observed");
+});
