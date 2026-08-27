@@ -34,6 +34,8 @@ export type GradePoint = {
   /** when we fetched it, ISO-8601. Null means it came live from the source in
    *  this request; a value means it came from the store and is that old. */
   asOf?: string | null;
+  /** the source does not separate label variants, so this figure blends them */
+  blended?: boolean | null;
 };
 
 export type PptPrices = {

@@ -642,22 +642,30 @@ export class ScansService {
     // Everything we can buy today is PSA sale data, so PSA is the only key that
     // gets populated — and that is precisely the point: a Beckett card now
     // shows an empty Beckett tab rather than PSA numbers wearing a BGS badge.
-    if (scan.valuation?.graded) {
+    // Separate the graded prices by the company that actually issued them.
+    //
+    // Gated on the per-grader data, NOT on valuation.graded. That flat field
+    // carries psa8/psa9/psa10 and nothing else, so it is null for a card with
+    // no PSA sales — and this whole block used to hang off it. A card with 23
+    // Beckett sales and zero PSA sales therefore dropped every one of them and
+    // persisted nothing, which is the failure this table exists to prevent,
+    // arriving from the other direction.
+    let byGrader: Record<string, Record<string, GradePoint>> =
+      pptByGrader && Object.keys(pptByGrader).length ? { ...pptByGrader } : {};
+    if (!Object.keys(byGrader).length && scan.valuation?.graded) {
+      // no per-grade evidence, only the bare flat numbers — keep them, under
+      // the grader that actually issued them
       const g = scan.valuation.graded;
-      // prefer the per-grade evidence from the provider (filtered price, sample
-      // size, its own confidence); fall back to the bare number where a source
-      // gives us nothing richer
-      // every grading company the source tracks, not just PSA
-      let byGrader: Record<string, Record<string, GradePoint>> =
-        pptByGrader && Object.keys(pptByGrader).length ? { ...pptByGrader } : {};
-      if (!Object.keys(byGrader).length) {
-        const psa: Record<string, GradePoint> = {};
-        if (g.psa8 != null) psa["8"] = { price: g.psa8 };
-        if (g.psa9 != null) psa["9"] = { price: g.psa9 };
-        if (g.psa10 != null) psa["10"] = { price: g.psa10 };
-        if (Object.keys(psa).length) byGrader = { PSA: psa };
-      }
-      if (Object.keys(byGrader).length > 0) scan.valuation.pricesByGrader = byGrader;
+      const psa: Record<string, GradePoint> = {};
+      if (g.psa8 != null) psa["8"] = { price: g.psa8 };
+      if (g.psa9 != null) psa["9"] = { price: g.psa9 };
+      if (g.psa10 != null) psa["10"] = { price: g.psa10 };
+      if (Object.keys(psa).length) byGrader = { PSA: psa };
+    }
+
+    if (Object.keys(byGrader).length > 0) {
+      scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+      scan.valuation.pricesByGrader = byGrader;
 
       // Persist under the composite key so the grader survives storage. Until
       // this table existed the schema had psa8/psa9/psa10 columns and no
@@ -681,15 +689,16 @@ export class ScansService {
             low: pt.low ?? null,
             high: pt.high ?? null,
             median: pt.median ?? null,
-            source: scan.valuation?.graded?.source ?? "unknown",
+            source: scan.valuation?.graded?.source ?? "pokemonpricetracker",
           })),
         );
       }
     }
+
     // the grader and grade as read off the label, so the UI never re-derives
     // them from a display string
     const labelSlab = frontRes.ocr?.slab as
-      | { grader?: string | null; grade?: number | null }
+      | { grader?: string | null; grade?: number | null; label?: string | null }
       | undefined;
     // A card can be identified exactly and still have no price source: Japanese
     // Pokemon sets carry no TCGplayer or Cardmarket feed, and our graded-sales
@@ -703,6 +712,52 @@ export class ScansService {
     if (scan.valuation && labelSlab?.grader) {
       scan.valuation.slabGrader = labelSlab.grader;
       scan.valuation.slabGrade = labelSlab.grade ?? null;
+      scan.valuation.slabLabelVariant = labelSlab.label ?? null;
+
+      // Beckett's 10 is not one product, and our source does not know that.
+      //
+      // A gold-label "10 Pristine" and a Black Label 10 — all four subgrades
+      // exactly 10 — are different goods. PPT reports a single `bgs10` key
+      // that blends them, so the median it gives is right for the gold label
+      // and off by an order of magnitude for the black one: this very card
+      // reports a blended BGS 10 of $1,364 while Black Label copies sell
+      // between $12,700 and $14,300.
+      //
+      // We can read the black label off the holder — vision already does, from
+      // four subgrades of 10 — and we cannot price it. So say exactly that.
+      // Quoting the blended figure under a Black Label badge is the confident
+      // wrong answer this system is supposed to refuse.
+      const variant = labelSlab.label ?? null;
+      const gradeKey = String(labelSlab.grade ?? "").replace(/\.0$/, "");
+      const ownPoint =
+        scan.valuation.pricesByGrader?.[labelSlab.grader]?.[gradeKey] ?? null;
+      if (ownPoint && variant === "black") {
+        ownPoint.blended = true;
+        ownPoint.confidence = "low";
+        void recordWeakResult({
+          scanId,
+          reason: "label-variant-unpriced",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: labelSlab.grader,
+          grade: labelSlab.grade ?? null,
+          confidence: "low",
+          sampleSize: ownPoint.count ?? null,
+          priceUsd: ownPoint.price ?? null,
+          priceSource: "sold-blended",
+          inputs: {
+            labelVariant: variant,
+            note:
+              "Black Label priced from a source that does not separate label " +
+              "variants; the figure blends gold-label Pristine sales and understates it",
+            subgrades: (frontRes.ocr?.slab as any)?.subgrades ?? null,
+          },
+        });
+        console.warn(
+          `[slab] ${labelSlab.grader} ${gradeKey} BLACK LABEL — our figure blends label variants and understates it`,
+        );
+      }
     }
 
     // Where we hold no SOLD comps at the card's own grade, fall back to what

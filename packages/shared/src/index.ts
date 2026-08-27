@@ -167,6 +167,16 @@ export const GradePoint = z.object({
    *  and a rumour. Null means the figure came straight from the source in this
    *  request. */
   asOf: z.string().nullish(),
+  /** True when the source does not separate label variants and this figure
+   *  therefore BLENDS them.
+   *
+   *  Beckett's 10 is not one product. A gold-label "10 Pristine" and a Black
+   *  Label 10 — all four subgrades exactly 10 — are different goods: the same
+   *  Destined Rivals Mewtwo shows a blended BGS 10 median near $1,360 while
+   *  Black Label copies sell between $12,700 and $14,300. A blended median is
+   *  right for the gold label and off by a factor of ten for the black one,
+   *  and nothing about the number itself says which you are looking at. */
+  blended: z.boolean().nullish(),
 });
 export type GradePoint = z.infer<typeof GradePoint>;
 
@@ -187,6 +197,11 @@ export const Valuation = z.object({
   // a grader from a bare number
   slabGrader: z.string().nullish(),
   slabGrade: z.number().nullish(),
+  /** The label variant printed on the holder: black | gold | pristine | gem.
+   *
+   *  Part of the price key, not decoration — see GradePoint.blended. The
+   *  vision service reads it off the slab and it used to stop there. */
+  slabLabelVariant: z.string().nullish(),
   /** printing/variant as the catalog names it: Holofoil, Reverse Holofoil… */
   variant: z.string().nullish(),
   /** Median LIVE ASKING price for this card at THIS grader and grade, from
