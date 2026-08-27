@@ -34,6 +34,15 @@ test("keys parse from one env var, and one key still behaves like one key", () =
   assert.deepEqual(configuredKeys(), []);
 });
 
+test("the same key listed twice is one key, not two budgets", () => {
+  process.env.PPT_API_KEY = "key-alpha,key-bravo,key-alpha";
+  const ids = configuredKeys().map((k) => k.id);
+  assert.equal(ids.length, 2, "the duplicate is collapsed");
+  assert.equal(new Set(ids).size, 2);
+  // left in, a duplicate would be summed twice and the budget would claim
+  // headroom that does not exist
+});
+
 test("a key's identity survives reordering, so state follows the key", () => {
   const before = configuredKeys().find((k) => k.key === "key-bravo").id;
   process.env.PPT_API_KEY = "key-charlie,key-bravo,key-alpha";

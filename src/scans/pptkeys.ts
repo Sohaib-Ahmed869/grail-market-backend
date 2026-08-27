@@ -47,11 +47,19 @@ function digest(key: string): string {
  *  — one entry in the pool, same behaviour, no rotation to reason about. */
 export function configuredKeys(): { id: string; key: string }[] {
   const raw = process.env.PPT_API_KEY ?? "";
-  return raw
-    .split(/[,\s]+/)
-    .map((k) => k.trim())
-    .filter(Boolean)
-    .map((key) => ({ id: digest(key), key }));
+  const seen = new Set<string>();
+  const out: { id: string; key: string }[] = [];
+  for (const key of raw.split(/[,\s]+/).map((k) => k.trim()).filter(Boolean)) {
+    const id = digest(key);
+    // The same key listed twice is one key. Left in, it would be counted twice
+    // in the pool's remaining credits — so the budget would claim headroom
+    // that does not exist, and the job would plan a batch it cannot pay for.
+    // Easy to do by accident when keys are pasted in from several places.
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, key });
+  }
+  return out;
 }
 
 function stateKey(id: string): string {

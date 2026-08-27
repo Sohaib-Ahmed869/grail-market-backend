@@ -19,3 +19,4 @@ vision/tests/output/
 .env
 .env.local
 .DS_Store
+.test-db/

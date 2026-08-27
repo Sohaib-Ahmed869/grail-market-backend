@@ -12,7 +12,7 @@
     "dev:vision": "node scripts/venv-python.mjs -m uvicorn app.main:app --app-dir vision --port 8100 --reload",
     "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.mjs",
+    "test": "GRAILCARD_DB=.test-db/grailcard.db tsx --test test/*.test.mjs",
     "test:vision": "node scripts/venv-python.mjs --cwd vision -m pytest tests -q",
     "test:all": "npm run test && npm run test:vision",
     "vision:install": "node scripts/venv-python.mjs -m pip install -r vision/requirements.txt",

@@ -1,11 +1,17 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-const dataDir = join(process.cwd(), "data");
-mkdirSync(dataDir, { recursive: true });
+// Where the local cache lives. Overridable because the tests must NOT open the
+// same file as a running server: SQLite hands out "database is locked" when
+// they collide, and — far worse — a test that clears state to get a clean
+// fixture will happily clear the real provider quotas and breakers alongside
+// it. Ask how I know.
+const dbPath =
+  process.env.GRAILCARD_DB ?? join(process.cwd(), "data", "grailcard.db");
+mkdirSync(dirname(dbPath), { recursive: true });
 
-export const db = new DatabaseSync(join(dataDir, "grailcard.db"));
+export const db = new DatabaseSync(dbPath);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS scans (

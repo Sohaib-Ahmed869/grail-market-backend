@@ -15,13 +15,20 @@ if (existsSync(envPath)) {
 
 const { ingestPrices } = await import("./prices.js");
 const { backfillCatalogCards } = await import("./backfill.js");
+const { verifyKeys } = await import("./verify.js");
 const { initStore, storeConfigured } = await import("../cards.store.js");
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const backfillOnly = args.includes("--backfill");
+const verifyOnly = args.includes("--verify-keys");
 const limitArg = args.find((a) => a.startsWith("--limit="));
 const limit = limitArg ? Number(limitArg.split("=")[1]) : undefined;
+
+if (verifyOnly) {
+  const checks = await verifyKeys();
+  process.exit(checks.some((c) => !c.ok) ? 1 : 0);
+}
 
 if (!storeConfigured()) {
   console.error("[ingest] DATABASE_URL is not set — the work list lives in Postgres");
