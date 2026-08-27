@@ -6,7 +6,7 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
-import { gradedPricesFor } from "./pricing.js";
+import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { readPrinting } from "./printing.js";
 
 @Controller("market")
@@ -125,6 +125,8 @@ export class MarketController {
       grader && grade_ != null
         ? ppt.byGrader?.[grader.toUpperCase()]?.[String(grade_).replace(/\.0$/, "")] ?? null
         : null;
+    // the same ladder the scan path uses, so a search and a scan agree
+    const slabPrice = await priceForSlab(ppt.byGrader, grader ?? null, grade_);
 
     // Asks fill a gap; they never displace a real figure. For a GRADED card
     // that gap is "no completed sale at this grade". For an ungraded one the
@@ -159,6 +161,7 @@ export class MarketController {
       rawUsd: raw,
       byGrader: ppt.byGrader ?? null,
       sold,
+      slabPrice,
       liveAsk:
         live?.medianAsk != null
           ? {

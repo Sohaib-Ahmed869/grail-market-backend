@@ -202,6 +202,33 @@ export const Valuation = z.object({
    *  Part of the price key, not decoration — see GradePoint.blended. The
    *  vision service reads it off the slab and it used to stop there. */
   slabLabelVariant: z.string().nullish(),
+  /** The figure for THIS holder — this card, this company, this grade.
+   *
+   *  Carries how it was reached, because "a sale of this exact slab" and "a
+   *  ratio measured across nine other cards" are both useful and must never
+   *  look alike. `basis` says which. A modelled figure always arrives low
+   *  confidence and with an interval. */
+  slabPrice: z
+    .object({
+      price: z.number(),
+      low: z.number().nullish(),
+      high: z.number().nullish(),
+      sampleSize: z.number().nullish(),
+      confidence: z.enum(["high", "medium", "low"]),
+      basis: z.enum([
+        "observed",
+        "same-grader-interpolated",
+        "same-grader-nearest",
+        "modelled-cross-grader",
+      ]),
+      method: z.string(),
+      /** one sentence for the "how this number was reached" list */
+      explain: z.string(),
+      /** the figure failed a plausibility check and must not be led with */
+      suspect: z.boolean().nullish(),
+      suspectReason: z.string().nullish(),
+    })
+    .nullish(),
   /** printing/variant as the catalog names it: Holofoil, Reverse Holofoil… */
   variant: z.string().nullish(),
   /** Median LIVE ASKING price for this card at THIS grader and grade, from

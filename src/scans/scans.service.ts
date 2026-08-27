@@ -11,7 +11,7 @@ import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
 import type { GradePoint } from "./gradedprices.js";
-import { gradedPricesFor } from "./pricing.js";
+import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
@@ -713,6 +713,47 @@ export class ScansService {
       scan.valuation.slabGrader = labelSlab.grader;
       scan.valuation.slabGrade = labelSlab.grade ?? null;
       scan.valuation.slabLabelVariant = labelSlab.label ?? null;
+
+      // The figure for THIS holder, down the ladder: a sale at this exact
+      // (company, grade) first; this company's own neighbouring grades next;
+      // a measured cross-grader ratio only after that, labelled and with an
+      // interval. Reaching for PSA first is what this replaces — a PSA 10 sale
+      // is evidence about PSA 10 and about nothing else.
+      const ladder = await priceForSlab(
+        scan.valuation.pricesByGrader ?? null,
+        labelSlab.grader,
+        labelSlab.grade ?? null,
+      );
+      if (ladder) {
+        scan.valuation.slabPrice = {
+          price: ladder.price,
+          low: ladder.low,
+          high: ladder.high,
+          sampleSize: ladder.sampleSize,
+          confidence: ladder.confidence,
+          basis: ladder.basis,
+          method: ladder.method,
+          explain: ladder.explain,
+          suspect: ladder.suspect ?? null,
+          suspectReason: ladder.suspectReason ?? null,
+        };
+        if (ladder.basis !== "observed" || ladder.suspect) {
+          void recordWeakResult({
+            scanId,
+            reason: ladder.suspect ? "estimate-out-of-envelope" : `derived-${ladder.basis}`,
+            cardName: scan.identification?.name ?? null,
+            setName: scan.identification?.setName ?? null,
+            catalogId: scan.identification?.cardId ?? null,
+            grader: labelSlab.grader,
+            grade: labelSlab.grade ?? null,
+            confidence: ladder.confidence,
+            sampleSize: ladder.sampleSize,
+            priceUsd: ladder.price,
+            priceSource: ladder.basis,
+            inputs: { method: ladder.method, explain: ladder.explain, suspectReason: ladder.suspectReason ?? null },
+          });
+        }
+      }
 
       // Beckett's 10 is not one product, and our source does not know that.
       //

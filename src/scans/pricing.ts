@@ -1,5 +1,6 @@
 import { fetchGradedPrices, gradePointsFromStore, type GradePoint } from "./gradedprices.js";
 import { readGradePrices, readRawPrice, writeRawPrice } from "../cards.store.js";
+import { priceForGrade, sanityCheck, type LadderResult } from "./ladder.js";
 
 // One way to get a graded price, used by every caller.
 //
@@ -63,4 +64,22 @@ export async function gradedPricesFor(card: {
     rawUsd: ppt.rawUsd ?? null,
     source: ppt.byGrader || ppt.rawUsd != null ? "provider" : "none",
   };
+}
+
+
+/** The figure for THIS holder: this card, this company, this grade.
+ *
+ *  Everything the ladder decides passes through here, including the sanity
+ *  band, so no caller can accidentally present a modelled figure as a sale.
+ *  Returns null when we genuinely cannot say — which is a real answer and the
+ *  only honest one when the alternative is a different company's number. */
+export async function priceForSlab(
+  byGrader: Record<string, Record<string, GradePoint>> | null,
+  grader: string | null | undefined,
+  grade: number | null | undefined,
+): Promise<LadderResult | null> {
+  if (!byGrader || !grader || grade == null) return null;
+  const r = await priceForGrade(byGrader, grader.toUpperCase(), grade);
+  if (!r) return null;
+  return sanityCheck(r, byGrader, grader.toUpperCase(), grade);
 }
