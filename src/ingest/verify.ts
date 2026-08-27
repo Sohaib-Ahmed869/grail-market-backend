@@ -1,5 +1,6 @@
 import { configuredKeys, recordKeyQuota, readState } from "../scans/pptkeys.js";
 import { markKeyOk } from "../scans/keystore.js";
+import { recordUsage } from "../scans/usage.js";
 
 // Prove every configured key actually works, and learn its budget.
 //
@@ -42,6 +43,11 @@ export async function verifyKeys(): Promise<KeyCheck[]> {
         headers: { Authorization: `Bearer ${k.key}` },
         signal: AbortSignal.timeout(12000),
       });
+      // Meter it. Verification is a real call against a real allowance, and
+      // leaving it uncounted is how the local spend figure drifts below what
+      // the provider reports — 26 counted against 112 actually gone, with the
+      // difference sitting in checks nobody was charging for.
+      recordUsage("ppt", 1);
       recordKeyQuota(k.id, res);
       if (res.ok) void markKeyOk(k.id);
       const s = readState(k.id);

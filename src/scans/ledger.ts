@@ -297,3 +297,41 @@ export async function recordWeakResult(r: WeakResult): Promise<void> {
     console.warn(`[weak] log write failed: ${(err as Error).message}`);
   }
 }
+
+/** What a scan has ACTUALLY cost a provider lately, per scan.
+ *
+ *  The budget used to assume this. Gemini was assumed at 2 requests a scan —
+ *  one identify plus one grounded price fallback — but identifyWithGemini
+ *  loops over a primary and a fallback model and meters each attempt, and the
+ *  identify step itself can fire more than once in a scan (label arbitration,
+ *  then the catalog-failure path). A real scan came in at 4. The headline
+ *  "scans left" was therefore about twice what the budget could actually buy,
+ *  which is the wrong direction for a number people plan against.
+ *
+ *  So it is measured. Returns null until there is enough history to mean
+ *  anything, and the caller keeps its assumption for that case.
+ */
+export async function observedCostPerScan(
+  provider: string,
+  minScans = 5,
+): Promise<number | null> {
+  if (!(await ensure())) return null;
+  const p = storePool();
+  if (!p) return null;
+  try {
+    const { rows } = await p.query(
+      `SELECT count(*)::int AS scans,
+              COALESCE(SUM((credits ->> $1)::numeric), 0) AS units
+         FROM scan_ledger
+        WHERE at >= now() - interval '30 days'
+          AND credits ? $1`,
+      [provider],
+    );
+    const scans = Number(rows[0]?.scans ?? 0);
+    const units = Number(rows[0]?.units ?? 0);
+    if (scans < minScans || units <= 0) return null;
+    return units / scans;
+  } catch {
+    return null;
+  }
+}
