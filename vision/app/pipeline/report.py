@@ -20,6 +20,34 @@ def _b64_png(image: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+
+def _room_for_a_label(card_fill: float | None, headroom: float | None) -> bool:
+    """Might this photo contain a grading label we have not read yet?
+
+    Getting this wrong in the FALSE direction is expensive and silent: the
+    label is never read, the card is reported as raw, and a graded card is
+    quoted at its ungraded price — an order of magnitude out, with nothing on
+    screen suggesting anything went wrong. Getting it wrong in the TRUE
+    direction costs one extra OCR pass on a photo that turns out to have no
+    label. Those are not remotely the same price, so this leans generous.
+
+    Fill alone was the whole test, at < 0.65, and it is a weak signal: a CGC
+    8.5 Armored Mewtwo photographed close came in at 0.6606 and was priced as
+    a raw card, missing by one point of a percent.
+
+    Headroom is the better signal and the reason is geometric. A slab's label
+    sits ABOVE the card, so the detected card cannot start at the top of the
+    frame; a raw card photographed to fill the frame can. Either signal is
+    enough on its own.
+    """
+    if card_fill is not None and card_fill < 0.80:
+        return True
+    # the card starts far enough down the frame that something sits above it
+    if headroom is not None and headroom > 0.06:
+        return True
+    return False
+
+
 def _quality_dict(q) -> dict:
     return {
         "blurScore": q.blur_score,
@@ -55,11 +83,16 @@ def run_pipeline(
     # frame because the case and its label surround it; a raw-card photo fills
     # it. Below the threshold there is room for a label, so it is worth a look.
     card_fill = None
+    headroom = None
     if det is not None and getattr(det, "quad", None) is not None:
-        frame_area = float(image.shape[0] * image.shape[1])
+        frame_h, frame_w = image.shape[0], image.shape[1]
+        frame_area = float(frame_h * frame_w)
         if frame_area > 0:
             card_fill = cv2.contourArea(det.quad.astype(np.float32)) / frame_area
-    room_for_a_label = card_fill is not None and card_fill < 0.65
+        if frame_h > 0:
+            # how far down the frame the card starts, as a fraction of height
+            headroom = float(det.quad[:, 1].min()) / float(frame_h)
+    room_for_a_label = _room_for_a_label(card_fill, headroom)
 
     if (
         ocr is not None
