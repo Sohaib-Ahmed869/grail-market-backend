@@ -856,6 +856,11 @@ export class ScansService {
             number: scan.identification.localId,
             grader: askGrader,
             grade: askGrade,
+            // Beckett's 10 is two products; ask for the one on this holder.
+            labelVariant:
+              (labelSlab?.label === "black" || labelSlab?.label === "gold")
+                ? labelSlab.label
+                : null,
             limit: 24,
             // the identified name is itself evidence of the printing, and it
             // is the repaired form: the raw label says "IST -SCYTHER" where

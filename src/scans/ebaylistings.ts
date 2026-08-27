@@ -24,6 +24,10 @@ export type Listing = {
   /** grader + grade parsed out of the title, where present */
   grader: string | null;
   grade: number | null;
+  /** Beckett label variant read from the title: black | gold. A Black Label 10
+   *  and a gold-label Pristine 10 are different goods at very different money,
+   *  and this is the only place we can tell them apart. */
+  labelVariant: "black" | "gold" | null;
   /** printing named in the title, e.g. "Manga Art · Alt Art · Japanese" */
   printing: string | null;
   /** days this listing has been up unsold. The single most useful number on a
@@ -39,6 +43,8 @@ export type ListingResult = {
   query: string;
   /** true when we filtered to the card's own grader and grade */
   filteredToGrade: boolean;
+  /** true when the asks were narrowed to the slab's own label variant */
+  filteredToLabel: boolean;
   /** listings that survived every filter, of which `listings` shows the first few */
   matched: number;
   /** how many extreme listings were trimmed before taking the median */
@@ -118,12 +124,54 @@ function gradeFromTitle(title: string): { grader: string | null; grade: number |
   return { grader, grade: Number.isFinite(grade) && grade >= 1 && grade <= 10 ? grade : null };
 }
 
+/** Which Beckett label a listing is for: black | gold | null.
+ *
+ *  Beckett's 10 is two products — a Black Label needs all four subgrades at
+ *  exactly 10 — and our sold-comp source publishes a single `bgs10` key that
+ *  blends them. So the only place we can see the difference is in what sellers
+ *  write, and the gap is worth about ten times the price: a Destined Rivals
+ *  Mewtwo blends to $1,364 while Black Label copies sell above $12,700.
+ *
+ *  "BLACK" is a minefield in Pokemon and almost none of it is Beckett. Black
+ *  Star Promos are an entire promo line, Black Bolt is a set, Black & White is
+ *  an era, and MBA Black Diamond is somebody else's product entirely — there
+ *  is one in the live listings for the card that prompted this. Each of those
+ *  is guarded explicitly rather than hoped about, in the same spirit as the
+ *  negative guards that stop a grade token meaning a card is graded.
+ *
+ *  And a black label only exists at 10. A title claiming one at 9.5 is a
+ *  seller being loose with words, not a label. */
+export function labelFromTitle(title: string): "black" | "gold" | null {
+  const U = title.toUpperCase();
+
+  // not a Beckett label, whatever the word "black" is doing here
+  const DECOYS = [
+    /\bBLACK\s*STAR\b/,        // Black Star Promos — a promo line
+    /\bBLACK\s*BOLT\b/,        // a set
+    /\bBLACK\s*(?:&|AND)\s*WHITE\b/, // an era
+    /\bBLACK\s*DIAMOND\b/,     // MBA's product, not Beckett's label
+  ];
+  const decoyed = DECOYS.some((re) => re.test(U));
+
+  const { grader, grade } = gradeFromTitle(title);
+  if (grader !== "BGS") return null;
+
+  if (!decoyed && /\bBLACK\s*LABEL\b/.test(U)) {
+    // Beckett issues a black label at 10 and nowhere else
+    return grade === 10 ? "black" : null;
+  }
+  if (/\bPRISTINE\b/.test(U) && grade === 10) return "gold";
+  return null;
+}
+
 export async function fetchListings(opts: {
   name: string;
   setName?: string | null;
   number?: string | null;
   grader?: string | null;
   grade?: number | null;
+  /** the slab's Beckett label variant, so asks can be narrowed to it */
+  labelVariant?: "black" | "gold" | null;
   limit?: number;
   /** everything we know in words about THIS copy — slab label lines, the card's
    *  own OCR, the vision model's printing call. Read for a printing, not
@@ -208,6 +256,7 @@ export async function fetchListings(opts: {
     const listings: Listing[] = items.map((it) => {
       const rawTitle = String(it.title ?? "");
       const { grader, grade } = gradeFromTitle(rawTitle);
+      const labelVariant = labelFromTitle(rawTitle);
       const p = readPrinting(rawTitle);
       return {
         title: rawTitle.slice(0, 140),
@@ -219,6 +268,7 @@ export async function fetchListings(opts: {
         seller: it.seller?.username ?? null,
         grader,
         grade,
+        labelVariant,
         printing: describePrinting(p),
         printingMatch: comparePrinting(cardPrinting, p),
         ageDays: it.itemCreationDate
@@ -248,6 +298,7 @@ export async function fetchListings(opts: {
     // When we know the card's grade, surface listings for THAT grade —
     // a PSA 10 asking price tells the owner of a PSA 5 very little.
     let filteredToGrade = false;
+    let filteredToLabel = false;
     if (opts.grader && opts.grade != null) {
       const exact = filtered.filter(
         (l) => l.grader === opts.grader && l.grade === opts.grade,
@@ -255,6 +306,24 @@ export async function fetchListings(opts: {
       if (exact.length >= 2) {
         filtered = exact;
         filteredToGrade = true;
+      }
+    }
+
+    // Narrow again to the LABEL VARIANT where we know it.
+    //
+    // "BGS 10" is not one price. A Black Label — all four subgrades exactly 10
+    // — and a gold-label Pristine share that string, and on the card that
+    // prompted this the gap is roughly ten times: blended sold comps put BGS 10
+    // near $1,364 while Black Label copies ask and sell above $12,700. Leaving
+    // them mixed produces a median that describes neither.
+    //
+    // Same bar as the grade filter: at least two, or we are not narrowing on
+    // evidence, we are narrowing on one listing.
+    if (opts.labelVariant) {
+      const sameLabel = filtered.filter((l) => l.labelVariant === opts.labelVariant);
+      if (sameLabel.length >= 2) {
+        filtered = sameLabel;
+        filteredToLabel = true;
       }
     }
     // Narrow to OUR printing. This is the difference between pricing a card and
@@ -344,6 +413,7 @@ export async function fetchListings(opts: {
       matched: priced.length,
       query,
       filteredToGrade,
+      filteredToLabel,
       medianAsk: median,
       askLow: values[0] ?? null,
       askHigh: values[values.length - 1] ?? null,

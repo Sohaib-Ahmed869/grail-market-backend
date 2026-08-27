@@ -48,12 +48,14 @@ export class MarketController {
     @Query("number") number?: string,
     @Query("grader") grader?: string,
     @Query("grade") grade?: string,
+    @Query("label") label?: string,
     @Query("printing") printing?: string,
     @Query("ja") ja?: string,
     @Query("lang") lang?: string,
   ) {
     const empty = {
-      listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "", filteredToGrade: false,
+      listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "",
+      filteredToGrade: false, filteredToLabel: false,
       medianAsk: null, askLow: null, askHigh: null,
       printing: null, filteredToPrinting: false, otherPrintings: [],
       staleCeiling: null, staleCeilingDays: null, cappedByStale: false,
@@ -67,6 +69,7 @@ export class MarketController {
         number: number ?? null,
         grader: grader ?? null,
         grade: Number.isFinite(g) ? g : null,
+        labelVariant: label === "black" || label === "gold" ? label : null,
         // the panel must narrow to the same printing the valuation used, or the
         // two disagree on screen for reasons no reader can see
         printingHint: printing ?? null,
