@@ -39,18 +39,25 @@ export function storePool(): Pool | null {
 
 function getPool(): Pool | null {
   if (!storeConfigured()) return null;
-  pool ??= new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 4,
-    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
-    idleTimeoutMillis: 30_000,
-    // Neon terminates idle connections; letting the pool retire them quietly
-    // avoids noisy unhandled errors on long-lived dev servers.
-    allowExitOnIdle: true,
-  });
-  pool.on("error", (err) => {
-    console.warn(`[store] idle client error: ${err.message}`);
-  });
+  // The handler is attached INSIDE the construction branch. Attaching it on
+  // every getPool() call added a listener per call — Node warns at eleven, and
+  // on a long-running server it climbs without bound. Every one of them then
+  // logs the same error, so a single dropped connection prints N times and
+  // looks like N failures.
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 4,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+      idleTimeoutMillis: 30_000,
+      // Neon terminates idle connections; letting the pool retire them quietly
+      // avoids noisy unhandled errors on long-lived dev servers.
+      allowExitOnIdle: true,
+    });
+    pool.on("error", (err) => {
+      console.warn(`[store] idle client error: ${err.message}`);
+    });
+  }
   return pool;
 }
 

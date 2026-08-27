@@ -1,4 +1,5 @@
 import { configuredKeys, recordKeyQuota, readState } from "../scans/pptkeys.js";
+import { markKeyOk } from "../scans/keystore.js";
 
 // Prove every configured key actually works, and learn its budget.
 //
@@ -24,7 +25,10 @@ export type KeyCheck = {
 export async function verifyKeys(): Promise<KeyCheck[]> {
   const keys = configuredKeys();
   if (keys.length === 0) {
-    console.warn("[verify] PPT_API_KEY is not set");
+    console.warn(
+      "[verify] no keys — the pool is empty. Add one with:\n" +
+        "         npm run keys -- --add <key>",
+    );
     return [];
   }
   console.log(`[verify] checking ${keys.length} key(s), 1 card each`);
@@ -39,6 +43,7 @@ export async function verifyKeys(): Promise<KeyCheck[]> {
         signal: AbortSignal.timeout(12000),
       });
       recordKeyQuota(k.id, res);
+      if (res.ok) void markKeyOk(k.id);
       const s = readState(k.id);
       const ok = res.ok || res.status === 429; // 429 means the key is real, just spent
       out.push({

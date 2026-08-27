@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { db } from "../db.js";
+import { loadKeys, keystoreConfigured } from "./keystore.js";
 
 // A pool of provider keys, each with its own budget and its own breaker.
 //
@@ -41,14 +42,55 @@ function digest(key: string): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 8);
 }
 
-/** The configured keys, in order. Comma or whitespace separated.
+// Keys from the encrypted store, held in memory.
+//
+// pickKey() runs on the scan path and must stay synchronous — an await per
+// lookup to fetch keys would put a database round trip in front of every
+// price. So the store is read at boot and on a slow interval, and the pool
+// reads this snapshot. A key added or revoked elsewhere takes effect within
+// one refresh rather than instantly, which is the right trade for a list that
+// changes a few times a year.
+let dbKeys: { id: string; key: string }[] = [];
+let lastLoad = 0;
+const RELOAD_MS = Number(process.env.PPT_KEY_RELOAD_MS ?? 5 * 60_000);
+
+/** Refresh the in-memory snapshot from the encrypted store. */
+export async function reloadKeys(): Promise<number> {
+  if (!keystoreConfigured()) return 0;
+  const loaded = await loadKeys();
+  dbKeys = loaded;
+  lastLoad = Date.now();
+  return loaded.length;
+}
+
+/** Kick a reload if the snapshot is stale. Never awaited by a lookup. */
+function maybeReload(): void {
+  if (!keystoreConfigured()) return;
+  if (Date.now() - lastLoad < RELOAD_MS) return;
+  lastLoad = Date.now(); // claim it now so concurrent callers do not pile on
+  void reloadKeys().catch(() => {
+    lastLoad = 0; // let the next caller retry
+  });
+}
+
+/** The configured keys: the encrypted store first, then anything still in the
+ *  env var.
  *
- *  A single key is the overwhelmingly common case and stays exactly as it was
- *  — one entry in the pool, same behaviour, no rotation to reason about. */
+ *  Both, deliberately. The env var stays a working escape hatch for a local
+ *  box or a hotfix when the store is unreachable, and a key present in both
+ *  places dedupes to one entry because the id is derived from the key itself.
+ *
+ *  A single key is still the simple case and behaves exactly as it always did. */
 export function configuredKeys(): { id: string; key: string }[] {
+  maybeReload();
   const raw = process.env.PPT_API_KEY ?? "";
   const seen = new Set<string>();
   const out: { id: string; key: string }[] = [];
+  for (const k of dbKeys) {
+    if (seen.has(k.id)) continue;
+    seen.add(k.id);
+    out.push(k);
+  }
   for (const key of raw.split(/[,\s]+/).map((k) => k.trim()).filter(Boolean)) {
     const id = digest(key);
     // The same key listed twice is one key. Left in, it would be counted twice

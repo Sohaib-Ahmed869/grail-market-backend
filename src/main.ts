@@ -17,6 +17,7 @@ if (existsSync(envPath)) {
 import { AppModule } from "./app.module.js";
 import { initStore, storeConfigured } from "./cards.store.js";
 import { warmSearchIndex } from "./scans/search.js";
+import { reloadKeys } from "./scans/pptkeys.js";
 
 const PORT = Number(process.env.PORT ?? 8180);
 
@@ -27,6 +28,11 @@ async function bootstrap() {
   // shared card store — best-effort, a scan still works without it
   if (storeConfigured()) await initStore();
   else console.log("[store] DATABASE_URL not set — using local cache only");
+
+  // Provider keys live encrypted in the store. Loaded before we start serving
+  // so the first scan has a pool rather than whatever is left in the env var.
+  const n = await reloadKeys().catch(() => 0);
+  if (n) console.log(`[keys] ${n} provider key(s) loaded from the store`);
 
   await app.listen(PORT);
   console.log(`grailcard api listening on http://localhost:${PORT}`);

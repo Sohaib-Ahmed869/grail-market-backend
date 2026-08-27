@@ -16,6 +16,7 @@ if (existsSync(envPath)) {
 const { ingestPrices } = await import("./prices.js");
 const { backfillCatalogCards } = await import("./backfill.js");
 const { verifyKeys } = await import("./verify.js");
+const { reloadKeys } = await import("../scans/pptkeys.js");
 const { initStore, storeConfigured } = await import("../cards.store.js");
 
 const args = process.argv.slice(2);
@@ -24,6 +25,12 @@ const backfillOnly = args.includes("--backfill");
 const verifyOnly = args.includes("--verify-keys");
 const limitArg = args.find((a) => a.startsWith("--limit="));
 const limit = limitArg ? Number(limitArg.split("=")[1]) : undefined;
+
+// The pool lives encrypted in the store, and configuredKeys() reads an
+// in-memory snapshot that the server fills at boot. A CLI has no boot, so it
+// has to load once before anything asks for a key — otherwise every command
+// here sees an empty pool and reports "not set" for keys that are right there.
+await reloadKeys().catch(() => 0);
 
 if (verifyOnly) {
   const checks = await verifyKeys();

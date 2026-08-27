@@ -84,7 +84,13 @@ bought on the request path.
   every game — including the ones we cannot price yet.
 - Adding a column to `SCHEMA` in `cards.store.ts` does NOT alter an existing
   table. Add an entry to `MIGRATIONS` beside it. Append, never edit.
-- `PPT_API_KEY` may hold several comma-separated keys. Each carries its own
+- Provider keys live ENCRYPTED in `provider_keys` (AES-256-GCM, master secret
+  in `PPT_KEY_SECRET`). Manage them with `npm run keys`. `pickKey()` is on the
+  scan path and stays synchronous, so it reads an in-memory snapshot refreshed
+  at boot and on an interval — anything that runs outside the server must
+  `await reloadKeys()` first or it sees an empty pool.
+- `PPT_API_KEY` may hold several comma-separated keys, added to that pool as a
+  fallback. Each carries its own
   quota and its own breaker in `pptkeys.ts`, addressed by a digest of the key
   rather than its position, so reordering the list does not reassign state. A
   429 for credit exhaustion locks ONE key and moves to the next. Never put the
