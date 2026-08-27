@@ -231,6 +231,8 @@ export async function fetchListings(opts: {
   labelTokens?: string[] | null;
   /** internal: stops the label re-search from recursing */
   labelSearchDone?: boolean;
+  /** internal: stops the broaden-on-empty retry from recursing */
+  broadenDone?: boolean;
   limit?: number;
   /** everything we know in words about THIS copy — slab label lines, the card's
    *  own OCR, the vision model's printing call. Read for a printing, not
@@ -401,6 +403,38 @@ export async function fetchListings(opts: {
       if (exact.length >= 2) {
         filtered = exact;
         filteredToGrade = true;
+      }
+    }
+
+    // A refinement that destroys what it was refining is not a refinement.
+    //
+    // extraTokens exist to sharpen a search — a set code, a rarity, a
+    // treatment marker. On a card where those words are not what sellers wrote,
+    // they cut the result set below the two listings the grade filter needs,
+    // filteredToGrade comes back false, and the caller discards the asks
+    // entirely. The Dragon Frontiers Gold Star searched cleanly as
+    // "Charizard 100 Dragon Frontiers BGS 8.5" and returned three genuine BGS
+    // 8.5 listings; with its extra tokens attached it returned two, neither
+    // usable, and the scan showed no asking market at all — leaving a sold
+    // figure we had already established was contradicting its own grade ladder.
+    //
+    // So when a refined search cannot support a grade-filtered answer, drop
+    // the refinement and ask again. The broad query is the honest fallback:
+    // it is what we would have asked with no extra information.
+    if (
+      !opts.broadenDone &&
+      (opts.extraTokens?.length ?? 0) > 0 &&
+      opts.grader &&
+      opts.grade != null &&
+      filtered.filter((l) => l.grader === opts.grader && l.grade === opts.grade).length < 2
+    ) {
+      const broad = await fetchListings({ ...opts, extraTokens: [], broadenDone: true });
+      if (broad && broad.filteredToGrade) {
+        console.log(
+          `[listings] "${query}" could not support a ${opts.grader} ${opts.grade} median; ` +
+            `retried without the extra tokens and matched ${broad.matched}`,
+        );
+        return broad;
       }
     }
 
