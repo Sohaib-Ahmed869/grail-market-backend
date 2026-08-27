@@ -1,5 +1,6 @@
 import { recordUsage } from "./usage.js";
 import { comparePrinting, describePrinting, readPrinting, type Printing } from "./printing.js";
+import { listingMatchesLabel } from "./labeltokens.js";
 import { TtlCache } from "./ttlcache.js";
 
 // Live eBay listings for a card, shown in-product rather than as a link out.
@@ -45,6 +46,8 @@ export type ListingResult = {
   filteredToGrade: boolean;
   /** true when the asks were narrowed to the slab's own label variant */
   filteredToLabel: boolean;
+  /** true when the asks were narrowed to the printing the label names */
+  filteredToLabelText: boolean;
   /** listings that survived every filter, of which `listings` shows the first few */
   matched: number;
   /** how many extreme listings were trimmed before taking the median */
@@ -172,6 +175,11 @@ export async function fetchListings(opts: {
   grade?: number | null;
   /** the slab's Beckett label variant, so asks can be narrowed to it */
   labelVariant?: "black" | "gold" | null;
+  /** distinctive words the grading label printed. Used to find listings for
+   *  THIS printing when we cannot name the printing — see labeltokens.ts */
+  labelTokens?: string[] | null;
+  /** internal: stops the label re-search from recursing */
+  labelSearchDone?: boolean;
   limit?: number;
   /** everything we know in words about THIS copy — slab label lines, the card's
    *  own OCR, the vision model's printing call. Read for a printing, not
@@ -309,6 +317,50 @@ export async function fetchListings(opts: {
       }
     }
 
+    // Narrow to the printing the LABEL names, whether or not we can name it.
+    //
+    // This runs before the variant and printing filters because it is the
+    // most authoritative signal available: a grading company examined the card
+    // and wrote down what it is. A PSA MAGAZINE EXCLUSIVE Luffy and the
+    // OP05-060 Leader share a collector number and nothing else — $615 against
+    // $0.65 raw — and no allowlist of printing names was ever going to keep up
+    // with the promo lines that produce that gap.
+    let filteredToLabelText = false;
+    if (opts.labelTokens && opts.labelTokens.length) {
+      const sameProduct = filtered.filter((l) =>
+        listingMatchesLabel(l.title, opts.labelTokens!),
+      );
+      // two or more, or we are narrowing on one listing rather than on evidence
+      if (sameProduct.length >= 2) {
+        filtered = sameProduct;
+        filteredToLabelText = true;
+      } else if (!opts.labelSearchDone) {
+        // Nothing in these results is the printing on the label — and no
+        // amount of filtering rescues a search that never fetched it. The
+        // query was built from the card we IDENTIFIED, and if that
+        // identification landed on the base card sharing the number, the
+        // promo's listings are not in this result set at all.
+        //
+        // So ask again with the label's own words in the query. Deliberately
+        // a SECOND search rather than a narrower first one: adding a printing
+        // to every query hides the listings that do not mention it, which is
+        // why the query is kept broad by default. This runs only when the
+        // broad result demonstrably contains the wrong product.
+        const narrowed = await fetchListings({
+          ...opts,
+          extraTokens: [...(opts.extraTokens ?? []), ...opts.labelTokens],
+          labelSearchDone: true,
+        });
+        if (narrowed && narrowed.matched >= 2) {
+          console.log(
+            `[listings] broad search found no "${opts.labelTokens[0]}" listings; ` +
+              `re-searched with the label's own words and found ${narrowed.matched}`,
+          );
+          return narrowed;
+        }
+      }
+    }
+
     // Narrow again to the LABEL VARIANT where we know it.
     //
     // "BGS 10" is not one price. A Black Label — all four subgrades exactly 10
@@ -414,6 +466,7 @@ export async function fetchListings(opts: {
       query,
       filteredToGrade,
       filteredToLabel,
+      filteredToLabelText,
       medianAsk: median,
       askLow: values[0] ?? null,
       askHigh: values[values.length - 1] ?? null,

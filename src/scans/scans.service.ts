@@ -17,6 +17,7 @@ import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
 import { recordScan, recordWeakResult, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
+import { labelTokens, rawGradedDivergence } from "./labeltokens.js";
 import { visionGate, GateSaturated } from "./gate.js";
 import {
   writeGradePrices,
@@ -105,6 +106,41 @@ export class ScansService {
       // sample for a system whose promise is that it would rather say nothing
       // than say something wrong. Each row should be enough to rebuild the
       // case as a fixture.
+      // A general check that needs no list of printing names: nobody pays to
+      // grade a card worth 65 cents. When the raw price of the card we
+      // identified is trivial and the graded market for it is not, we are
+      // almost certainly looking at a different printing that shares the
+      // collector number — which is how a $615 PSA Magazine Exclusive Luffy
+      // came to be priced as a $0.65 OP05-060 Leader.
+      const divergence = rawGradedDivergence(
+        v?.tcgplayer?.market ?? v?.cardmarket?.trend ?? null,
+        sold ?? v?.liveAsk?.median ?? null,
+      );
+      if (divergence.suspect) {
+        if (scan.valuation) {
+          scan.valuation.identificationSuspect = divergence.reason;
+        }
+        void recordWeakResult({
+          scanId,
+          reason: "raw-graded-divergence",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null,
+          grade: v?.slabGrade ?? null,
+          confidence: "low",
+          priceUsd: sold ?? v?.liveAsk?.median ?? null,
+          priceSource: "suspect",
+          inputs: {
+            rawUsd: v?.tcgplayer?.market ?? v?.cardmarket?.trend ?? null,
+            ratio: divergence.ratio,
+            reason: divergence.reason,
+            ocrNames: scan.ocrNames ?? [],
+          },
+        });
+        console.warn(`[identify] ${divergence.reason}`);
+      }
+
       const weak = classifyWeakness(scan, sold);
       if (weak) {
         void recordWeakResult({
@@ -902,6 +938,19 @@ export class ScansService {
               (labelSlab?.label === "black" || labelSlab?.label === "gold")
                 ? labelSlab.label
                 : null,
+            // the words the grading company printed, so the asks can be
+            // narrowed to THIS printing even when we cannot name it
+            labelTokens: labelTokens(
+              [
+                (frontRes.ocr?.slab as any)?.name,
+                (frontRes.ocr?.slab as any)?.setLine,
+                ...(((frontRes.ocr?.slab as any)?.setCandidates ?? []) as string[]),
+              ].filter(Boolean) as string[],
+              {
+                name: scan.identification?.name ?? null,
+                setName: scan.identification?.setName ?? null,
+              },
+            ),
             limit: 24,
             // the identified name is itself evidence of the printing, and it
             // is the repaired form: the raw label says "IST -SCYTHER" where

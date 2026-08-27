@@ -202,6 +202,12 @@ export const Valuation = z.object({
    *  Part of the price key, not decoration — see GradePoint.blended. The
    *  vision service reads it off the slab and it used to stop there. */
   slabLabelVariant: z.string().nullish(),
+  /** Set when the price and the identification contradict each other badly
+   *  enough that the identification is the likelier culprit — a slabbed card
+   *  whose raw price is trivial is almost always a different printing sharing
+   *  the collector number. Carries the explanation, and means: do not lead
+   *  with the figure. */
+  identificationSuspect: z.string().nullish(),
   /** The figure for THIS holder — this card, this company, this grade.
    *
    *  Carries how it was reached, because "a sale of this exact slab" and "a

@@ -55,7 +55,7 @@ export class MarketController {
   ) {
     const empty = {
       listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "",
-      filteredToGrade: false, filteredToLabel: false,
+      filteredToGrade: false, filteredToLabel: false, filteredToLabelText: false,
       medianAsk: null, askLow: null, askHigh: null,
       printing: null, filteredToPrinting: false, otherPrintings: [],
       staleCeiling: null, staleCeilingDays: null, cappedByStale: false,
