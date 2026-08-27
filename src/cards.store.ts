@@ -165,7 +165,16 @@ CREATE TABLE IF NOT EXISTS catalog_cards (
   -- give it a home is exactly the kind of shortcut that put a PSA number under
   -- a Beckett badge. One card, one raw price, its own column.
   raw_usd        NUMERIC(12,2),
-  raw_fetched_at TIMESTAMPTZ
+  raw_fetched_at TIMESTAMPTZ,
+
+  -- When we last ASKED a price source about this card, and how many times in
+  -- a row it had nothing. Distinct from "when we last got a price": a card the
+  -- source genuinely does not cover writes no grade_prices row, so without
+  -- this it stays "never priced" forever and the refresh job re-buys the same
+  -- empty answer on every run. That is a slow leak that only shows up as a
+  -- quota that keeps running out for no visible reason.
+  last_attempt_at  TIMESTAMPTZ,
+  price_miss_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS catalog_cards_seen_idx ON catalog_cards (last_seen_at DESC);
 
@@ -191,6 +200,8 @@ CREATE INDEX IF NOT EXISTS card_prices_fetched_at_idx       ON card_prices (fetc
 const MIGRATIONS = [
   `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_usd        NUMERIC(12,2)`,
   `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_fetched_at TIMESTAMPTZ`,
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ`,
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS price_miss_count INTEGER NOT NULL DEFAULT 0`,
 ];
 
 /** Create the schema once per process. Resolves false if the store is unusable. */
@@ -546,7 +557,9 @@ export async function noteCatalogCard(c: {
   if (!c.catalogId || !c.name) return;
   // never register the placeholder ids — they are not addressable catalogue
   // entries and a refresh job cannot look them up
-  if (c.catalogId === "llm" || c.catalogId === "described" || c.catalogId === "market") return;
+  // Placeholder ids, not addressable catalogue entries: a refresh job cannot
+  // look any of them up, and "sealed" is not even a card.
+  if (["llm", "described", "market", "sealed"].includes(c.catalogId)) return;
   if (!usable || !(await initStore())) return;
   const p = getPool();
   if (!p) return;
@@ -606,6 +619,26 @@ export async function readRawPrice(
   }
 }
 
+/** Note that we asked about this card. `found` false means the source had
+ *  nothing, which backs the card off rather than leaving it looking unpriced
+ *  and therefore urgent. */
+export async function notePriceAttempt(catalogId: string, found: boolean): Promise<void> {
+  if (!catalogId || !usable || !(await initStore())) return;
+  const p = getPool();
+  if (!p) return;
+  try {
+    await p.query(
+      `UPDATE catalog_cards
+          SET last_attempt_at = now(),
+              price_miss_count = CASE WHEN $2 THEN 0 ELSE price_miss_count + 1 END
+        WHERE catalog_id = $1`,
+      [catalogId, found],
+    );
+  } catch (err) {
+    console.warn(`[store] attempt note failed for ${catalogId}: ${(err as Error).message}`);
+  }
+}
+
 export type RefreshCandidate = {
   catalogId: string;
   game: string | null;
@@ -630,7 +663,11 @@ export type RefreshCandidate = {
  *  Cards we have never priced come first at any tier — an unknown price is a
  *  worse product than a slightly old one.
  */
-export async function refreshCandidates(limit: number): Promise<RefreshCandidate[]> {
+export async function refreshCandidates(
+  limit: number,
+  /** games a price source covers. PPT is English Pokemon only. */
+  games: string[] = ["pokemon"],
+): Promise<RefreshCandidate[]> {
   if (!usable || !(await initStore())) return [];
   const p = getPool();
   if (!p) return [];
@@ -654,15 +691,26 @@ export async function refreshCandidates(limit: number): Promise<RefreshCandidate
               END AS tier
        FROM catalog_cards c
        LEFT JOIN held h ON h.catalog_id = c.catalog_id
-       WHERE h.fetched_at IS NULL
+       -- Only what a price source can actually answer. Every identification
+       -- registers a card, deliberately, including the games we cannot price
+       -- yet — but queueing a One Piece card against a Pokemon-only provider
+       -- buys the same empty answer on every run, forever.
+       WHERE c.game = ANY($2::text[])
+       -- Exponential backoff on a card the source keeps having nothing for:
+       -- 1 day, 2, 4 … capped at 32. A card genuinely outside the catalogue
+       -- settles at monthly instead of being retried every single run.
+       AND (c.last_attempt_at IS NULL
+            OR c.last_attempt_at <
+               now() - (LEAST(POWER(2, LEAST(c.price_miss_count, 5)), 32) * interval '1 day'))
+       AND (h.fetched_at IS NULL
           OR (h.fetched_at < now() - interval '1 day'
               AND ((c.seen_count > 0 AND c.last_seen_at > now() - interval '7 days')
                    OR h.liquidity >= 50))
           OR (h.fetched_at < now() - interval '7 days'  AND h.liquidity >= 5)
-          OR  h.fetched_at < now() - interval '30 days'
+          OR  h.fetched_at < now() - interval '30 days')
        ORDER BY (h.fetched_at IS NULL) DESC, c.seen_count DESC, h.fetched_at ASC NULLS FIRST
        LIMIT $1`,
-      [limit],
+      [limit, games],
     );
     return rows.map((r: any) => ({
       catalogId: String(r.catalog_id),

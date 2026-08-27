@@ -1,10 +1,11 @@
 import { fetchGradedPrices } from "../scans/gradedprices.js";
-import { quotaStatus, CREDITS_PER_LOOKUP } from "../scans/gradedprices.js";
+import { quotaStatus, CREDITS_PER_INGEST_LOOKUP } from "../scans/gradedprices.js";
 import { graderTier } from "../scans/graders.js";
 import {
   refreshCandidates,
   writeGradePrices,
   writeRawPrice,
+  notePriceAttempt,
   type RefreshCandidate,
 } from "../cards.store.js";
 
@@ -90,7 +91,8 @@ export async function ingestPrices(opts?: {
   console.log(
     `[ingest] ${work.length} cards to refresh ` +
       `(${Object.entries(result.tiers).map(([t, n]) => `${n} ${t}`).join(", ")}), ` +
-      `budget ${spendable === Infinity ? "unknown" : spendable} credits`,
+      `budget ${spendable === Infinity ? "unknown" : spendable} credits ` +
+      `@ ${CREDITS_PER_INGEST_LOOKUP}/card`,
   );
 
   if (dryRun) {
@@ -100,7 +102,7 @@ export async function ingestPrices(opts?: {
   }
 
   for (const c of work) {
-    if (result.creditsSpent + CREDITS_PER_LOOKUP > spendable) {
+    if (result.creditsSpent + CREDITS_PER_INGEST_LOOKUP > spendable) {
       result.stoppedBecause = "budget";
       console.log(`[ingest] budget reached after ${result.priced + result.missed} cards`);
       break;
@@ -109,7 +111,7 @@ export async function ingestPrices(opts?: {
     try {
       // force: the point of the job is to replace what we already hold
       const ppt = await fetchGradedPrices(c.name, c.cardNumber, c.setName, { force: true });
-      result.creditsSpent += CREDITS_PER_LOOKUP;
+      result.creditsSpent += CREDITS_PER_INGEST_LOOKUP;
 
       const byGrader = ppt.byGrader ?? {};
       const rows = Object.entries(byGrader).flatMap(([grader, grades]) =>
@@ -132,11 +134,14 @@ export async function ingestPrices(opts?: {
         await writeGradePrices(c.catalogId, rows);
         result.priced++;
       } else {
-        // A card the provider genuinely has no sales for. Not a failure, and
-        // not something to retry tomorrow — the tier rules will bring it back
-        // on the cold cadence.
+        // A card the provider genuinely has no sales for — a Japanese-only
+        // set, or one too new for English comps. Not a failure. But it writes
+        // no grade_prices row, so without recording the ATTEMPT it stays
+        // "never priced", sorts to the top of the work list, and gets bought
+        // again on every run.
         result.missed++;
       }
+      await notePriceAttempt(c.catalogId, rows.length > 0);
       if (ppt.rawUsd != null) await writeRawPrice(c.catalogId, ppt.rawUsd);
     } catch (err) {
       result.failed++;

@@ -3,6 +3,9 @@ import { db } from "../db.js";
 import { readCard, writeCard } from "../cards.store.js";
 import { similarity } from "./similarity.js";
 import { recordUsage } from "./usage.js";
+import {
+  configuredKeys, pickKey, recordKeyQuota, lockKey, lockedFor, poolStatus,
+} from "./pptkeys.js";
 
 // PokemonPriceTracker: free tier includes PSA prices (100 credits/day).
 // Set PPT_API_KEY (dashboard -> API) to activate; without a key this module
@@ -65,6 +68,19 @@ export function parseGradeKey(
 // both cheaper and no less accurate.
 const PAGE_SIZE = 3;
 
+// The ingest job asks for ONE.
+//
+// The page size is the price of a lookup — the provider bills per card
+// returned — and the scan path only needs three because it searches by fuzzy
+// text and has to pick the right card out of the candidates
+// (`items.find(numberMatches) ?? items.find(setMatches)`).
+//
+// The refresh job has no such problem. It drives off catalog_cards, so it
+// already knows the exact name, set and number before it asks; candidates to
+// choose between are pure cost. One card back instead of three takes a lookup
+// from 6 credits to 2, which triples what any plan buys.
+const INGEST_PAGE_SIZE = Number(process.env.PPT_INGEST_PAGE_SIZE ?? 1);
+
 // Cache TTLs. A hit is stable for a day; a miss is retried sooner, because a
 // miss is often our matching being wrong rather than the card being absent,
 // and we don't want to lock a card out for a full day over it.
@@ -81,16 +97,15 @@ const writeCache = db.prepare(
   "INSERT INTO price_cache (key, fetched_at, payload) VALUES (?, ?, ?) " +
     "ON CONFLICT(key) DO UPDATE SET fetched_at = excluded.fetched_at, payload = excluded.payload",
 );
-const readKv = db.prepare("SELECT value FROM kv WHERE key = ?");
 const writeKv = db.prepare(
   "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 );
 
-const BREAKER_KEY = "ppt:quota_resets_at";
-const QUOTA_KEY = "ppt:quota";
-
 // 1 base + 1 eBay credit per card returned, so a lookup costs 2x the page size
-export const CREDITS_PER_LOOKUP = PAGE_SIZE * 2;
+export const creditsFor = (pageSize: number): number => pageSize * 2;
+/** what a SCAN-path lookup costs; the ingest job asks for a smaller page */
+export const CREDITS_PER_LOOKUP = creditsFor(PAGE_SIZE);
+export const CREDITS_PER_INGEST_LOOKUP = creditsFor(INGEST_PAGE_SIZE);
 
 export type QuotaStatus = {
   provider: string;
@@ -105,6 +120,8 @@ export type QuotaStatus = {
   /** whole price lookups still affordable */
   lookupsLeft: number | null;
   lockedOut: boolean;
+  /** how many keys are in the pool */
+  keyCount?: number;
   /** cards already priced and cached — these cost nothing to serve */
   cachedCards: number;
   /** when the numbers above were last observed */
@@ -112,65 +129,36 @@ export type QuotaStatus = {
   configured: boolean;
 };
 
-/** PPT reports quota on every response, success or 429. Record it so the UI
- *  can say "prices are missing because the budget is gone" instead of just
- *  rendering a blank. */
-function recordQuota(res: Response): void {
-  const n = (h: string): number | null => {
-    const v = res.headers.get(h);
-    if (v == null) return null;
-    const parsed = Number(v);
-    return Number.isFinite(parsed) ? parsed : null;
-  };
-  const dailyLimit = n("x-ratelimit-daily-limit");
-  const dailyRemaining = n("x-ratelimit-daily-remaining");
-  if (dailyLimit == null && dailyRemaining == null) return; // not a PPT-shaped response
-  const resetUnix = n("x-ratelimit-daily-reset");
-  writeKvValue(
-    QUOTA_KEY,
-    JSON.stringify({
-      dailyLimit,
-      dailyRemaining,
-      purchasedRemaining: n("x-ratelimit-purchased-remaining"),
-      totalRemaining: n("x-ratelimit-total-remaining"),
-      resetsAt: resetUnix != null ? new Date(resetUnix * 1000).toISOString() : null,
-      observedAt: new Date().toISOString(),
-    }),
-  );
-}
-
 const countCached = db.prepare("SELECT COUNT(*) AS c FROM price_cache");
 
 export function quotaStatus(): QuotaStatus {
-  const configured = Boolean(process.env.PPT_API_KEY);
-  const row = readKv.get(QUOTA_KEY) as { value: string } | undefined;
+  const pool = poolStatus();
   const cachedCards = (countCached.get() as { c: number }).c;
-  let snap: Record<string, any> = {};
-  try {
-    snap = row ? JSON.parse(row.value) : {};
-  } catch {
-    snap = {};
-  }
-  const totalRemaining =
-    typeof snap.totalRemaining === "number"
-      ? snap.totalRemaining
-      : typeof snap.dailyRemaining === "number"
-        ? snap.dailyRemaining
-        : null;
+  // Newest observation across the pool — the freshest thing we actually know.
+  const latest = pool.keys
+    .filter((k) => k.observedAt)
+    .sort((a, b) => String(b.observedAt).localeCompare(String(a.observedAt)))[0];
   return {
     provider: "pokemonpricetracker",
-    dailyLimit: snap.dailyLimit ?? null,
-    dailyRemaining: snap.dailyRemaining ?? null,
-    purchasedRemaining: snap.purchasedRemaining ?? null,
-    totalRemaining,
-    resetsAt: snap.resetsAt ?? null,
+    dailyLimit: pool.dailyLimit,
+    dailyRemaining: pool.totalRemaining,
+    purchasedRemaining: pool.keys.reduce(
+      (a, k) => (k.purchasedRemaining == null ? a : (a ?? 0) + k.purchasedRemaining),
+      null as number | null,
+    ),
+    totalRemaining: pool.totalRemaining,
+    resetsAt: pool.resetsAt,
     creditsPerLookup: CREDITS_PER_LOOKUP,
     lookupsLeft:
-      totalRemaining == null ? null : Math.floor(totalRemaining / CREDITS_PER_LOOKUP),
-    lockedOut: quotaLockRemaining() > 0,
+      pool.totalRemaining == null
+        ? null
+        : Math.floor(pool.totalRemaining / CREDITS_PER_LOOKUP),
+    // Only when EVERY key is spent. With one key this is what it always was.
+    lockedOut: pool.allLockedOut,
     cachedCards,
-    observedAt: snap.observedAt ?? null,
-    configured,
+    observedAt: latest?.observedAt ?? null,
+    configured: pool.configured,
+    keyCount: pool.keys.length,
   };
 }
 
@@ -224,24 +212,6 @@ function stampAge(v: PptPrices, asOf: string): PptPrices {
 
 function cacheSet(key: string, v: PptPrices): void {
   writeCache.run(key, Date.now(), JSON.stringify(v));
-}
-
-/** ms until PPT's quota resets, or 0 if we are not locked out. Persisted so a
- *  restart does not send us straight back into a 429. */
-function quotaLockRemaining(): number {
-  const row = readKv.get(BREAKER_KEY) as { value: string } | undefined;
-  if (!row) return 0;
-  const until = Number(row.value);
-  if (!Number.isFinite(until)) return 0;
-  return Math.max(0, until - Date.now());
-}
-
-function setQuotaLock(untilMs: number): void {
-  writeKv.run(BREAKER_KEY, String(untilMs));
-}
-
-function writeKvValue(key: string, value: string): void {
-  writeKv.run(key, value);
 }
 
 /** Find a market-ish USD number anywhere in PPT's prices blob (its shape
@@ -323,8 +293,7 @@ export async function fetchGradedPrices(
   opts?: { force?: boolean },
 ): Promise<PptPrices> {
   const empty: PptPrices = { graded: null, rawUsd: null };
-  const key = process.env.PPT_API_KEY;
-  if (!key) return empty;
+  if (configuredKeys().length === 0) return empty;
 
   // Two keys, because the two layers hold different things.
   //
@@ -398,34 +367,57 @@ export async function fetchGradedPrices(
   }
 
   // 3. only now is it worth spending a credit
-  const lockedFor = quotaLockRemaining();
-  if (lockedFor > 0) {
-    console.warn(
-      `[ppt] quota exhausted — skipping lookup for "${cardName}", resets in ${Math.ceil(lockedFor / 60000)}m`,
-    );
-    return empty;
-  }
+  const pageSize = opts?.force ? INGEST_PAGE_SIZE : PAGE_SIZE;
+  const cost = creditsFor(pageSize);
 
   try {
     // strip symbols (star/delta glyphs) that break text search
     const clean = (s: string) => s.replace(/[^\w\s'-]/g, " ").replace(/\s+/g, " ").trim();
     const query = [clean(cardName), setName ? clean(setName) : null].filter(Boolean).join(" ");
-    const url = `${PPT_URL}/cards?search=${encodeURIComponent(query)}&limit=${PAGE_SIZE}&includeEbay=true`;
-    const call = () =>
-      fetch(url, {
-        headers: { Authorization: `Bearer ${key}` },
+    const url = `${PPT_URL}/cards?search=${encodeURIComponent(query)}&limit=${pageSize}&includeEbay=true`;
+
+    // Spend from whichever key still has room. With one key this is the same
+    // key every time and behaves exactly as it did before.
+    const call = async (): Promise<{ res: Response; keyId: string } | null> => {
+      const chosen = pickKey(cost);
+      if (!chosen) return null;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${chosen.key}` },
         signal: AbortSignal.timeout(12000),
       });
-    let res = await call();
-    recordUsage("ppt", CREDITS_PER_LOOKUP);
-    recordQuota(res);
-    if (res.status === 429) {
+      recordUsage("ppt", cost);
+      recordKeyQuota(chosen.id, res);
+      return { res, keyId: chosen.id };
+    };
+
+    // At most one attempt per configured key, plus one burst-limit retry.
+    // Bounded on purpose: an unbounded loop over a pool is how a transient
+    // provider fault turns into every key being spent on the same doomed
+    // request.
+    const maxAttempts = Math.max(1, configuredKeys().length) + 1;
+    let attempt = 0;
+    let out: { res: Response; keyId: string } | null = null;
+
+    while (attempt < maxAttempts) {
+      attempt++;
+      out = await call();
+      if (!out) {
+        const soonest = poolStatus().resetsAt;
+        console.warn(
+          `[ppt] every key is out of credits — skipping lookup for "${cardName}"` +
+            (soonest ? `, soonest reset ${soonest}` : ""),
+        );
+        return empty;
+      }
+      const { res, keyId } = out;
+      if (res.status !== 429) break;
+
       const detail = (await res.text().catch(() => "")).slice(0, 300);
       // Two very different 429s hide behind one status code. A DAILY credit
       // exhaustion ("requires 20 credits, you have 4 remaining") will never
       // clear by waiting a few seconds — retrying just burns scan latency, so
-      // trip a breaker and stop calling until the quota resets. A burst limit
-      // does clear, and is worth one backoff.
+      // lock THAT key and let the next one try. A burst limit does clear, and
+      // is worth one backoff on the same key.
       if (/credit|quota|daily/i.test(detail)) {
         // PPT states its own reset time — trust that over a guessed cooldown
         let until = Date.now() + 2 * 3600 * 1000;
@@ -439,17 +431,20 @@ export async function fetchGradedPrices(
         } catch {
           /* body wasn't JSON — keep the conservative default */
         }
-        setQuotaLock(until);
+        // Only this key. A shared breaker was correct with one key and simply
+        // wrong with several: one exhausted key would disable the rest.
+        lockKey(keyId, until);
         console.warn(
-          `[ppt] daily credit limit reached — graded prices disabled until ${new Date(until).toISOString()} :: ${detail.replace(/\s+/g, " ")}`,
+          `[ppt] key ${keyId} out of credits until ${new Date(until).toISOString()} — trying the next`,
         );
-        return empty;
+        continue; // pickKey now skips it
       }
+
+      // burst limit: back off once on the same key
       await new Promise((r) => setTimeout(r, 2000));
-      res = await call();
-      recordUsage("ppt", CREDITS_PER_LOOKUP);
-      recordQuota(res);
     }
+
+    const res = out!.res;
     if (!res.ok) {
       console.warn(`[ppt] ${res.status} for "${query}" — graded prices unavailable this scan`);
       return empty; // not cached — retried next scan

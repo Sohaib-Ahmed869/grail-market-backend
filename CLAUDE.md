@@ -84,6 +84,15 @@ bought on the request path.
   every game — including the ones we cannot price yet.
 - Adding a column to `SCHEMA` in `cards.store.ts` does NOT alter an existing
   table. Add an entry to `MIGRATIONS` beside it. Append, never edit.
+- `PPT_API_KEY` may hold several comma-separated keys. Each carries its own
+  quota and its own breaker in `pptkeys.ts`, addressed by a digest of the key
+  rather than its position, so reordering the list does not reassign state. A
+  429 for credit exhaustion locks ONE key and moves to the next. Never put the
+  key material in a log line — use the 8-char id.
+- The page size IS the price of a lookup: the provider bills per card returned.
+  The scan path needs 3 candidates because it searches by fuzzy text; the
+  refresh job knows the exact identity and asks for 1. Do not raise
+  `PPT_INGEST_PAGE_SIZE` without a card it is actually missing.
 
 The reason: buying on the request path makes the bill scale with traffic. A
 price is a property of the catalogue, which is roughly fixed, so the refresh
