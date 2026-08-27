@@ -208,6 +208,11 @@ export const Valuation = z.object({
    *  the collector number. Carries the explanation, and means: do not lead
    *  with the figure. */
   identificationSuspect: z.string().nullish(),
+  /** Set when the asking market and our completed sales disagree by more than
+   *  a normal ask premium. Either the market moved since our comps, or the
+   *  comps are not all this card — a reader is served by being told, not by
+   *  our quietly choosing one. */
+  marketNote: z.string().nullish(),
   /** The figure for THIS holder — this card, this company, this grade.
    *
    *  Carries how it was reached, because "a sale of this exact slab" and "a

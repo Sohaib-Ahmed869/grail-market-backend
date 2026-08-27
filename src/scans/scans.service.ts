@@ -12,6 +12,7 @@ import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
 import type { GradePoint } from "./gradedprices.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { findInversions, soldVsAsk } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
@@ -139,6 +140,41 @@ export class ScansService {
           },
         });
         console.warn(`[identify] ${divergence.reason}`);
+      }
+
+      // The card's own grade ladder contradicting itself, and the asking
+      // market contradicting our sold comps. Both are visible from the numbers
+      // alone and both mean the figure is shakier than its confidence says.
+      const ownGrades = v?.slabGrader ? v?.pricesByGrader?.[v.slabGrader] : null;
+      const inversions = ownGrades ? findInversions(ownGrades) : [];
+      if (inversions.length) {
+        const i = inversions[0];
+        console.warn(
+          `[ladder] ${v!.slabGrader} ${i.higher} (${i.higherPrice.toFixed(0)}) is below ` +
+            `${v!.slabGrader} ${i.lower} (${i.lowerPrice.toFixed(0)}) — thin or contaminated comps`,
+        );
+        void recordWeakResult({
+          scanId, reason: "grade-ladder-inverted",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null, grade: v?.slabGrade ?? null,
+          confidence: "low", priceUsd: sold ?? null, priceSource: "sold",
+          inputs: { inversions },
+        });
+      }
+      const askGap = soldVsAsk(sold, v?.liveAsk?.median ?? null);
+      if (askGap.diverged) {
+        if (scan.valuation) scan.valuation.marketNote = askGap.note;
+        void recordWeakResult({
+          scanId, reason: "sold-ask-divergence",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null, grade: v?.slabGrade ?? null,
+          confidence: "low", priceUsd: sold ?? null, priceSource: "sold",
+          inputs: { askMedian: v?.liveAsk?.median ?? null, ratio: askGap.ratio },
+        });
       }
 
       const weak = classifyWeakness(scan, sold);

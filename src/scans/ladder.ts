@@ -191,3 +191,78 @@ export function sanityCheck(
   }
   return result;
 }
+
+
+export type Inversion = {
+  lower: number;
+  higher: number;
+  lowerPrice: number;
+  higherPrice: number;
+};
+
+/** Places where a HIGHER grade is worth LESS than a lower one, same card,
+ *  same company.
+ *
+ *  This is not a market fact. Within one grader's own scale a better card does
+ *  not sell for less, so an inversion means the underlying comps are thin,
+ *  drawn from different windows, or contaminated. On the Dragon Frontiers Gold
+ *  Star, BGS 8.5 came back at $10,500 from 9 sales while BGS 8 came back at
+ *  $12,400 from 7 — and the 8.5 is the one people were asking $17,500 to
+ *  $30,000 for.
+ *
+ *  Worth checking precisely because it needs no outside data: the card's own
+ *  ladder contradicts itself, and that is visible from the numbers alone.
+ */
+export function findInversions(grades: Record<string, GradePoint>): Inversion[] {
+  const rungs = Object.entries(grades)
+    .filter(([, pt]) => pt.price != null)
+    .map(([k, pt]) => ({ grade: num(k), price: pt.price }))
+    .filter((r) => Number.isFinite(r.grade))
+    .sort((a, b) => a.grade - b.grade);
+
+  const out: Inversion[] = [];
+  for (let i = 0; i + 1 < rungs.length; i++) {
+    const lo = rungs[i];
+    const hi = rungs[i + 1];
+    // a little tolerance: near-identical figures on adjacent grades are noise,
+    // not a contradiction worth shouting about
+    if (hi.price < lo.price * 0.95) {
+      out.push({
+        lower: lo.grade,
+        higher: hi.grade,
+        lowerPrice: lo.price,
+        higherPrice: hi.price,
+      });
+    }
+  }
+  return out;
+}
+
+/** Does the asking market disagree with the sold comps badly enough to say so?
+ *
+ *  Asks sit above sold prices normally — that is the whole point of the
+ *  distinction and it is stated all over the interface. But when the asks sit
+ *  MULTIPLES above, one of two things is true and both matter to a reader: the
+ *  market has moved since our comps were gathered, or our comps are not this
+ *  card. Neither is served by quietly picking one number. */
+export function soldVsAsk(
+  sold: number | null | undefined,
+  askMedian: number | null | undefined,
+): { diverged: boolean; ratio: number | null; note: string | null } {
+  if (sold == null || askMedian == null || sold <= 0 || askMedian <= 0) {
+    return { diverged: false, ratio: null, note: null };
+  }
+  const ratio = askMedian / sold;
+  if (ratio >= 1.6) {
+    return {
+      diverged: true,
+      ratio,
+      note:
+        `Sellers are currently asking around ${askMedian.toFixed(0)} while our completed-sale ` +
+        `figure is ${sold.toFixed(0)} — ${ratio.toFixed(1)}x. Asks normally sit above sold ` +
+        `prices, but not by this much: either the market has moved since these sales, or the ` +
+        `sales we hold are not all this exact card.`,
+    };
+  }
+  return { diverged: false, ratio, note: null };
+}

@@ -86,3 +86,36 @@ test("an observed sale is never second-guessed by the envelope", () => {
   };
   assert.equal(sanityCheck(real, byGrader, "BGS", 10).suspect, undefined);
 });
+
+// ---- data-quality gates that need no outside source -----------------------
+
+test("a higher grade worth less than a lower one is a defect, not a bargain", async () => {
+  const { findInversions } = await import("../src/scans/ladder.js");
+  // the real Dragon Frontiers Gold Star ladder, in USD
+  const inv = findInversions({
+    "7.5": pt(6350, 4), 8: pt(12400, 7), "8.5": pt(10500, 9), 9: pt(21300, 4),
+  });
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].lower, 8);
+  assert.equal(inv[0].higher, 8.5);
+});
+
+test("a clean ladder reports nothing", async () => {
+  const { findInversions } = await import("../src/scans/ladder.js");
+  assert.deepEqual(findInversions({ 8: pt(405), 9: pt(428), 10: pt(1150) }), []);
+});
+
+test("near-identical adjacent grades are noise, not a contradiction", async () => {
+  const { findInversions } = await import("../src/scans/ladder.js");
+  assert.deepEqual(findInversions({ 9: pt(1000), "9.5": pt(990) }), []);
+});
+
+test("asks far above sold is said out loud, not silently resolved", async () => {
+  const { soldVsAsk } = await import("../src/scans/ladder.js");
+  const d = soldVsAsk(10500, 17476);
+  assert.equal(d.diverged, true);
+  assert.match(d.note, /market has moved|not all this exact card/);
+  // a normal ask premium is not flagged
+  assert.equal(soldVsAsk(1000, 1300).diverged, false);
+  assert.equal(soldVsAsk(null, 17476).diverged, false);
+});

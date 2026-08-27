@@ -116,6 +116,57 @@ async function getToken(): Promise<string | null> {
   }
 }
 
+
+/** The Latin part of a card name, for searching against English-language
+ *  listings.
+ *
+ *  This used to be all-or-nothing: any non-ASCII character anywhere dropped
+ *  the whole name. The rule was written for a real problem — a Japanese
+ *  catalogue name matches nothing an English seller ever typed — but it also
+ *  threw away "Charizard" because the catalogue writes the card as
+ *  "Charizard ☆ δ". The query became "100 BGS 8.5", which is every card
+ *  numbered 100 in a BGS 8.5 holder, and a five-figure Gold Star was priced
+ *  from a Ken Griffey Jr at $24.99.
+ *
+ *  Strip the decoration, keep the name. Return "" only when what is left is
+ *  too thin to search on, which is the case the original rule was actually
+ *  aimed at. */
+export function latinName(name: string): string {
+  const latin = (name ?? "")
+    // Fold accents first: é is an e that a seller typed as "Pokemon", and
+    // blanking it turns "Pokémon Trainer" into "Pok mon Trainer", which is a
+    // search for nothing. Decompose to base letter + combining mark, then drop
+    // the marks. Non-Latin scripts have no base letter and fall through to the
+    // ASCII strip below, which is the behaviour we want for them.
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[^\u0000-\u007F]/g, " ")
+    .replace(/[^\w\s'-]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  // a couple of stray letters left behind by a mostly-Japanese name is not a
+  // name; "ex" out of "メガゲンガーex" would search for every ex card there is
+  const longest = latin.split(/\s+/).reduce((a, w) => Math.max(a, w.length), 0);
+  return longest >= 4 ? latin : "";
+}
+
+/** Does this listing plausibly describe the card we are pricing?
+ *
+ *  The last line of defence on a query gone wrong. A median is computed over
+ *  whatever comes back and shipped as a price, so a search that quietly
+ *  returns the wrong product is worse than one that returns nothing. If we
+ *  have a usable name and the listing never mentions it, it is not this card,
+ *  whatever else it matched on. */
+export function mentionsCard(title: string, cardName: string): boolean {
+  const n = latinName(cardName);
+  if (!n) return true; // nothing to check against — do not reject everything
+  const t = title.toLowerCase();
+  // the longest word carries the identity: "Charizard", not "delta"
+  const words = n.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+  if (words.length === 0) return true;
+  return words.some((w) => t.includes(w));
+}
+
 /** Pull the grading company and grade out of a listing title.
  *  Sellers write "BGS 8.5", "PSA 10 GEM MINT", "CGC 9.5" — enough to tell a
  *  listing for this exact slab from one for a different grade of the same card. */
@@ -219,12 +270,25 @@ export async function fetchListings(opts: {
   const identifiers = (opts.extraTokens ?? []).filter(Boolean).length;
   const gluedRun = /[A-Z]{9,}/.test(opts.name);
   const usableName =
-    /[^\u0000-\u007F]/.test(opts.name) || (gluedRun && identifiers >= 2)
-      ? ""
-      : clean(opts.name);
+    gluedRun && identifiers >= 2 ? "" : clean(latinName(opts.name));
   const parts = [usableName];
   if (number) parts.push(number);
-  else if (opts.setName && !/[^\u0000-\u007F]/.test(opts.setName)) parts.push(clean(opts.setName));
+  // The set, when the number cannot stand alone.
+  //
+  // "OP13-119" is a set-qualified address and identifies a card globally. A
+  // bare "100" does not — it is every card numbered 100 ever printed. The set
+  // used to be added ONLY when there was no number at all, so the Dragon
+  // Frontiers Gold Star searched as "Charizard 100 BGS 8.5" and came back with
+  // an XY Flashfire Charizard EX, a Crystal Guardians 4/100 and an Italian
+  // Dragon holo — every one a different card, spanning $430 to $23,302.
+  const numberIsQualified = Boolean(number && /[A-Za-z]/.test(number));
+  if (
+    (!number || !numberIsQualified) &&
+    opts.setName &&
+    !/[^\u0000-\u007F]/.test(opts.setName)
+  ) {
+    parts.push(clean(opts.setName));
+  }
   for (const t of opts.extraTokens ?? []) {
     const c = t ? clean(String(t)) : "";
     // keep the query tight: skip anything already present
@@ -301,6 +365,29 @@ export async function fetchListings(opts: {
         return t.includes(wanted);
       });
       if (sameCard.length >= 2) filtered = sameCard;
+    }
+
+    // Reject anything that is not this card at all.
+    //
+    // Before any median is taken, because a median over the wrong product is
+    // still a number and still gets shipped. This is what stands between a
+    // broken query and a five-figure Pokemon card priced from a $24 baseball
+    // card that happened to share "#100" and "BGS 8.5".
+    const relevant = filtered.filter((l) => mentionsCard(l.title, opts.name));
+    if (relevant.length >= 2) {
+      if (relevant.length < filtered.length) {
+        console.log(
+          `[listings] dropped ${filtered.length - relevant.length} listing(s) that never mention "${opts.name}"`,
+        );
+      }
+      filtered = relevant;
+    } else if (filtered.length >= 2 && relevant.length === 0 && latinName(opts.name)) {
+      // NOTHING returned mentions the card. That is not a thin market, it is
+      // the wrong search, and pricing from it would be inventing a figure.
+      console.warn(
+        `[listings] no listing mentions "${opts.name}" — refusing to price from ${filtered.length} unrelated results`,
+      );
+      filtered = [];
     }
 
     // When we know the card's grade, surface listings for THAT grade —
