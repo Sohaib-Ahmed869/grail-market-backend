@@ -8,9 +8,7 @@ import cv2
 import numpy as np
 
 from .authenticity import digital_source_check
-from .centering import measure_centering
 from .detect import detect_card
-from .grade import compute_grade
 from .identify import read_card_text
 from .quality import run_gate
 
@@ -22,30 +20,32 @@ def _b64_png(image: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def _draw_findings(overlay, findings) -> None:
-    """Draw surface-mark boxes and corner condition rings on the overlay."""
-    oh, ow = overlay.shape[:2]
-    for c in findings.get("clusters", []):
-        x0, y0 = int(c["x"] * ow), int(c["y"] * oh)
-        x1, y1 = x0 + max(int(c["w"] * ow), 6), y0 + max(int(c["h"] * oh), 6)
-        cv2.rectangle(overlay, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4), (60, 60, 235), 2)
 
-    corner_pts = {"TL": (26, 26), "TR": (ow - 26, 26), "BL": (26, oh - 26), "BR": (ow - 26, oh - 26)}
-    for d in findings.get("corners", []):
-        pt = corner_pts.get(d["corner"])
-        if not pt:
-            continue
-        s = d["score"]
-        color = (80, 200, 60) if s >= 9 else (60, 200, 235) if s >= 7 else (60, 60, 235)
-        cv2.circle(overlay, pt, 20, color, 3)
-        cv2.putText(
-            overlay, f"{s:g}", (pt[0] - 12, pt[1] + 38),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3,
-        )
-        cv2.putText(
-            overlay, f"{s:g}", (pt[0] - 12, pt[1] + 38),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1,
-        )
+def _room_for_a_label(card_fill: float | None, headroom: float | None) -> bool:
+    """Might this photo contain a grading label we have not read yet?
+
+    Getting this wrong in the FALSE direction is expensive and silent: the
+    label is never read, the card is reported as raw, and a graded card is
+    quoted at its ungraded price — an order of magnitude out, with nothing on
+    screen suggesting anything went wrong. Getting it wrong in the TRUE
+    direction costs one extra OCR pass on a photo that turns out to have no
+    label. Those are not remotely the same price, so this leans generous.
+
+    Fill alone was the whole test, at < 0.65, and it is a weak signal: a CGC
+    8.5 Armored Mewtwo photographed close came in at 0.6606 and was priced as
+    a raw card, missing by one point of a percent.
+
+    Headroom is the better signal and the reason is geometric. A slab's label
+    sits ABOVE the card, so the detected card cannot start at the top of the
+    frame; a raw card photographed to fill the frame can. Either signal is
+    enough on its own.
+    """
+    if card_fill is not None and card_fill < 0.80:
+        return True
+    # the card starts far enough down the frame that something sits above it
+    if headroom is not None and headroom > 0.06:
+        return True
+    return False
 
 
 def _quality_dict(q) -> dict:
@@ -83,11 +83,16 @@ def run_pipeline(
     # frame because the case and its label surround it; a raw-card photo fills
     # it. Below the threshold there is room for a label, so it is worth a look.
     card_fill = None
+    headroom = None
     if det is not None and getattr(det, "quad", None) is not None:
-        frame_area = float(image.shape[0] * image.shape[1])
+        frame_h, frame_w = image.shape[0], image.shape[1]
+        frame_area = float(frame_h * frame_w)
         if frame_area > 0:
             card_fill = cv2.contourArea(det.quad.astype(np.float32)) / frame_area
-    room_for_a_label = card_fill is not None and card_fill < 0.65
+        if frame_h > 0:
+            # how far down the frame the card starts, as a fraction of height
+            headroom = float(det.quad[:, 1].min()) / float(frame_h)
+    room_for_a_label = _room_for_a_label(card_fill, headroom)
 
     if (
         ocr is not None
@@ -158,58 +163,20 @@ def run_pipeline(
     # and then multiplying the market price by 0.25, turning an $84 card into
     # $21. Detection quality is not good enough to move money, so it does not.
     # We identify the card, read any grading label, and price it.
-    if True:
-        return {
-            "ok": True,
-            "quality": _quality_dict(gate.quality),
-            "rejection": None,
-            "measurement": None,
-            "grade": None,
-            "gradingSkipped": "slabbed",
-            "authenticity": digital_source_check(det.warped),
-            "ocr": ocr,
-            "warpedImageB64": _b64_png(det.warped) if include_images else None,
-            "overlayImageB64": None,
-        }
-
-    cen = measure_centering(det.warped)
-    grade = compute_grade(
-        det.warped, cen, low_detail=gate.quality.low_detail, bg_color=det.bg_color
-    )
-    sub = lambda s: {"value": s.value, "confidence": s.confidence} if s else None
-    grade_dict = {
-        "overall": grade.overall,
-        "band": {"low": grade.band_low, "high": grade.band_high},
-        "subgrades": {
-            "centering": sub(grade.centering),
-            "corners": sub(grade.corners),
-            "edges": sub(grade.edges),
-            "surface": sub(grade.surface),
-        },
-        "findings": grade.findings,
-        "method": "heuristic-v0",
-        "notes": grade.notes,
-    }
-
-    # draw detected surface marks and corner rings on the overlay
-    _draw_findings(cen.overlay, grade.findings)
-    measurement = {
-        "centering": {
-            "front": {"lr": cen.lr, "tb": cen.tb, "measurable": cen.measurable},
-            "back": None,
-            "passesAt": {"psa10": cen.passes_psa10, "psa9": cen.passes_psa9},
-            "overlayImageKey": None,  # set by the API when it stores the overlay
-        },
-        "confidence": {"centering": cen.confidence},
-    }
+    #
+    # compute_grade and measure_centering are deliberately still in the tree,
+    # still tested, and no longer called from anywhere. This used to be an
+    # `if True:` with the old grading path left unreachable underneath it,
+    # which read as live code to everyone including the people costing it.
     return {
         "ok": True,
         "quality": _quality_dict(gate.quality),
         "rejection": None,
-        "measurement": measurement,
-        "grade": grade_dict,
+        "measurement": None,
+        "grade": None,
+        "gradingSkipped": "slabbed",
         "authenticity": digital_source_check(det.warped),
         "ocr": ocr,
         "warpedImageB64": _b64_png(det.warped) if include_images else None,
-        "overlayImageB64": _b64_png(cen.overlay) if include_images else None,
+        "overlayImageB64": None,
     }

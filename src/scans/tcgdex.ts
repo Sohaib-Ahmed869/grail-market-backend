@@ -332,42 +332,108 @@ export async function identifyFromSlabLabel(label: {
   const sets = await allSets();
   if (sets.length === 0) return null;
 
-  let bestSet: TcgdexSet | null = null;
-  let bestScore = 0;
+  // Score every plausible line against every real set, and keep the CONTENDERS
+  // rather than only the winner.
+  //
+  // One line is not enough to choose with. BGS prints the set over two lines —
+  // an era header and the set under it — and the era header is often itself
+  // the exact name of a real set. "2025 SCARLET & VIOLET / DESTINED RIVALS"
+  // matches sv01 at ~1.0 on the first line, and sv01 has a #231 just as
+  // Destined Rivals does, so the label resolved to Koraidon ex: right number,
+  // right grade, wrong card, and nothing about the result looked wrong.
+  const scored = new Map<string, { set: TcgdexSet; score: number }>();
   for (const line of lines) {
     for (const v of setLineVariants(line)) {
       for (const set of sets) {
-        const s = similarity(v, set.name);
-        if (s > bestScore) {
-          bestScore = s;
-          bestSet = set;
-        }
+        const score = similarity(v, set.name);
+        const prev = scored.get(set.id);
+        if (!prev || score > prev.score) scored.set(set.id, { set, score });
       }
     }
   }
-  if (!bestSet || bestScore < 0.72) return null;
+  const ranked = [...scored.values()]
+    .filter((c) => c.score >= 0.72)
+    .sort((a, b) => b.score - a.score);
+  if (ranked.length === 0) return null;
 
-  const detail = (await fetchJson(`${TCGDEX}/sets/${bestSet.id}`)) as {
-    cards?: TcgdexBrief[];
-  } | null;
-  const cards = detail?.cards ?? [];
-  let card: TcgdexBrief | undefined;
-  if (label.cardNumber) {
-    const wanted = String(Number(String(label.cardNumber).split("/")[0]));
-    card = cards.find((c) => String(Number(String(c.localId).split("/")[0])) === wanted);
-  } else if (label.name) {
-    // no number on the label: the set still narrows the field from ~20,000
-    // cards to a few hundred, where a name match is trustworthy
+  // Anything close to the top is a genuine contender. Two sets both matching
+  // near-perfectly is not a tie to be broken by iteration order — which is all
+  // that decided it before, since `>` never displaces an equal score.
+  const contenders = ranked.filter((c) => c.score >= ranked[0].score - 0.12).slice(0, 6);
+
+  const wanted = label.cardNumber
+    ? String(Number(String(label.cardNumber).split("/")[0]))
+    : null;
+
+  const lookup = async (set: TcgdexSet): Promise<TcgdexBrief | undefined> => {
+    const detail = (await fetchJson(`${TCGDEX}/sets/${set.id}`)) as {
+      cards?: TcgdexBrief[];
+    } | null;
+    const cards = detail?.cards ?? [];
+    if (wanted) {
+      return cards.find(
+        (c) => String(Number(String(c.localId).split("/")[0])) === wanted,
+      );
+    }
+    // no number on the label: the set still narrows ~20,000 cards to a few
+    // hundred, where a name match is trustworthy
+    let best: TcgdexBrief | undefined;
     let bestName = 0;
     for (const c of cards) {
-      const sc = similarity(label.name, c.name);
+      const sc = similarity(label.name ?? "", c.name);
       if (sc > bestName) {
         bestName = sc;
-        card = c;
+        best = c;
       }
     }
-    if (bestName < 0.55) card = undefined;
+    return bestName >= 0.55 ? best : undefined;
+  };
+
+  // Ask each contender what card sits at that number, and let the LABEL'S OWN
+  // CARD NAME decide between them. The evidence to tell Destined Rivals from
+  // Scarlet & Violet was always on the slab; we simply were not reading it.
+  let bestSet: TcgdexSet | null = null;
+  let bestScore = 0;
+  let card: TcgdexBrief | undefined;
+  let bestNameAgreement = -1;
+
+  if (contenders.length === 1 || !label.name) {
+    bestSet = contenders[0].set;
+    bestScore = contenders[0].score;
+    card = await lookup(bestSet);
+  } else {
+    for (const c of contenders) {
+      const hit = await lookup(c.set);
+      if (!hit) continue;
+      const agreement = similarity(label.name, hit.name);
+      // A set whose card at this number actually IS the card named on the
+      // label beats a set that merely spells its own name well.
+      if (
+        agreement > bestNameAgreement + 0.05 ||
+        (Math.abs(agreement - bestNameAgreement) <= 0.05 && c.score > bestScore)
+      ) {
+        bestNameAgreement = agreement;
+        bestSet = c.set;
+        bestScore = c.score;
+        card = hit;
+      }
+    }
+    if (!bestSet) {
+      // nothing had that number — fall back to the best-spelled set, so the
+      // name-veto below gets its usual say
+      bestSet = contenders[0].set;
+      bestScore = contenders[0].score;
+      card = await lookup(bestSet);
+    }
+    if (contenders.length > 1 && card) {
+      console.log(
+        `[slab] ${contenders.length} candidate sets for #${label.cardNumber}; ` +
+          `"${bestSet.name}" wins — its #${card.localId} is "${card.name}" ` +
+          `(name agreement ${bestNameAgreement.toFixed(2)})`,
+      );
+    }
   }
+
   if (!card) return null;
 
   // the label named a card too — if it disagrees flatly with the catalog entry,

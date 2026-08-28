@@ -1,5 +1,6 @@
 import type { GradedPrices } from "@grailcard/shared";
 import { recordUsage } from "./usage.js";
+import { TtlCache } from "./ttlcache.js";
 
 // Grounded web pricing: Gemini + Google Search reads public listing/sales
 // pages and reports the numbers it saw, WITH the URL it read them from.
@@ -31,7 +32,7 @@ export type WebPricing = {
 };
 
 const TTL_MS = 12 * 3600 * 1000;
-const cache = new Map<string, { at: number; v: WebPricing | null }>();
+const cache = new TtlCache<WebPricing | null>(TTL_MS, Number(process.env.WEBPRICE_CACHE_MAX ?? 2000));
 
 const PROMPT_HEAD = `You are looking up CURRENT market prices for one trading card using Google Search.
 
@@ -186,8 +187,8 @@ export async function fetchWebPrices(card: {
   if (!process.env.GEMINI_API_KEY) return null;
   if (process.env.WEB_PRICING === "0") return null;
 
-  const hit = cache.get(card.cardId);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.v;
+  const hit = cache.entry(card.cardId);
+  if (hit) return hit.v;
 
   const query = [
     `name: ${card.name}`,
@@ -203,7 +204,7 @@ export async function fetchWebPrices(card: {
 
   const claimed = parseComps(text);
   if (claimed.length === 0) {
-    cache.set(card.cardId, { at: Date.now(), v: null });
+    cache.set(card.cardId, null);
     return null;
   }
 
@@ -214,7 +215,7 @@ export async function fetchWebPrices(card: {
     console.warn(
       `[webprice] ${card.cardId}: ${claimed.length} claimed comps, 0 verified on source pages — discarded`,
     );
-    cache.set(card.cardId, { at: Date.now(), v: null });
+    cache.set(card.cardId, null);
     return null;
   }
 
@@ -241,6 +242,6 @@ export async function fetchWebPrices(card: {
   console.log(
     `[webprice] ${card.cardId}: ${verified.length}/${claimed.length} comps verified on source pages`,
   );
-  cache.set(card.cardId, { at: Date.now(), v: result });
+  cache.set(card.cardId, result);
   return result;
 }

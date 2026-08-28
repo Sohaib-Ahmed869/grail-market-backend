@@ -6,7 +6,8 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
-import { fetchGradedPrices } from "./gradedprices.js";
+import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
 
 @Controller("market")
@@ -48,12 +49,14 @@ export class MarketController {
     @Query("number") number?: string,
     @Query("grader") grader?: string,
     @Query("grade") grade?: string,
+    @Query("label") label?: string,
     @Query("printing") printing?: string,
     @Query("ja") ja?: string,
     @Query("lang") lang?: string,
   ) {
     const empty = {
-      listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "", filteredToGrade: false,
+      listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "",
+      filteredToGrade: false, filteredToLabel: false, filteredToLabelText: false,
       medianAsk: null, askLow: null, askHigh: null,
       printing: null, filteredToPrinting: false, otherPrintings: [],
       staleCeiling: null, staleCeilingDays: null, cappedByStale: false,
@@ -67,6 +70,7 @@ export class MarketController {
         number: number ?? null,
         grader: grader ?? null,
         grade: Number.isFinite(g) ? g : null,
+        labelVariant: label === "black" || label === "gold" ? label : null,
         // the panel must narrow to the same printing the valuation used, or the
         // two disagree on screen for reasons no reader can see
         printingHint: printing ?? null,
@@ -95,6 +99,9 @@ export class MarketController {
   @Get("price")
   async price(
     @Query("name") name?: string,
+    // the catalogue id, when the caller has one. Search results carry it, and
+    // with it the answer comes from our own store instead of a paid lookup.
+    @Query("cardId") cardId?: string,
     @Query("set") setName?: string,
     @Query("number") number?: string,
     @Query("grader") grader?: string,
@@ -106,11 +113,20 @@ export class MarketController {
     const g = grade != null && grade !== "" ? Number(grade) : null;
     const grade_ = Number.isFinite(g) ? (g as number) : null;
 
-    const ppt = await fetchGradedPrices(name, number ?? null, setName ?? null);
+    // Same lookup the scan path uses — our store first, the provider only on a
+    // miss. Calling the provider directly here is how a search came to quote a
+    // freshly-bought figure for a card a scan was pricing from the store.
+    const ppt = await gradedPricesFor({
+      catalogId: cardId ?? null,
+      name,
+      number: number ?? null,
+      setName: setName ?? null,
+    });
     const sold =
       grader && grade_ != null
         ? ppt.byGrader?.[grader.toUpperCase()]?.[String(grade_).replace(/\.0$/, "")] ?? null
         : null;
+
 
     // Asks fill a gap; they never displace a real figure. For a GRADED card
     // that gap is "no completed sale at this grade". For an ungraded one the
@@ -119,8 +135,21 @@ export class MarketController {
     // the scan path follows, so the two agree.
     const raw = ppt.rawUsd ?? null;
     const specialPrinting = Boolean(printing && readPrinting(printing).family);
+    // A recorded sale normally means we do not need the asking market. It is
+    // not enough when that sale contradicts its own grade ladder — a BGS 8.5
+    // priced below the BGS 8 beneath it — because then the asks are the only
+    // thing that can correct it, and not fetching them leaves the broken
+    // figure standing unopposed.
+    const soldIsSuspect = Boolean(
+      grader &&
+        grade_ != null &&
+        ppt.byGrader &&
+        gradeIsInverted(ppt.byGrader[grader.toUpperCase()] ?? {}, grade_),
+    );
     const wantAsks =
-      grader && grade_ != null ? sold?.price == null : raw == null || specialPrinting;
+      grader && grade_ != null
+        ? sold?.price == null || soldIsSuspect
+        : raw == null || specialPrinting;
 
     const live =
       wantAsks
@@ -136,6 +165,23 @@ export class MarketController {
           })
         : null;
 
+    // The same ladder the scan path uses, and decided AFTER the listings for
+    // the same reason: the asking market is the only thing that can overrule a
+    // recorded sale which contradicts its own grade ladder, and it is not
+    // known until here. A search and a scan must not answer differently.
+    const slabPrice = await priceForSlab(
+      ppt.byGrader,
+      grader ?? null,
+      grade_,
+      live
+        ? {
+            median: live.medianAsk,
+            count: live.listings.length,
+            filteredToGrade: Boolean(live.filteredToGrade),
+          }
+        : null,
+    );
+
     return {
       name,
       setName: setName ?? null,
@@ -145,6 +191,7 @@ export class MarketController {
       rawUsd: raw,
       byGrader: ppt.byGrader ?? null,
       sold,
+      slabPrice,
       liveAsk:
         live?.medianAsk != null
           ? {

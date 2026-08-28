@@ -39,18 +39,25 @@ export function storePool(): Pool | null {
 
 function getPool(): Pool | null {
   if (!storeConfigured()) return null;
-  pool ??= new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 4,
-    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
-    idleTimeoutMillis: 30_000,
-    // Neon terminates idle connections; letting the pool retire them quietly
-    // avoids noisy unhandled errors on long-lived dev servers.
-    allowExitOnIdle: true,
-  });
-  pool.on("error", (err) => {
-    console.warn(`[store] idle client error: ${err.message}`);
-  });
+  // The handler is attached INSIDE the construction branch. Attaching it on
+  // every getPool() call added a listener per call — Node warns at eleven, and
+  // on a long-running server it climbs without bound. Every one of them then
+  // logs the same error, so a single dropped connection prints N times and
+  // looks like N failures.
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 4,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+      idleTimeoutMillis: 30_000,
+      // Neon terminates idle connections; letting the pool retire them quietly
+      // avoids noisy unhandled errors on long-lived dev servers.
+      allowExitOnIdle: true,
+    });
+    pool.on("error", (err) => {
+      console.warn(`[store] idle client error: ${err.message}`);
+    });
+  }
   return pool;
 }
 
@@ -137,6 +144,47 @@ CREATE TABLE IF NOT EXISTS grade_prices (
   PRIMARY KEY (catalog_id, grader, grade, qualifier, label_variant)
 );
 
+-- The catalogue we know about, so pricing can be driven as a BATCH rather
+-- than as a side effect of somebody scanning a card.
+--
+-- grade_prices is keyed by catalog_id; card_prices is keyed by the free-text
+-- (name|number|set) we happened to search on. Nothing joined the two, so there
+-- was no way to ask "which cards do we hold, and which are stale" — and
+-- without that question there is no refresh job, only a per-request lookup
+-- that bills per scan and scales with traffic instead of with the catalogue.
+--
+-- Every successful identification writes here. It costs nothing: we already
+-- have the name, set and number in hand at that moment.
+CREATE TABLE IF NOT EXISTS catalog_cards (
+  catalog_id   TEXT PRIMARY KEY,
+  game         TEXT,
+  name         TEXT NOT NULL,
+  set_name     TEXT,
+  card_number  TEXT,
+  -- how often this card gets looked at, which is what decides how often it is
+  -- worth re-pricing. A card nobody scans does not need a daily median.
+  seen_count   INTEGER     NOT NULL DEFAULT 1,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  -- Ungraded market price. It lives here rather than in grade_prices because
+  -- it has no grader dimension at all, and inventing a synthetic RAW grader to
+  -- give it a home is exactly the kind of shortcut that put a PSA number under
+  -- a Beckett badge. One card, one raw price, its own column.
+  raw_usd        NUMERIC(12,2),
+  raw_fetched_at TIMESTAMPTZ,
+
+  -- When we last ASKED a price source about this card, and how many times in
+  -- a row it had nothing. Distinct from "when we last got a price": a card the
+  -- source genuinely does not cover writes no grade_prices row, so without
+  -- this it stays "never priced" forever and the refresh job re-buys the same
+  -- empty answer on every run. That is a slow leak that only shows up as a
+  -- quota that keeps running out for no visible reason.
+  last_attempt_at  TIMESTAMPTZ,
+  price_miss_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS catalog_cards_seen_idx ON catalog_cards (last_seen_at DESC);
+
 CREATE INDEX IF NOT EXISTS grade_prices_lookup_idx ON grade_prices (catalog_id, grader);
 CREATE INDEX IF NOT EXISTS grade_prices_fetched_idx ON grade_prices (fetched_at DESC);
 
@@ -146,6 +194,23 @@ CREATE INDEX IF NOT EXISTS card_prices_set_number_idx       ON card_prices (lowe
 CREATE INDEX IF NOT EXISTS card_prices_fetched_at_idx       ON card_prices (fetched_at DESC);
 `;
 
+// CREATE TABLE IF NOT EXISTS does nothing to a table that already exists — it
+// does not add columns. So every column added to SCHEMA after a database was
+// first created is silently absent on that database, and the failure shows up
+// later as a query error against a column the source clearly declares. This
+// caught us with catalog_cards.raw_usd: the table existed from a run minutes
+// earlier, the column went into SCHEMA, and the deployed table never grew it.
+//
+// Postgres has had ADD COLUMN IF NOT EXISTS since 9.6, so additive migrations
+// can simply be listed here and re-run on every boot. Append, never edit: a
+// statement in this list has already run against production databases.
+const MIGRATIONS = [
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_usd        NUMERIC(12,2)`,
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_fetched_at TIMESTAMPTZ`,
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ`,
+  `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS price_miss_count INTEGER NOT NULL DEFAULT 0`,
+];
+
 /** Create the schema once per process. Resolves false if the store is unusable. */
 export function initStore(): Promise<boolean> {
   ready ??= (async () => {
@@ -153,7 +218,15 @@ export function initStore(): Promise<boolean> {
     if (!p) return false;
     try {
       await p.query(SCHEMA);
-      console.log("[store] card_prices ready");
+      for (const m of MIGRATIONS) {
+        try {
+          await p.query(m);
+        } catch (err) {
+          // one bad migration must not cost us the whole store
+          console.warn(`[store] migration skipped :: ${(err as Error).message}`);
+        }
+      }
+      console.log(`[store] ready (${MIGRATIONS.length} migrations checked)`);
       return true;
     } catch (err) {
       usable = false;
@@ -357,6 +430,9 @@ export type GradeRow = {
   median?: number | null;
   source: string;
   lastSaleAt?: string | null;
+  /** when WE fetched this figure. Set on read; ignored on write. Without it a
+   *  price six days old renders identically to one fetched a second ago. */
+  fetchedAt?: string | null;
 };
 
 /** Persist prices under the composite key. Best-effort like everything here. */
@@ -369,31 +445,37 @@ export async function writeGradePrices(
   const p = getPool();
   if (!p) return;
   try {
-    for (const r of rows) {
-      await p.query(
-        `INSERT INTO grade_prices (
-           catalog_id, grader, grade, qualifier, label_variant, tier,
-           price, sample_size, confidence, method, low, high, median,
-           source, last_sale_at, fetched_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
-         ON CONFLICT (catalog_id, grader, grade, qualifier, label_variant) DO UPDATE SET
-           tier = excluded.tier,
-           price = excluded.price,
-           sample_size = excluded.sample_size,
-           confidence = excluded.confidence,
-           method = excluded.method,
-           low = excluded.low, high = excluded.high, median = excluded.median,
-           source = excluded.source,
-           last_sale_at = COALESCE(excluded.last_sale_at, grade_prices.last_sale_at),
-           fetched_at = now()`,
-        [
-          catalogId, r.grader, r.grade, r.qualifier ?? "", r.labelVariant ?? "",
-          r.tier ?? null, r.price, r.sampleSize ?? null, r.confidence ?? null,
-          r.method ?? null, r.low ?? null, r.high ?? null, r.median ?? null,
-          r.source, r.lastSaleAt ?? null,
-        ],
-      );
-    }
+    // One multi-row insert. This was a query per row inside a loop, on a pool
+    // capped at 4 connections — a card with 20 grades meant 20 round trips to
+    // Neon, and a scan waited for all of them.
+    const cols = 15;
+    const values = rows
+      .map((_, i) => `(${Array.from({ length: cols }, (_, k) => `$${i * cols + k + 1}`).join(",")}, now())`)
+      .join(",");
+    const params = rows.flatMap((r) => [
+      catalogId, r.grader, r.grade, r.qualifier ?? "", r.labelVariant ?? "",
+      r.tier ?? null, r.price, r.sampleSize ?? null, r.confidence ?? null,
+      r.method ?? null, r.low ?? null, r.high ?? null, r.median ?? null,
+      r.source, r.lastSaleAt ?? null,
+    ]);
+    await p.query(
+      `INSERT INTO grade_prices (
+         catalog_id, grader, grade, qualifier, label_variant, tier,
+         price, sample_size, confidence, method, low, high, median,
+         source, last_sale_at, fetched_at
+       ) VALUES ${values}
+       ON CONFLICT (catalog_id, grader, grade, qualifier, label_variant) DO UPDATE SET
+         tier = excluded.tier,
+         price = excluded.price,
+         sample_size = excluded.sample_size,
+         confidence = excluded.confidence,
+         method = excluded.method,
+         low = excluded.low, high = excluded.high, median = excluded.median,
+         source = excluded.source,
+         last_sale_at = COALESCE(excluded.last_sale_at, grade_prices.last_sale_at),
+         fetched_at = now()`,
+      params,
+    );
   } catch (err) {
     console.warn(`[store] grade_prices write failed for ${catalogId}: ${(err as Error).message}`);
   }
@@ -432,6 +514,7 @@ export async function readGradePrices(
         low: n(r.low), high: n(r.high), median: n(r.median),
         source: String(r.source),
         lastSaleAt: r.last_sale_at ? new Date(r.last_sale_at).toISOString() : null,
+        fetchedAt: r.fetched_at ? new Date(r.fetched_at).toISOString() : null,
       };
     }
     return out;
@@ -463,6 +546,193 @@ export async function storeStats(): Promise<{
     return { configured, online: true, cards: rows[0].cards, withGraded: rows[0].with_graded };
   } catch {
     return { configured, online: false, cards: null, withGraded: null };
+  }
+}
+
+/** Note that we have seen this card. Fire-and-forget, like everything here.
+ *
+ *  This is what makes batch pricing possible: it is the only place that knows
+ *  a catalog_id and the (name, set, number) needed to ask a price source about
+ *  it. Without the pair, a refresh job has no work list. */
+export async function noteCatalogCard(c: {
+  catalogId: string;
+  game?: string | null;
+  name: string;
+  setName?: string | null;
+  cardNumber?: string | null;
+}): Promise<void> {
+  if (!c.catalogId || !c.name) return;
+  // never register the placeholder ids — they are not addressable catalogue
+  // entries and a refresh job cannot look them up
+  // Placeholder ids, not addressable catalogue entries: a refresh job cannot
+  // look any of them up, and "sealed" is not even a card.
+  if (["llm", "described", "market", "sealed"].includes(c.catalogId)) return;
+  if (!usable || !(await initStore())) return;
+  const p = getPool();
+  if (!p) return;
+  try {
+    await p.query(
+      `INSERT INTO catalog_cards (catalog_id, game, name, set_name, card_number)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (catalog_id) DO UPDATE SET
+         game        = COALESCE(excluded.game,        catalog_cards.game),
+         name        = COALESCE(excluded.name,        catalog_cards.name),
+         set_name    = COALESCE(excluded.set_name,    catalog_cards.set_name),
+         card_number = COALESCE(excluded.card_number, catalog_cards.card_number),
+         seen_count  = catalog_cards.seen_count + 1,
+         last_seen_at = now()`,
+      [c.catalogId, c.game ?? null, c.name, c.setName ?? null, c.cardNumber ?? null],
+    );
+  } catch (err) {
+    console.warn(`[store] catalog_cards write failed for ${c.catalogId}: ${(err as Error).message}`);
+  }
+}
+
+/** Cache the ungraded market price alongside the card's identity. */
+export async function writeRawPrice(catalogId: string, rawUsd: number | null): Promise<void> {
+  if (!catalogId || rawUsd == null) return;
+  if (!usable || !(await initStore())) return;
+  const p = getPool();
+  if (!p) return;
+  try {
+    await p.query(
+      `UPDATE catalog_cards SET raw_usd = $2, raw_fetched_at = now() WHERE catalog_id = $1`,
+      [catalogId, rawUsd],
+    );
+  } catch (err) {
+    console.warn(`[store] raw price write failed for ${catalogId}: ${(err as Error).message}`);
+  }
+}
+
+/** The ungraded price, if we hold one fresh enough to use. */
+export async function readRawPrice(
+  catalogId: string,
+  maxAgeMs: number,
+): Promise<number | null> {
+  if (!catalogId || !usable || !(await initStore())) return null;
+  const p = getPool();
+  if (!p) return null;
+  try {
+    const { rows } = await p.query(
+      `SELECT raw_usd FROM catalog_cards
+       WHERE catalog_id = $1
+         AND raw_usd IS NOT NULL
+         AND raw_fetched_at > now() - ($2::bigint * interval '1 millisecond')`,
+      [catalogId, Math.round(maxAgeMs)],
+    );
+    return rows[0] ? n(rows[0].raw_usd) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Note that we asked about this card. `found` false means the source had
+ *  nothing, which backs the card off rather than leaving it looking unpriced
+ *  and therefore urgent. */
+export async function notePriceAttempt(catalogId: string, found: boolean): Promise<void> {
+  if (!catalogId || !usable || !(await initStore())) return;
+  const p = getPool();
+  if (!p) return;
+  try {
+    await p.query(
+      `UPDATE catalog_cards
+          SET last_attempt_at = now(),
+              price_miss_count = CASE WHEN $2 THEN 0 ELSE price_miss_count + 1 END
+        WHERE catalog_id = $1`,
+      [catalogId, found],
+    );
+  } catch (err) {
+    console.warn(`[store] attempt note failed for ${catalogId}: ${(err as Error).message}`);
+  }
+}
+
+export type RefreshCandidate = {
+  catalogId: string;
+  game: string | null;
+  name: string;
+  setName: string | null;
+  cardNumber: string | null;
+  seenCount: number;
+  /** age of the freshest price we hold, in hours. null = we hold none at all. */
+  ageHours: number | null;
+  /** largest sample size behind any grade we hold — our proxy for liquidity */
+  liquidity: number | null;
+  tier: "hot" | "warm" | "cold";
+};
+
+/** The work list for the refresh job, staleness-first.
+ *
+ *  Tiering is by how much the answer moves and how many people ask for it, not
+ *  by one global TTL. A Charizard with 400 recent PSA 10 sales genuinely does
+ *  change week to week and lots of people look at it; a common with three
+ *  lifetime sales does not, and re-buying it daily is money set on fire.
+ *
+ *  Cards we have never priced come first at any tier — an unknown price is a
+ *  worse product than a slightly old one.
+ */
+export async function refreshCandidates(
+  limit: number,
+  /** games a price source covers. PPT is English Pokemon only. */
+  games: string[] = ["pokemon"],
+): Promise<RefreshCandidate[]> {
+  if (!usable || !(await initStore())) return [];
+  const p = getPool();
+  if (!p) return [];
+  try {
+    const { rows } = await p.query(
+      `WITH held AS (
+         SELECT catalog_id,
+                MAX(fetched_at)  AS fetched_at,
+                MAX(sample_size) AS liquidity
+         FROM grade_prices
+         GROUP BY catalog_id
+       )
+       SELECT c.catalog_id, c.game, c.name, c.set_name, c.card_number, c.seen_count,
+              EXTRACT(EPOCH FROM (now() - h.fetched_at)) / 3600 AS age_hours,
+              h.liquidity,
+              CASE
+                WHEN (c.seen_count > 0 AND c.last_seen_at > now() - interval '7 days')
+                     OR h.liquidity >= 50 THEN 'hot'
+                WHEN h.liquidity >= 5 THEN 'warm'
+                ELSE 'cold'
+              END AS tier
+       FROM catalog_cards c
+       LEFT JOIN held h ON h.catalog_id = c.catalog_id
+       -- Only what a price source can actually answer. Every identification
+       -- registers a card, deliberately, including the games we cannot price
+       -- yet — but queueing a One Piece card against a Pokemon-only provider
+       -- buys the same empty answer on every run, forever.
+       WHERE c.game = ANY($2::text[])
+       -- Exponential backoff on a card the source keeps having nothing for:
+       -- 1 day, 2, 4 … capped at 32. A card genuinely outside the catalogue
+       -- settles at monthly instead of being retried every single run.
+       AND (c.last_attempt_at IS NULL
+            OR c.last_attempt_at <
+               now() - (LEAST(POWER(2, LEAST(c.price_miss_count, 5)), 32) * interval '1 day'))
+       AND (h.fetched_at IS NULL
+          OR (h.fetched_at < now() - interval '1 day'
+              AND ((c.seen_count > 0 AND c.last_seen_at > now() - interval '7 days')
+                   OR h.liquidity >= 50))
+          OR (h.fetched_at < now() - interval '7 days'  AND h.liquidity >= 5)
+          OR  h.fetched_at < now() - interval '30 days')
+       ORDER BY (h.fetched_at IS NULL) DESC, c.seen_count DESC, h.fetched_at ASC NULLS FIRST
+       LIMIT $1`,
+      [limit, games],
+    );
+    return rows.map((r: any) => ({
+      catalogId: String(r.catalog_id),
+      game: r.game ?? null,
+      name: String(r.name),
+      setName: r.set_name ?? null,
+      cardNumber: r.card_number ?? null,
+      seenCount: Number(r.seen_count ?? 0),
+      ageHours: r.age_hours == null ? null : Number(r.age_hours),
+      liquidity: r.liquidity == null ? null : Number(r.liquidity),
+      tier: r.tier as "hot" | "warm" | "cold",
+    }));
+  } catch (err) {
+    console.warn(`[store] refresh candidates failed: ${(err as Error).message}`);
+    return [];
   }
 }
 

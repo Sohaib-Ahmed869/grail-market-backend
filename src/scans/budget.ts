@@ -1,7 +1,8 @@
 import { quotaStatus, CREDITS_PER_LOOKUP } from "./gradedprices.js";
-import { monthStart, usedSince, usedToday } from "./usage.js";
+import { allUsedToday, monthStart, usedSince, usedToday } from "./usage.js";
 import { storeStats } from "../cards.store.js";
 import { justTcgQuota } from "./justtcg.js";
+import { observedCostPerScan } from "./ledger.js";
 
 // "How many more cards can this system actually scan today?"
 //
@@ -45,6 +46,13 @@ export type ScanBudget = {
   resetsAt: string | null;
   cachedCards: number;
   providers: ProviderBudget[];
+  /** Every unit metered today, per provider, whatever spent it.
+   *
+   *  Distinct from scans.creditsToday, which counts only what SCANS cost. The
+   *  refresh job and key checks run outside a scan and are charged to nobody,
+   *  so the two disagree by design — this is the one that answers "what have
+   *  we actually spent today". */
+  spendToday: Record<string, number>;
 };
 
 // Gemini's free-tier RPD is account-specific and not exposed by the API, so it
@@ -67,6 +75,13 @@ export async function scanBudget(): Promise<ScanBudget> {
   const ppt = quotaStatus();
   const providers: ProviderBudget[] = [];
 
+  // What a scan has actually cost lately, where we have enough history to say.
+  // Falls back to the declared assumption otherwise — see observedCostPerScan.
+  const [gObserved, pObserved] = await Promise.all([
+    observedCostPerScan("gemini"),
+    observedCostPerScan("ppt"),
+  ]);
+
   // ---- PokemonPriceTracker: graded (PSA) sold comps. The money number. ----
   const pptRemaining = ppt.configured ? ppt.totalRemaining : null;
   providers.push({
@@ -78,8 +93,8 @@ export async function scanBudget(): Promise<ScanBudget> {
       ppt.dailyLimit != null && pptRemaining != null ? ppt.dailyLimit - pptRemaining : null,
     limit: ppt.dailyLimit,
     remaining: pptRemaining,
-    costPerScan: CREDITS_PER_LOOKUP,
-    scansLeft: ppt.lockedOut ? 0 : scansFrom(pptRemaining, CREDITS_PER_LOOKUP),
+    costPerScan: pObserved ?? CREDITS_PER_LOOKUP,
+    scansLeft: ppt.lockedOut ? 0 : scansFrom(pptRemaining, pObserved ?? CREDITS_PER_LOOKUP),
     reported: true,
     gating: ppt.configured,
     note: ppt.configured
@@ -100,11 +115,13 @@ export async function scanBudget(): Promise<ScanBudget> {
     used: gUsed,
     limit: gConfigured ? GEMINI_DAILY_RPD : null,
     remaining: gRemaining,
-    costPerScan: GEMINI_PER_SCAN,
-    scansLeft: scansFrom(gRemaining, GEMINI_PER_SCAN),
+    costPerScan: gObserved ?? GEMINI_PER_SCAN,
+    scansLeft: scansFrom(gRemaining, gObserved ?? GEMINI_PER_SCAN),
     reported: false,
     gating: gConfigured,
-    note: "daily cap is configured locally, not reported by Google — set GEMINI_DAILY_RPD to match AI Studio",
+    note:
+      "daily cap is configured locally, not reported by Google — set GEMINI_DAILY_RPD to match AI Studio" +
+      (gObserved ? `; cost/scan measured from the last 30 days, not assumed` : ""),
     period: "day",
   });
 
@@ -191,13 +208,20 @@ export async function scanBudget(): Promise<ScanBudget> {
     if (scansPerDay == null || full < scansPerDay) scansPerDay = full;
   }
 
+  const store = await storeStats();
+
   return {
     scansLeft,
     scansPerDay,
     limitedBy,
-    store: await storeStats(),
+    store,
     resetsAt: ppt.resetsAt,
-    cachedCards: ppt.cachedCards,
+    // The SHARED store, not this instance's SQLite file. "Cards already
+    // cached" is read as "cards that cost nothing to scan again", and the
+    // local count is neither shared between instances nor durable — it
+    // undercounted 21 cards as 14.
+    cachedCards: store.cards ?? ppt.cachedCards,
     providers,
+    spendToday: allUsedToday(),
   };
 }

@@ -7,23 +7,27 @@ import { db } from "../db.js";
 import { identifyApiTcg } from "./apitcg.js";
 import { fetchWebPrices } from "./geminiprice.js";
 import { normaliseVisionUrl } from "./visionurl.js";
-import { estimateGradedFromRaw, fetchCardGraderMarket } from "./cardgrader.js";
+import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
-import { fetchGradedPrices, type GradePoint } from "./gradedprices.js";
+import type { GradePoint } from "./gradedprices.js";
+import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { findInversions, soldVsAsk } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
-import { recordScan, withScan } from "./ledger.js";
-import { writeGradePrices } from "../cards.store.js";
+import { recordScan, recordWeakResult, withScan } from "./ledger.js";
+import { graderTier } from "./graders.js";
+import { labelTokens, rawGradedDivergence } from "./labeltokens.js";
+import { visionGate, GateSaturated } from "./gate.js";
+import {
+  writeGradePrices,
+  readGradePrices,
+  noteCatalogCard,
+  readRawPrice,
+  writeRawPrice,
+} from "../cards.store.js";
 
-// Mirrors TIERS in services/vision/app/pipeline/slab.py. Never price across
-// tiers: a BCCG 10 and a BGS 10 are not comparable goods.
-const GRADER_TIER: Record<string, string> = {
-  PSA: "premium", BGS: "premium", BVG: "premium", CGC: "premium", SGC: "premium",
-  TAG: "emerging", ACE: "emerging", AGS: "emerging", MNT: "emerging",
-  BCCG: "discount", GMA: "discount", KSA: "discount", HGA: "discount", CSG: "discount",
-};
 import {
   identifyDigimon,
   identifyLorcana,
@@ -32,12 +36,11 @@ import {
   identifySwu,
   identifyYgo,
 } from "./othergames.js";
-import { buildRecommendation, conditionMultiplier } from "./recommend.js";
+import { buildRecommendation } from "./recommend.js";
 import { similarity } from "./similarity.js";
 import { fetchRelated } from "./related.js";
 import { buildSummary } from "./summarize.js";
 import { identifyCard, identifyFromSlabLabel } from "./tcgdex.js";
-import { gradeWithXimilar } from "./ximilar.js";
 
 const BRAND_HINTS: [RegExp, string][] = [
   [/top\s*trumps/i, "Top Trumps"],
@@ -57,9 +60,6 @@ function titleCase(s: string): string {
 const VISION_URL = normaliseVisionUrl(process.env.VISION_URL);
 const STORAGE_ROOT = join(process.cwd(), "storage");
 
-// PSA centering standards for the BACK are looser than the front
-const BACK_PSA10_MAX = 75;
-const BACK_PSA9_MAX = 90;
 
 @Injectable()
 export class ScansService {
@@ -99,6 +99,112 @@ export class ScansService {
         priceUsd: sold ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null,
         priceSource: sold ? "sold" : v?.liveAsk ? "ask" : v?.tcgplayer?.market ? "catalog" : null,
       });
+
+      // House rule: every result below MEDIUM confidence goes in the backlog,
+      // with its inputs. A weak answer is indistinguishable from a strong one
+      // from the outside, so without this the only bad cases we ever learn
+      // about are the ones somebody complains about — which is a terrible
+      // sample for a system whose promise is that it would rather say nothing
+      // than say something wrong. Each row should be enough to rebuild the
+      // case as a fixture.
+      // A general check that needs no list of printing names: nobody pays to
+      // grade a card worth 65 cents. When the raw price of the card we
+      // identified is trivial and the graded market for it is not, we are
+      // almost certainly looking at a different printing that shares the
+      // collector number — which is how a $615 PSA Magazine Exclusive Luffy
+      // came to be priced as a $0.65 OP05-060 Leader.
+      const divergence = rawGradedDivergence(
+        v?.tcgplayer?.market ?? v?.cardmarket?.trend ?? null,
+        sold ?? v?.liveAsk?.median ?? null,
+      );
+      if (divergence.suspect) {
+        if (scan.valuation) {
+          scan.valuation.identificationSuspect = divergence.reason;
+        }
+        void recordWeakResult({
+          scanId,
+          reason: "raw-graded-divergence",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null,
+          grade: v?.slabGrade ?? null,
+          confidence: "low",
+          priceUsd: sold ?? v?.liveAsk?.median ?? null,
+          priceSource: "suspect",
+          inputs: {
+            rawUsd: v?.tcgplayer?.market ?? v?.cardmarket?.trend ?? null,
+            ratio: divergence.ratio,
+            reason: divergence.reason,
+            ocrNames: scan.ocrNames ?? [],
+          },
+        });
+        console.warn(`[identify] ${divergence.reason}`);
+      }
+
+      // The card's own grade ladder contradicting itself, and the asking
+      // market contradicting our sold comps. Both are visible from the numbers
+      // alone and both mean the figure is shakier than its confidence says.
+      const ownGrades = v?.slabGrader ? v?.pricesByGrader?.[v.slabGrader] : null;
+      const inversions = ownGrades ? findInversions(ownGrades) : [];
+      if (inversions.length) {
+        const i = inversions[0];
+        console.warn(
+          `[ladder] ${v!.slabGrader} ${i.higher} (${i.higherPrice.toFixed(0)}) is below ` +
+            `${v!.slabGrader} ${i.lower} (${i.lowerPrice.toFixed(0)}) — thin or contaminated comps`,
+        );
+        void recordWeakResult({
+          scanId, reason: "grade-ladder-inverted",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null, grade: v?.slabGrade ?? null,
+          confidence: "low", priceUsd: sold ?? null, priceSource: "sold",
+          inputs: { inversions },
+        });
+      }
+      const askGap = soldVsAsk(sold, v?.liveAsk?.median ?? null);
+      if (askGap.diverged) {
+        if (scan.valuation) scan.valuation.marketNote = askGap.note;
+        void recordWeakResult({
+          scanId, reason: "sold-ask-divergence",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: v?.slabGrader ?? null, grade: v?.slabGrade ?? null,
+          confidence: "low", priceUsd: sold ?? null, priceSource: "sold",
+          inputs: { askMedian: v?.liveAsk?.median ?? null, ratio: askGap.ratio },
+        });
+      }
+
+      const weak = classifyWeakness(scan, sold);
+      if (weak) {
+        void recordWeakResult({
+          scanId,
+          reason: weak.reason,
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          cardNumber: scan.identification?.localId ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          game: scan.identification?.game ?? null,
+          grader: v?.slabGrader ?? null,
+          grade: v?.slabGrade ?? null,
+          confidence: weak.confidence,
+          sampleSize: weak.sampleSize,
+          priceUsd: sold ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null,
+          priceSource: sold ? "sold" : v?.liveAsk ? "ask" : v?.tcgplayer?.market ? "catalog" : null,
+          inputs: {
+            status: scan.status,
+            rejection: scan.rejection?.reason ?? null,
+            ocrNames: scan.ocrNames ?? [],
+            matchScore: scan.identification?.matchScore ?? null,
+            valuationSource: v?.source ?? null,
+            gradersHeld: v?.pricesByGrader ? Object.keys(v.pricesByGrader) : [],
+            estimated: v?.graded?.estimated ?? null,
+            hasWebEstimate: Boolean(v?.webEstimate),
+          },
+        });
+      }
       return scan;
     });
   }
@@ -171,64 +277,6 @@ export class ScansService {
       recommendation: null,
     };
 
-    this.saveImages(id, "front", frontRes, scan);
-    if (backRes) this.saveImages(id, "back", backRes, scan);
-
-    // trained grading (Ximilar) upgrades the heuristic grade when available.
-    // Send the ORIGINAL photo — their detector handles perspective itself.
-    // Only for gate-passing scans: each call costs real credits.
-    if (frontRes.ok && scan.grade) {
-      const trained = await gradeWithXimilar(front.buffer.toString("base64"));
-      if (trained) {
-        // keep our scratch findings (drawn on the overlay) and our honesty
-        // notes about photo conditions alongside their trained sub-grades.
-        // Drop heuristic bookkeeping notes that no longer apply — the trained
-        // model fills sub-grades the heuristics had declared unassessable.
-        trained.grade.findings = scan.grade.findings ?? null;
-        trained.grade.notes.push(
-          ...scan.grade.notes.filter(
-            (n) =>
-              !n.startsWith("Corner, edge, and surface") &&
-              !n.includes("excluded from the overall grade"),
-          ),
-        );
-        scan.grade = trained.grade;
-
-        // their measured centering ratios fill in when our geometric
-        // measurement declined (full-art designs)
-        const front_ = scan.measurement?.centering.front;
-        if (front_ && !front_.measurable && trained.centeringRatios) {
-          front_.lr = trained.centeringRatios.lr;
-          front_.tb = trained.centeringRatios.tb;
-          front_.measurable = true;
-          const worst = Math.max(
-            front_.lr,
-            100 - front_.lr,
-            front_.tb,
-            100 - front_.tb,
-          );
-          scan.measurement!.centering.passesAt.psa10 = worst <= 60;
-          scan.measurement!.centering.passesAt.psa9 = worst <= 65;
-          scan.measurement!.confidence.centering = 0.6;
-        }
-      }
-    }
-
-    // merge back centering into the front measurement + combined pass verdicts
-    if (scan.measurement && backRes?.measurement) {
-      const backCentering = backRes.measurement.centering.front;
-      scan.measurement.centering.back = backCentering;
-      if (backCentering.measurable) {
-        const worst = Math.max(
-          backCentering.lr,
-          100 - backCentering.lr,
-          backCentering.tb,
-          100 - backCentering.tb,
-        );
-        scan.measurement.centering.passesAt.psa10 &&= worst <= BACK_PSA10_MAX;
-        scan.measurement.centering.passesAt.psa9 &&= worst <= BACK_PSA9_MAX;
-      }
-    }
 
     // identification runs even for rejected fronts — a bad photo can still
     // tell the user which card we saw (and what it's worth). All supported
@@ -536,31 +584,60 @@ export class ScansService {
     let pptByGrade: Record<string, GradePoint> | null = null;
     let pptByGrader: Record<string, Record<string, GradePoint>> | null = null;
     const ident = scan.identification;
+
+    // Register the card before pricing it, for EVERY game rather than just the
+    // one we can price today. The refresh job's work list is this table, so a
+    // card that is never registered is a card that never gets a batch price —
+    // and the games with no price source right now are exactly the ones we
+    // most want queued for when they get one.
+    if (ident) {
+      void noteCatalogCard({
+        catalogId: ident.cardId,
+        game: ident.game,
+        name: ident.name,
+        setName: ident.setName,
+        cardNumber: ident.localId,
+      });
+    }
+
     if (
       ident &&
       ident.game === "pokemon" &&
       ident.cardId !== "llm" &&
       ident.cardId !== "described"
     ) {
-      const ppt = await fetchGradedPrices(ident.name, ident.localId, ident.setName);
-      pptByGrade = ppt.byGrade ?? null;
-      pptByGrader = ppt.byGrader ?? null;
-      if (ppt.graded) {
+      // Prices are READ from our own store first, and bought only when the
+      // store cannot answer. The order lives in pricing.ts because the search
+      // path needs exactly the same one — a scan and a search that land on the
+      // same card must not quote two different figures for it.
+      const looked = await gradedPricesFor({
+        catalogId: ident.cardId,
+        name: ident.name,
+        number: ident.localId,
+        setName: ident.setName,
+      });
+      pptByGrader = looked.byGrader;
+      pptByGrade = looked.byGrade;
+
+      if (pptByGrade) {
         scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-        scan.valuation.graded = ppt.graded;
+        scan.valuation.graded = {
+          source: looked.source === "store" ? "grailcard-store" : "pokemonpricetracker",
+          psa8: pptByGrade["8"]?.price ?? null,
+          psa9: pptByGrade["9"]?.price ?? null,
+          psa10: pptByGrade["10"]?.price ?? null,
+          estimated: false,
+        };
       }
-      // vintage sets often have NO price in the free catalogs — PPT's raw
-      // market price fills the gap from the same call
-      if (ppt.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
+      // vintage sets often have NO price in the free catalogs — the ungraded
+      // market price fills that gap
+      if (looked.rawUsd != null && !scan.valuation?.tcgplayer?.market) {
         scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
-        scan.valuation.source = "pokemonpricetracker";
+        scan.valuation.source =
+          looked.source === "store" ? "grailcard-store" : "pokemonpricetracker";
         scan.valuation.tcgplayer = {
-          unit: "USD",
-          variant: "market",
-          low: null,
-          mid: null,
-          high: null,
-          market: ppt.rawUsd,
+          unit: "USD", variant: "market",
+          low: null, mid: null, high: null, market: looked.rawUsd,
         };
       }
     }
@@ -633,28 +710,34 @@ export class ScansService {
     // say so. The live listings panel still shows what the market is asking,
     // which is real data, and the interface names the gap instead of filling
     // it with arithmetic.
-    void estimateGradedFromRaw;
-
     // Separate the graded prices by the company that actually issued them.
     // Everything we can buy today is PSA sale data, so PSA is the only key that
     // gets populated — and that is precisely the point: a Beckett card now
     // shows an empty Beckett tab rather than PSA numbers wearing a BGS badge.
-    if (scan.valuation?.graded) {
+    // Separate the graded prices by the company that actually issued them.
+    //
+    // Gated on the per-grader data, NOT on valuation.graded. That flat field
+    // carries psa8/psa9/psa10 and nothing else, so it is null for a card with
+    // no PSA sales — and this whole block used to hang off it. A card with 23
+    // Beckett sales and zero PSA sales therefore dropped every one of them and
+    // persisted nothing, which is the failure this table exists to prevent,
+    // arriving from the other direction.
+    let byGrader: Record<string, Record<string, GradePoint>> =
+      pptByGrader && Object.keys(pptByGrader).length ? { ...pptByGrader } : {};
+    if (!Object.keys(byGrader).length && scan.valuation?.graded) {
+      // no per-grade evidence, only the bare flat numbers — keep them, under
+      // the grader that actually issued them
       const g = scan.valuation.graded;
-      // prefer the per-grade evidence from the provider (filtered price, sample
-      // size, its own confidence); fall back to the bare number where a source
-      // gives us nothing richer
-      // every grading company the source tracks, not just PSA
-      let byGrader: Record<string, Record<string, GradePoint>> =
-        pptByGrader && Object.keys(pptByGrader).length ? { ...pptByGrader } : {};
-      if (!Object.keys(byGrader).length) {
-        const psa: Record<string, GradePoint> = {};
-        if (g.psa8 != null) psa["8"] = { price: g.psa8 };
-        if (g.psa9 != null) psa["9"] = { price: g.psa9 };
-        if (g.psa10 != null) psa["10"] = { price: g.psa10 };
-        if (Object.keys(psa).length) byGrader = { PSA: psa };
-      }
-      if (Object.keys(byGrader).length > 0) scan.valuation.pricesByGrader = byGrader;
+      const psa: Record<string, GradePoint> = {};
+      if (g.psa8 != null) psa["8"] = { price: g.psa8 };
+      if (g.psa9 != null) psa["9"] = { price: g.psa9 };
+      if (g.psa10 != null) psa["10"] = { price: g.psa10 };
+      if (Object.keys(psa).length) byGrader = { PSA: psa };
+    }
+
+    if (Object.keys(byGrader).length > 0) {
+      scan.valuation ??= { source: "tcgdex", tcgplayer: null, cardmarket: null };
+      scan.valuation.pricesByGrader = byGrader;
 
       // Persist under the composite key so the grader survives storage. Until
       // this table existed the schema had psa8/psa9/psa10 columns and no
@@ -670,7 +753,7 @@ export class ScansService {
           rows.map(({ grader, grade, pt }) => ({
             grader,
             grade: Number(grade),
-            tier: GRADER_TIER[grader] ?? null,
+            tier: graderTier(grader),
             price: pt.price ?? null,
             sampleSize: pt.count ?? null,
             confidence: pt.confidence ?? null,
@@ -678,15 +761,16 @@ export class ScansService {
             low: pt.low ?? null,
             high: pt.high ?? null,
             median: pt.median ?? null,
-            source: scan.valuation?.graded?.source ?? "unknown",
+            source: scan.valuation?.graded?.source ?? "pokemonpricetracker",
           })),
         );
       }
     }
+
     // the grader and grade as read off the label, so the UI never re-derives
     // them from a display string
     const labelSlab = frontRes.ocr?.slab as
-      | { grader?: string | null; grade?: number | null }
+      | { grader?: string | null; grade?: number | null; label?: string | null }
       | undefined;
     // A card can be identified exactly and still have no price source: Japanese
     // Pokemon sets carry no TCGplayer or Cardmarket feed, and our graded-sales
@@ -700,6 +784,93 @@ export class ScansService {
     if (scan.valuation && labelSlab?.grader) {
       scan.valuation.slabGrader = labelSlab.grader;
       scan.valuation.slabGrade = labelSlab.grade ?? null;
+      scan.valuation.slabLabelVariant = labelSlab.label ?? null;
+
+      // The figure for THIS holder, down the ladder: a sale at this exact
+      // (company, grade) first; this company's own neighbouring grades next;
+      // a measured cross-grader ratio only after that, labelled and with an
+      // interval. Reaching for PSA first is what this replaces — a PSA 10 sale
+      // is evidence about PSA 10 and about nothing else.
+      const ladder = await priceForSlab(
+        scan.valuation.pricesByGrader ?? null,
+        labelSlab.grader,
+        labelSlab.grade ?? null,
+      );
+      if (ladder) {
+        scan.valuation.slabPrice = {
+          price: ladder.price,
+          low: ladder.low,
+          high: ladder.high,
+          sampleSize: ladder.sampleSize,
+          confidence: ladder.confidence,
+          basis: ladder.basis,
+          method: ladder.method,
+          explain: ladder.explain,
+          suspect: ladder.suspect ?? null,
+          suspectReason: ladder.suspectReason ?? null,
+        };
+        if (ladder.basis !== "observed" || ladder.suspect) {
+          void recordWeakResult({
+            scanId,
+            reason: ladder.suspect ? "estimate-out-of-envelope" : `derived-${ladder.basis}`,
+            cardName: scan.identification?.name ?? null,
+            setName: scan.identification?.setName ?? null,
+            catalogId: scan.identification?.cardId ?? null,
+            grader: labelSlab.grader,
+            grade: labelSlab.grade ?? null,
+            confidence: ladder.confidence,
+            sampleSize: ladder.sampleSize,
+            priceUsd: ladder.price,
+            priceSource: ladder.basis,
+            inputs: { method: ladder.method, explain: ladder.explain, suspectReason: ladder.suspectReason ?? null },
+          });
+        }
+      }
+
+      // Beckett's 10 is not one product, and our source does not know that.
+      //
+      // A gold-label "10 Pristine" and a Black Label 10 — all four subgrades
+      // exactly 10 — are different goods. PPT reports a single `bgs10` key
+      // that blends them, so the median it gives is right for the gold label
+      // and off by an order of magnitude for the black one: this very card
+      // reports a blended BGS 10 of $1,364 while Black Label copies sell
+      // between $12,700 and $14,300.
+      //
+      // We can read the black label off the holder — vision already does, from
+      // four subgrades of 10 — and we cannot price it. So say exactly that.
+      // Quoting the blended figure under a Black Label badge is the confident
+      // wrong answer this system is supposed to refuse.
+      const variant = labelSlab.label ?? null;
+      const gradeKey = String(labelSlab.grade ?? "").replace(/\.0$/, "");
+      const ownPoint =
+        scan.valuation.pricesByGrader?.[labelSlab.grader]?.[gradeKey] ?? null;
+      if (ownPoint && variant === "black") {
+        ownPoint.blended = true;
+        ownPoint.confidence = "low";
+        void recordWeakResult({
+          scanId,
+          reason: "label-variant-unpriced",
+          cardName: scan.identification?.name ?? null,
+          setName: scan.identification?.setName ?? null,
+          catalogId: scan.identification?.cardId ?? null,
+          grader: labelSlab.grader,
+          grade: labelSlab.grade ?? null,
+          confidence: "low",
+          sampleSize: ownPoint.count ?? null,
+          priceUsd: ownPoint.price ?? null,
+          priceSource: "sold-blended",
+          inputs: {
+            labelVariant: variant,
+            note:
+              "Black Label priced from a source that does not separate label " +
+              "variants; the figure blends gold-label Pristine sales and understates it",
+            subgrades: (frontRes.ocr?.slab as any)?.subgrades ?? null,
+          },
+        });
+        console.warn(
+          `[slab] ${labelSlab.grader} ${gradeKey} BLACK LABEL — our figure blends label variants and understates it`,
+        );
+      }
     }
 
     // Where we hold no SOLD comps at the card's own grade, fall back to what
@@ -798,6 +969,24 @@ export class ScansService {
             number: scan.identification.localId,
             grader: askGrader,
             grade: askGrade,
+            // Beckett's 10 is two products; ask for the one on this holder.
+            labelVariant:
+              (labelSlab?.label === "black" || labelSlab?.label === "gold")
+                ? labelSlab.label
+                : null,
+            // the words the grading company printed, so the asks can be
+            // narrowed to THIS printing even when we cannot name it
+            labelTokens: labelTokens(
+              [
+                (frontRes.ocr?.slab as any)?.name,
+                (frontRes.ocr?.slab as any)?.setLine,
+                ...(((frontRes.ocr?.slab as any)?.setCandidates ?? []) as string[]),
+              ].filter(Boolean) as string[],
+              {
+                name: scan.identification?.name ?? null,
+                setName: scan.identification?.setName ?? null,
+              },
+            ),
             limit: 24,
             // the identified name is itself evidence of the printing, and it
             // is the repaired form: the raw label says "IST -SCYTHER" where
@@ -835,6 +1024,41 @@ export class ScansService {
               cappedByStale: live.cappedByStale,
               otherPrintings: live.otherPrintings,
             };
+
+            // Re-run the ladder now that the asking market is known. It could
+            // not be consulted the first time — asks are fetched well after
+            // the graded figures — and it is the only thing that can overrule
+            // a recorded sale which contradicts its own grade ladder.
+            if (labelSlab?.grader && labelSlab.grade != null) {
+              const withAsk = await priceForSlab(
+                scan.valuation.pricesByGrader ?? null,
+                labelSlab.grader,
+                labelSlab.grade,
+                {
+                  median: live.medianAsk,
+                  count: live.listings.length,
+                  filteredToGrade: Boolean(live.filteredToGrade),
+                },
+              );
+              if (withAsk && withAsk.basis === "ask-over-suspect-sale") {
+                scan.valuation.slabPrice = {
+                  price: withAsk.price,
+                  low: withAsk.low,
+                  high: withAsk.high,
+                  sampleSize: withAsk.sampleSize,
+                  confidence: withAsk.confidence,
+                  basis: withAsk.basis,
+                  method: withAsk.method,
+                  explain: withAsk.explain,
+                  suspect: withAsk.suspect ?? null,
+                  suspectReason: withAsk.suspectReason ?? null,
+                };
+                console.warn(
+                  `[ladder] ${labelSlab.grader} ${labelSlab.grade}: recorded sale ` +
+                    `contradicts its own ladder — using the ${live.listings.length}-listing ask market instead`,
+                );
+              }
+            }
           }
         } catch {
           // asks are a fallback; failing to get them is not a failed scan
@@ -851,7 +1075,6 @@ export class ScansService {
     // market price by our own condition opinion turned an $84 card into $21 on
     // the strength of a 2.5 the heuristics should never have issued. Raw cards
     // are now quoted at the raw market price, which is what that price is.
-    void conditionMultiplier; // retained for reference; no longer applied
 
     // a slabbed card is already professionally graded — say so, link the cert,
     // and mark our through-the-plastic estimate as non-authoritative
@@ -931,28 +1154,28 @@ export class ScansService {
     return rows.map((r) => JSON.parse(r.record) as Scan);
   }
 
-  private saveImages(
-    id: string,
-    side: "front" | "back",
-    res: VisionAnalyzeResponse,
-    scan: Scan,
-  ) {
-    if (res.warpedImageB64) {
-      writeFileSync(
-        join(STORAGE_ROOT, `${id}/${side}_warped.png`),
-        Buffer.from(res.warpedImageB64, "base64"),
-      );
-    }
-    if (res.overlayImageB64) {
-      const key = `${id}/${side}_overlay.png`;
-      writeFileSync(join(STORAGE_ROOT, key), Buffer.from(res.overlayImageB64, "base64"));
-      if (side === "front" && scan.measurement) {
-        scan.measurement.centering.overlayImageKey = key;
+  private async analyze(
+    file: Express.Multer.File,
+    kind: "front" | "back",
+  ): Promise<VisionAnalyzeResponse> {
+    // Bounded, because the vision process is a single copy of a 350 MB model
+    // and nothing else stands between it and however many people press the
+    // button at once. Waiting for a slot is fine; waiting in an unbounded
+    // queue is just a slower way to time out, so past a point we refuse.
+    try {
+      return await visionGate.run(() => this.callVision(file, kind));
+    } catch (err) {
+      if (err instanceof GateSaturated) {
+        console.warn(`[vision] ${err.message}`);
+        throw new ServiceUnavailableException(
+          "too many scans in progress — try again in a moment",
+        );
       }
+      throw err;
     }
   }
 
-  private async analyze(
+  private async callVision(
     file: Express.Multer.File,
     kind: "front" | "back",
   ): Promise<VisionAnalyzeResponse> {
@@ -1176,6 +1399,56 @@ export function sealedArtwork(lines: (string | null | undefined)[]): string | nu
       String(raw).trim(),
     );
     if (m) return m[1].trim();
+  }
+  return null;
+}
+
+/** Is this answer weak enough to belong in the backlog, and why?
+ *
+ *  Ordered by severity: the worst thing we can do is not know what the card
+ *  is, then to know the card and have no number for it, then to have a number
+ *  we cannot stand behind. A confident answer from a real sale returns null
+ *  and is never logged — the backlog is for work, not for volume.
+ */
+export function classifyWeakness(
+  scan: { status?: string; identification?: unknown; valuation?: any },
+  soldPrice: number | null,
+): { reason: string; confidence: string | null; sampleSize: number | null } | null {
+  if (scan.status === "rejected") return null; // a declined photo is not a weak answer
+  if (!scan.identification) {
+    return { reason: "no-identification", confidence: null, sampleSize: null };
+  }
+
+  const v = scan.valuation;
+  const grader = v?.slabGrader ?? null;
+  const grade = v?.slabGrade ?? null;
+  const point =
+    grader && grade != null
+      ? v?.pricesByGrader?.[grader]?.[String(grade).replace(/\.0$/, "")] ?? null
+      : null;
+
+  const anyPrice = soldPrice ?? v?.liveAsk?.median ?? v?.tcgplayer?.market ?? null;
+  if (anyPrice == null) {
+    return { reason: "no-price", confidence: null, sampleSize: null };
+  }
+
+  // A slab we can name but hold no sales for at ITS grade. The number on
+  // screen is an ask or a raw price standing in for a graded one, which is
+  // exactly the substitution the grader-keyed model exists to prevent.
+  if (grader && grade != null && soldPrice == null) {
+    return { reason: "no-sales-at-grade", confidence: null, sampleSize: null };
+  }
+
+  if (v?.graded?.estimated || v?.webEstimate) {
+    return { reason: "estimated-only", confidence: "low", sampleSize: null };
+  }
+
+  const confidence = point?.confidence ?? null;
+  const sampleSize = point?.count ?? null;
+  if (confidence === "low") return { reason: "low-confidence", confidence, sampleSize };
+  // A median over three sales is arithmetic, not evidence.
+  if (sampleSize != null && sampleSize < 5) {
+    return { reason: "tiny-sample", confidence, sampleSize };
   }
   return null;
 }

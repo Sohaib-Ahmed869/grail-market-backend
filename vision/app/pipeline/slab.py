@@ -334,6 +334,45 @@ def _cgc(U: str) -> SlabRead | None:
     return SlabRead(grader="CGC", grade=g, label=label)
 
 
+# CGC's grade words. NM/Mint+ is theirs; Beckett does not use it.
+_CGC_WORD = r"(PRISTINE|GEM\s*M(?:IN)?T|NM\s*[/\\]?\s*M(?:IN)?T\s*\+?|M(?:IN)?T\s*\+?|NM)"
+
+
+def _cgc_universal(U: str) -> SlabRead | None:
+    """A CGC holder identified by CGC's own wording rather than its logo.
+
+    "UNIVERSAL GRADE" is printed large on every CGC trading-card holder and on
+    nobody else's. It is worth matching on its own because OCR routinely loses
+    the three small letters of the CGC logo while keeping those two big words
+    beside it — which is exactly what happened to a CGC 8.5 Armored Mewtwo.
+
+    That matters more than a missing logo usually would, because CGC also
+    prints subgrade captions (Centering / Surface / Corners / Edges), and a
+    Beckett caption matcher will happily accept those and file the card under
+    BGS. A grade belongs to the company that issued it; handing CGC's 8.5 to
+    Beckett breaks the first rule in the book.
+
+    Guarded on an explicit Beckett token: if the label really does say BGS or
+    BECKETT, that is a stronger claim than a word we inferred, and the Beckett
+    matchers keep the card.
+    """
+    if re.search(r"\b(BGS|BECKETT|BVG|BCCG)\b", U):
+        return None
+    if not re.search(r"\bUNIVERS[A4]L\b", U):
+        return None
+    m = re.search(_CGC_WORD + r"\s*" + _NUM, U)
+    if not m:
+        return None
+    g = _f(m.group(2))
+    if not _valid(g):
+        return None
+    word = (m.group(1) or "").replace(" ", "").upper()
+    # CGC has two different tens and the word beside the number is the only
+    # thing that separates them.
+    label = "pristine" if word == "PRISTINE" else "gem" if word.startswith("GEMM") else None
+    return SlabRead(grader="CGC", grade=g, label=label)
+
+
 def _sgc(U: str) -> SlabRead | None:
     m = re.search(r"\bSGC\s*" + _NUM, U)
     if not m:
@@ -409,6 +448,7 @@ def _by_cert_shape(U: str) -> SlabRead | None:
 
 
 _CASCADE = [
+    _cgc_universal,   # before the Beckett caption rules; guards on BGS/BECKETT
     _bgs_black_label,
     _bgs_subgrades,
     _bccg,            # before any Beckett rule

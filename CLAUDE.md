@@ -33,14 +33,22 @@
 - All external price sources sit behind an adapter interface.
 - Fixtures before fixes. Every bug gets a failing test first.
 - Log every result below MEDIUM confidence with its inputs. That log is the
-  backlog.
+  backlog. It is `low_confidence_log`, written by `recordWeakResult()`, and
+  what goes in it is decided by `classifyWeakness()` in `scans.service.ts`.
 
 ## Do not
 
 - Do not use PriceCharting's API for graded prices (collapses graders below 10).
 - Do not scrape eBay directly (login wall since 22 July 2026; use the adapter).
 - Do not swap the OCR engine to fix accuracy - fix the crops, not the engine.
-- Do not add a paid dependency without asking.
+- Do not add a paid dependency without asking. If you add one, it needs a
+  daily cap and a cache before it ships, not after — see `CARDGRADER_DAILY_MAX`
+  for the shape. A paid call with no ceiling is an unbounded bill.
+- Do not call a price provider from a request handler. Go through
+  `gradedPricesFor()`, or the store stops being the source of truth and the
+  cost model goes back to scaling with traffic.
+- Do not add an in-process cache as a bare `Map`. Use `TtlCache` — the Maps it
+  replaced were never evicting anything and grew until the process died.
 
 ## Reference documents
 
@@ -51,9 +59,59 @@
 
 ## Repository layout
 
-- `services/vision` — Python/FastAPI. OpenCV detection, centering measurement,
-  RapidOCR text and slab-label reading. Runs on our own infrastructure.
-- `apps/api` — NestJS. Identification chain, valuation chain, price caching
-  (SQLite local + Neon Postgres shared), eBay compliance endpoint.
-- `apps/web` — Next.js. Scan UI, price hero, currency conversion.
-- `packages/shared` — zod schemas shared between api and web.
+This repo is api + vision. The web and mobile clients live in their own repos.
+
+- `vision/` — Python/FastAPI. OpenCV detection, RapidOCR text and slab-label
+  reading. Runs on our own infrastructure. It does NOT grade — see below.
+- `src/` — NestJS. Identification chain, valuation chain, eBay compliance
+  endpoint.
+- `src/ingest/` — the batch price refresh. `npm run ingest`.
+- `packages/shared` — zod schemas shared with the clients.
+
+## Pricing architecture — read this before touching a price path
+
+Prices are READ from our own store and REFRESHED on a schedule. They are not
+bought on the request path.
+
+- `gradedPricesFor()` in `src/scans/pricing.ts` is the only way to get a graded
+  price. Store first, provider only on a miss. Both the scan path and the
+  search path call it, because a scan and a search that land on the same card
+  must not quote two figures for it.
+- `npm run ingest` refreshes the store, tiered by liquidity and demand: hot
+  cards daily, warm weekly, the tail monthly. It reserves a quarter of the
+  provider's daily credits for live scans.
+- `catalog_cards` is the work list. Every identification registers a card, for
+  every game — including the ones we cannot price yet.
+- Adding a column to `SCHEMA` in `cards.store.ts` does NOT alter an existing
+  table. Add an entry to `MIGRATIONS` beside it. Append, never edit.
+- Provider keys live ENCRYPTED in `provider_keys` (AES-256-GCM, master secret
+  in `PPT_KEY_SECRET`). Manage them with `npm run keys`. `pickKey()` is on the
+  scan path and stays synchronous, so it reads an in-memory snapshot refreshed
+  at boot and on an interval — anything that runs outside the server must
+  `await reloadKeys()` first or it sees an empty pool.
+- `PPT_API_KEY` may hold several comma-separated keys, added to that pool as a
+  fallback. Each carries its own
+  quota and its own breaker in `pptkeys.ts`, addressed by a digest of the key
+  rather than its position, so reordering the list does not reassign state. A
+  429 for credit exhaustion locks ONE key and moves to the next. Never put the
+  key material in a log line — use the 8-char id.
+- The page size IS the price of a lookup: the provider bills per card returned.
+  The scan path needs 3 candidates because it searches by fuzzy text; the
+  refresh job knows the exact identity and asks for 1. Do not raise
+  `PPT_INGEST_PAGE_SIZE` without a card it is actually missing.
+
+The reason: buying on the request path makes the bill scale with traffic. A
+price is a property of the catalogue, which is roughly fixed, so the refresh
+job makes a hundred scans a day and a million cost the same.
+
+## We do not grade cards
+
+The vision service returns `grade: null` on every path, deliberately. For a
+slab it was second-guessing a professional; for a raw card the heuristics
+turned an $84 card into $21. Reading the grade a company already ASSIGNED, off
+the slab label, is not grading and is core to the product — keep `slab.py`.
+
+`compute_grade` and `measure_centering` are parked, not deleted: still in the
+tree, still tested, called from nowhere. If you wire either back in, know that
+you are also re-enabling every paid grading dependency that guards on a
+non-null grade.

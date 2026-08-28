@@ -1,5 +1,7 @@
 import { recordUsage } from "./usage.js";
 import { comparePrinting, describePrinting, readPrinting, type Printing } from "./printing.js";
+import { listingMatchesLabel } from "./labeltokens.js";
+import { TtlCache } from "./ttlcache.js";
 
 // Live eBay listings for a card, shown in-product rather than as a link out.
 //
@@ -23,6 +25,10 @@ export type Listing = {
   /** grader + grade parsed out of the title, where present */
   grader: string | null;
   grade: number | null;
+  /** Beckett label variant read from the title: black | gold. A Black Label 10
+   *  and a gold-label Pristine 10 are different goods at very different money,
+   *  and this is the only place we can tell them apart. */
+  labelVariant: "black" | "gold" | null;
   /** printing named in the title, e.g. "Manga Art · Alt Art · Japanese" */
   printing: string | null;
   /** days this listing has been up unsold. The single most useful number on a
@@ -38,6 +44,10 @@ export type ListingResult = {
   query: string;
   /** true when we filtered to the card's own grader and grade */
   filteredToGrade: boolean;
+  /** true when the asks were narrowed to the slab's own label variant */
+  filteredToLabel: boolean;
+  /** true when the asks were narrowed to the printing the label names */
+  filteredToLabelText: boolean;
   /** listings that survived every filter, of which `listings` shows the first few */
   matched: number;
   /** how many extreme listings were trimmed before taking the median */
@@ -75,7 +85,7 @@ const NOT_ONE_CARD =
  *  listing that has been seen by the whole market and refused by it. */
 const STALE_DAYS = 60;
 
-const cache = new Map<string, { at: number; v: ListingResult }>();
+const cache = new TtlCache<ListingResult>(TTL_MS, Number(process.env.LISTINGS_CACHE_MAX ?? 2000));
 let token: { value: string; expires: number } | null = null;
 
 async function getToken(): Promise<string | null> {
@@ -106,6 +116,57 @@ async function getToken(): Promise<string | null> {
   }
 }
 
+
+/** The Latin part of a card name, for searching against English-language
+ *  listings.
+ *
+ *  This used to be all-or-nothing: any non-ASCII character anywhere dropped
+ *  the whole name. The rule was written for a real problem — a Japanese
+ *  catalogue name matches nothing an English seller ever typed — but it also
+ *  threw away "Charizard" because the catalogue writes the card as
+ *  "Charizard ☆ δ". The query became "100 BGS 8.5", which is every card
+ *  numbered 100 in a BGS 8.5 holder, and a five-figure Gold Star was priced
+ *  from a Ken Griffey Jr at $24.99.
+ *
+ *  Strip the decoration, keep the name. Return "" only when what is left is
+ *  too thin to search on, which is the case the original rule was actually
+ *  aimed at. */
+export function latinName(name: string): string {
+  const latin = (name ?? "")
+    // Fold accents first: é is an e that a seller typed as "Pokemon", and
+    // blanking it turns "Pokémon Trainer" into "Pok mon Trainer", which is a
+    // search for nothing. Decompose to base letter + combining mark, then drop
+    // the marks. Non-Latin scripts have no base letter and fall through to the
+    // ASCII strip below, which is the behaviour we want for them.
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[^\u0000-\u007F]/g, " ")
+    .replace(/[^\w\s'-]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  // a couple of stray letters left behind by a mostly-Japanese name is not a
+  // name; "ex" out of "メガゲンガーex" would search for every ex card there is
+  const longest = latin.split(/\s+/).reduce((a, w) => Math.max(a, w.length), 0);
+  return longest >= 4 ? latin : "";
+}
+
+/** Does this listing plausibly describe the card we are pricing?
+ *
+ *  The last line of defence on a query gone wrong. A median is computed over
+ *  whatever comes back and shipped as a price, so a search that quietly
+ *  returns the wrong product is worse than one that returns nothing. If we
+ *  have a usable name and the listing never mentions it, it is not this card,
+ *  whatever else it matched on. */
+export function mentionsCard(title: string, cardName: string): boolean {
+  const n = latinName(cardName);
+  if (!n) return true; // nothing to check against — do not reject everything
+  const t = title.toLowerCase();
+  // the longest word carries the identity: "Charizard", not "delta"
+  const words = n.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+  if (words.length === 0) return true;
+  return words.some((w) => t.includes(w));
+}
+
 /** Pull the grading company and grade out of a listing title.
  *  Sellers write "BGS 8.5", "PSA 10 GEM MINT", "CGC 9.5" — enough to tell a
  *  listing for this exact slab from one for a different grade of the same card. */
@@ -117,12 +178,61 @@ function gradeFromTitle(title: string): { grader: string | null; grade: number |
   return { grader, grade: Number.isFinite(grade) && grade >= 1 && grade <= 10 ? grade : null };
 }
 
+/** Which Beckett label a listing is for: black | gold | null.
+ *
+ *  Beckett's 10 is two products — a Black Label needs all four subgrades at
+ *  exactly 10 — and our sold-comp source publishes a single `bgs10` key that
+ *  blends them. So the only place we can see the difference is in what sellers
+ *  write, and the gap is worth about ten times the price: a Destined Rivals
+ *  Mewtwo blends to $1,364 while Black Label copies sell above $12,700.
+ *
+ *  "BLACK" is a minefield in Pokemon and almost none of it is Beckett. Black
+ *  Star Promos are an entire promo line, Black Bolt is a set, Black & White is
+ *  an era, and MBA Black Diamond is somebody else's product entirely — there
+ *  is one in the live listings for the card that prompted this. Each of those
+ *  is guarded explicitly rather than hoped about, in the same spirit as the
+ *  negative guards that stop a grade token meaning a card is graded.
+ *
+ *  And a black label only exists at 10. A title claiming one at 9.5 is a
+ *  seller being loose with words, not a label. */
+export function labelFromTitle(title: string): "black" | "gold" | null {
+  const U = title.toUpperCase();
+
+  // not a Beckett label, whatever the word "black" is doing here
+  const DECOYS = [
+    /\bBLACK\s*STAR\b/,        // Black Star Promos — a promo line
+    /\bBLACK\s*BOLT\b/,        // a set
+    /\bBLACK\s*(?:&|AND)\s*WHITE\b/, // an era
+    /\bBLACK\s*DIAMOND\b/,     // MBA's product, not Beckett's label
+  ];
+  const decoyed = DECOYS.some((re) => re.test(U));
+
+  const { grader, grade } = gradeFromTitle(title);
+  if (grader !== "BGS") return null;
+
+  if (!decoyed && /\bBLACK\s*LABEL\b/.test(U)) {
+    // Beckett issues a black label at 10 and nowhere else
+    return grade === 10 ? "black" : null;
+  }
+  if (/\bPRISTINE\b/.test(U) && grade === 10) return "gold";
+  return null;
+}
+
 export async function fetchListings(opts: {
   name: string;
   setName?: string | null;
   number?: string | null;
   grader?: string | null;
   grade?: number | null;
+  /** the slab's Beckett label variant, so asks can be narrowed to it */
+  labelVariant?: "black" | "gold" | null;
+  /** distinctive words the grading label printed. Used to find listings for
+   *  THIS printing when we cannot name the printing — see labeltokens.ts */
+  labelTokens?: string[] | null;
+  /** internal: stops the label re-search from recursing */
+  labelSearchDone?: boolean;
+  /** internal: stops the broaden-on-empty retry from recursing */
+  broadenDone?: boolean;
   limit?: number;
   /** everything we know in words about THIS copy — slab label lines, the card's
    *  own OCR, the vision model's printing call. Read for a printing, not
@@ -162,12 +272,25 @@ export async function fetchListings(opts: {
   const identifiers = (opts.extraTokens ?? []).filter(Boolean).length;
   const gluedRun = /[A-Z]{9,}/.test(opts.name);
   const usableName =
-    /[^\u0000-\u007F]/.test(opts.name) || (gluedRun && identifiers >= 2)
-      ? ""
-      : clean(opts.name);
+    gluedRun && identifiers >= 2 ? "" : clean(latinName(opts.name));
   const parts = [usableName];
   if (number) parts.push(number);
-  else if (opts.setName && !/[^\u0000-\u007F]/.test(opts.setName)) parts.push(clean(opts.setName));
+  // The set, when the number cannot stand alone.
+  //
+  // "OP13-119" is a set-qualified address and identifies a card globally. A
+  // bare "100" does not — it is every card numbered 100 ever printed. The set
+  // used to be added ONLY when there was no number at all, so the Dragon
+  // Frontiers Gold Star searched as "Charizard 100 BGS 8.5" and came back with
+  // an XY Flashfire Charizard EX, a Crystal Guardians 4/100 and an Italian
+  // Dragon holo — every one a different card, spanning $430 to $23,302.
+  const numberIsQualified = Boolean(number && /[A-Za-z]/.test(number));
+  if (
+    (!number || !numberIsQualified) &&
+    opts.setName &&
+    !/[^\u0000-\u007F]/.test(opts.setName)
+  ) {
+    parts.push(clean(opts.setName));
+  }
   for (const t of opts.extraTokens ?? []) {
     const c = t ? clean(String(t)) : "";
     // keep the query tight: skip anything already present
@@ -182,7 +305,7 @@ export async function fetchListings(opts: {
   else if (opts.language && !cardPrinting.language) cardPrinting.language = opts.language;
   const key = `${query}|${show}|${cardPrinting.family ?? ""}|${cardPrinting.language ?? ""}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.v;
+  if (hit) return hit;
 
   const tok = await getToken();
   if (!tok) return null;
@@ -207,6 +330,7 @@ export async function fetchListings(opts: {
     const listings: Listing[] = items.map((it) => {
       const rawTitle = String(it.title ?? "");
       const { grader, grade } = gradeFromTitle(rawTitle);
+      const labelVariant = labelFromTitle(rawTitle);
       const p = readPrinting(rawTitle);
       return {
         title: rawTitle.slice(0, 140),
@@ -218,6 +342,7 @@ export async function fetchListings(opts: {
         seller: it.seller?.username ?? null,
         grader,
         grade,
+        labelVariant,
         printing: describePrinting(p),
         printingMatch: comparePrinting(cardPrinting, p),
         ageDays: it.itemCreationDate
@@ -244,9 +369,33 @@ export async function fetchListings(opts: {
       if (sameCard.length >= 2) filtered = sameCard;
     }
 
+    // Reject anything that is not this card at all.
+    //
+    // Before any median is taken, because a median over the wrong product is
+    // still a number and still gets shipped. This is what stands between a
+    // broken query and a five-figure Pokemon card priced from a $24 baseball
+    // card that happened to share "#100" and "BGS 8.5".
+    const relevant = filtered.filter((l) => mentionsCard(l.title, opts.name));
+    if (relevant.length >= 2) {
+      if (relevant.length < filtered.length) {
+        console.log(
+          `[listings] dropped ${filtered.length - relevant.length} listing(s) that never mention "${opts.name}"`,
+        );
+      }
+      filtered = relevant;
+    } else if (filtered.length >= 2 && relevant.length === 0 && latinName(opts.name)) {
+      // NOTHING returned mentions the card. That is not a thin market, it is
+      // the wrong search, and pricing from it would be inventing a figure.
+      console.warn(
+        `[listings] no listing mentions "${opts.name}" — refusing to price from ${filtered.length} unrelated results`,
+      );
+      filtered = [];
+    }
+
     // When we know the card's grade, surface listings for THAT grade —
     // a PSA 10 asking price tells the owner of a PSA 5 very little.
     let filteredToGrade = false;
+    let filteredToLabel = false;
     if (opts.grader && opts.grade != null) {
       const exact = filtered.filter(
         (l) => l.grader === opts.grader && l.grade === opts.grade,
@@ -254,6 +403,100 @@ export async function fetchListings(opts: {
       if (exact.length >= 2) {
         filtered = exact;
         filteredToGrade = true;
+      }
+    }
+
+    // A refinement that destroys what it was refining is not a refinement.
+    //
+    // extraTokens exist to sharpen a search — a set code, a rarity, a
+    // treatment marker. On a card where those words are not what sellers wrote,
+    // they cut the result set below the two listings the grade filter needs,
+    // filteredToGrade comes back false, and the caller discards the asks
+    // entirely. The Dragon Frontiers Gold Star searched cleanly as
+    // "Charizard 100 Dragon Frontiers BGS 8.5" and returned three genuine BGS
+    // 8.5 listings; with its extra tokens attached it returned two, neither
+    // usable, and the scan showed no asking market at all — leaving a sold
+    // figure we had already established was contradicting its own grade ladder.
+    //
+    // So when a refined search cannot support a grade-filtered answer, drop
+    // the refinement and ask again. The broad query is the honest fallback:
+    // it is what we would have asked with no extra information.
+    if (
+      !opts.broadenDone &&
+      (opts.extraTokens?.length ?? 0) > 0 &&
+      opts.grader &&
+      opts.grade != null &&
+      filtered.filter((l) => l.grader === opts.grader && l.grade === opts.grade).length < 2
+    ) {
+      const broad = await fetchListings({ ...opts, extraTokens: [], broadenDone: true });
+      if (broad && broad.filteredToGrade) {
+        console.log(
+          `[listings] "${query}" could not support a ${opts.grader} ${opts.grade} median; ` +
+            `retried without the extra tokens and matched ${broad.matched}`,
+        );
+        return broad;
+      }
+    }
+
+    // Narrow to the printing the LABEL names, whether or not we can name it.
+    //
+    // This runs before the variant and printing filters because it is the
+    // most authoritative signal available: a grading company examined the card
+    // and wrote down what it is. A PSA MAGAZINE EXCLUSIVE Luffy and the
+    // OP05-060 Leader share a collector number and nothing else — $615 against
+    // $0.65 raw — and no allowlist of printing names was ever going to keep up
+    // with the promo lines that produce that gap.
+    let filteredToLabelText = false;
+    if (opts.labelTokens && opts.labelTokens.length) {
+      const sameProduct = filtered.filter((l) =>
+        listingMatchesLabel(l.title, opts.labelTokens!),
+      );
+      // two or more, or we are narrowing on one listing rather than on evidence
+      if (sameProduct.length >= 2) {
+        filtered = sameProduct;
+        filteredToLabelText = true;
+      } else if (!opts.labelSearchDone) {
+        // Nothing in these results is the printing on the label — and no
+        // amount of filtering rescues a search that never fetched it. The
+        // query was built from the card we IDENTIFIED, and if that
+        // identification landed on the base card sharing the number, the
+        // promo's listings are not in this result set at all.
+        //
+        // So ask again with the label's own words in the query. Deliberately
+        // a SECOND search rather than a narrower first one: adding a printing
+        // to every query hides the listings that do not mention it, which is
+        // why the query is kept broad by default. This runs only when the
+        // broad result demonstrably contains the wrong product.
+        const narrowed = await fetchListings({
+          ...opts,
+          extraTokens: [...(opts.extraTokens ?? []), ...opts.labelTokens],
+          labelSearchDone: true,
+        });
+        if (narrowed && narrowed.matched >= 2) {
+          console.log(
+            `[listings] broad search found no "${opts.labelTokens[0]}" listings; ` +
+              `re-searched with the label's own words and found ${narrowed.matched}`,
+          );
+          return narrowed;
+        }
+      }
+    }
+
+    // Narrow again to the LABEL VARIANT where we know it.
+    //
+    // "BGS 10" is not one price. A Black Label — all four subgrades exactly 10
+    // — and a gold-label Pristine share that string, and on the card that
+    // prompted this the gap is roughly ten times: blended sold comps put BGS 10
+    // near $1,364 while Black Label copies ask and sell above $12,700. Leaving
+    // them mixed produces a median that describes neither.
+    //
+    // Same bar as the grade filter: at least two, or we are not narrowing on
+    // evidence, we are narrowing on one listing.
+    if (opts.labelVariant) {
+      const sameLabel = filtered.filter((l) => l.labelVariant === opts.labelVariant);
+      if (sameLabel.length >= 2) {
+        filtered = sameLabel;
+        filteredToLabel = true;
       }
     }
     // Narrow to OUR printing. This is the difference between pricing a card and
@@ -343,6 +586,8 @@ export async function fetchListings(opts: {
       matched: priced.length,
       query,
       filteredToGrade,
+      filteredToLabel,
+      filteredToLabelText,
       medianAsk: median,
       askLow: values[0] ?? null,
       askHigh: values[values.length - 1] ?? null,
@@ -354,7 +599,7 @@ export async function fetchListings(opts: {
       filteredToPrinting,
       otherPrintings,
     };
-    cache.set(key, { at: Date.now(), v });
+    cache.set(key, v);
     return v;
   } catch (err) {
     console.warn(`[ebay] listings failed for "${query}": ${(err as Error).message}`);

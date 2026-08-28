@@ -158,6 +158,25 @@ export const GradePoint = z.object({
   high: z.number().nullish(),
   /** unfiltered median, kept so a filtered figure can be sanity-checked */
   median: z.number().nullish(),
+  /** when WE fetched this figure, ISO-8601.
+   *
+   *  A price carries confidence and sample size already; this is the third
+   *  leg. Without it a figure cached six days ago renders identically to one
+   *  fetched a second ago, and the reader has no way to tell — which for a
+   *  market that moves on a weekly cadence is the difference between evidence
+   *  and a rumour. Null means the figure came straight from the source in this
+   *  request. */
+  asOf: z.string().nullish(),
+  /** True when the source does not separate label variants and this figure
+   *  therefore BLENDS them.
+   *
+   *  Beckett's 10 is not one product. A gold-label "10 Pristine" and a Black
+   *  Label 10 — all four subgrades exactly 10 — are different goods: the same
+   *  Destined Rivals Mewtwo shows a blended BGS 10 median near $1,360 while
+   *  Black Label copies sell between $12,700 and $14,300. A blended median is
+   *  right for the gold label and off by a factor of ten for the black one,
+   *  and nothing about the number itself says which you are looking at. */
+  blended: z.boolean().nullish(),
 });
 export type GradePoint = z.infer<typeof GradePoint>;
 
@@ -178,6 +197,50 @@ export const Valuation = z.object({
   // a grader from a bare number
   slabGrader: z.string().nullish(),
   slabGrade: z.number().nullish(),
+  /** The label variant printed on the holder: black | gold | pristine | gem.
+   *
+   *  Part of the price key, not decoration — see GradePoint.blended. The
+   *  vision service reads it off the slab and it used to stop there. */
+  slabLabelVariant: z.string().nullish(),
+  /** Set when the price and the identification contradict each other badly
+   *  enough that the identification is the likelier culprit — a slabbed card
+   *  whose raw price is trivial is almost always a different printing sharing
+   *  the collector number. Carries the explanation, and means: do not lead
+   *  with the figure. */
+  identificationSuspect: z.string().nullish(),
+  /** Set when the asking market and our completed sales disagree by more than
+   *  a normal ask premium. Either the market moved since our comps, or the
+   *  comps are not all this card — a reader is served by being told, not by
+   *  our quietly choosing one. */
+  marketNote: z.string().nullish(),
+  /** The figure for THIS holder — this card, this company, this grade.
+   *
+   *  Carries how it was reached, because "a sale of this exact slab" and "a
+   *  ratio measured across nine other cards" are both useful and must never
+   *  look alike. `basis` says which. A modelled figure always arrives low
+   *  confidence and with an interval. */
+  slabPrice: z
+    .object({
+      price: z.number(),
+      low: z.number().nullish(),
+      high: z.number().nullish(),
+      sampleSize: z.number().nullish(),
+      confidence: z.enum(["high", "medium", "low"]),
+      basis: z.enum([
+        "observed",
+        "same-grader-interpolated",
+        "same-grader-nearest",
+        "modelled-cross-grader",
+        "ask-over-suspect-sale",
+      ]),
+      method: z.string(),
+      /** one sentence for the "how this number was reached" list */
+      explain: z.string(),
+      /** the figure failed a plausibility check and must not be led with */
+      suspect: z.boolean().nullish(),
+      suspectReason: z.string().nullish(),
+    })
+    .nullish(),
   /** printing/variant as the catalog names it: Holofoil, Reverse Holofoil… */
   variant: z.string().nullish(),
   /** Median LIVE ASKING price for this card at THIS grader and grade, from
