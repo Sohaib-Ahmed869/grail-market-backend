@@ -181,6 +181,18 @@ function gradeFromTitle(title: string): { grader: string | null; grade: number |
   return { grader, grade: Number.isFinite(grade) && grade >= 1 && grade <= 10 ? grade : null };
 }
 
+/** An autograph, or any card a grader declined to number.
+ *
+ *  Sellers write this a dozen ways — "PSA AUTH", "PSA AUTHENTIC", "SIGNED",
+ *  "AUTO", "AUTOGRAPH" — and almost never write the collector number, because
+ *  a signed card is usually a promo or reprint on a different set code than
+ *  the one printed on its face. */
+const DESIGNATION_RE = /\b(AUTH|AUTHENTIC|SIGNED|AUTO|AUTOGRAPH(?:ED)?)\b/;
+
+export function isDesignationListing(title: string): boolean {
+  return DESIGNATION_RE.test(title.toUpperCase());
+}
+
 /** Which Beckett label a listing is for: black | gold | null.
  *
  *  Beckett's 10 is two products — a Black Label needs all four subgrades at
@@ -236,6 +248,16 @@ export async function fetchListings(opts: {
   labelSearchDone?: boolean;
   /** internal: stops the broaden-on-empty retry from recursing */
   broadenDone?: boolean;
+  /** The grader's non-numeric designation on this holder — "AUTHENTIC".
+   *
+   *  It changes what we search for, not just what we filter. A PSA AUTHENTIC
+   *  card is normally an autograph, and its value is the signature rather than
+   *  the card: a Mayumi Tanaka signed Luffy is listed at $69,000 while ordinary
+   *  graded copies of the same card ask $88 to $750. Those listings do not
+   *  carry the collector number — the signed one is a PRB01 reprint while the
+   *  face reads OP05-119 — so searching on the number cannot find them, and
+   *  filtering a number-based search finds nothing to keep. */
+  designation?: string | null;
   limit?: number;
   /** everything we know in words about THIS copy — slab label lines, the card's
    *  own OCR, the vision model's printing call. Read for a printing, not
@@ -276,8 +298,12 @@ export async function fetchListings(opts: {
   const gluedRun = /[A-Z]{9,}/.test(opts.name);
   const usableName =
     gluedRun && identifiers >= 2 ? "" : clean(latinName(opts.name));
+  const designation = opts.designation ? String(opts.designation).toUpperCase() : null;
   const parts = [usableName];
-  if (number) parts.push(number);
+  // The collector number is normally the most valuable token in the query. For
+  // a designation holder it is the one that guarantees a miss.
+  if (number && !designation) parts.push(number);
+  if (designation) parts.push("PSA AUTH");
   // The set, when the number cannot stand alone.
   //
   // "OP13-119" is a set-qualified address and identifies a card globally. A
@@ -486,13 +512,46 @@ export async function fetchListings(opts: {
       }
     }
 
+    // Keep only listings that carry the same designation. Without this the
+    // query's own words pull in ordinary graded copies, and an autograph gets
+    // averaged with the base card.
+    if (designation) {
+      const signed = filtered.filter((l) => isDesignationListing(l.title));
+      if (signed.length >= 2) {
+        filtered = signed;
+        filteredToLabelText = true;
+      } else if (!opts.broadenDone && number) {
+        // Nothing carrying this card's number is a designation listing.
+        //
+        // A signed card is usually a promo or reprint on a DIFFERENT set code
+        // than the face it was printed from, so its listings do not carry the
+        // face number and the filter above removed them all. Ask again without
+        // the number — precision first, breadth only when precision found
+        // nothing, so an ordinary card keeps its tight comp set.
+        const wider = await fetchListings({ ...opts, number: null, broadenDone: true });
+        if (wider && wider.matched >= 2) {
+          console.log(
+            `[listings] no ${designation} listing carries ${number}; widened to the ` +
+              `designation alone and matched ${wider.matched}`,
+          );
+          return wider;
+        }
+      }
+    }
+
     // A slab whose grade is not a number still must not be priced from raw
     // copies. PSA "AUTHENTIC" has no numeric grade, so the grade filter above
     // cannot run — and without SOME filter the median lands on ungraded cards
     // and proxy fan art: $5.99 for a holder whose graded copies ask $85 and up.
     // Narrowing to the same grading company is the weakest honest filter, and
     // it is still the difference between comparing slabs and comparing paper.
-    if (opts.grader && opts.grade == null) {
+    // Skipped when a designation already narrowed the set. The grader is
+    // parsed out of a title by finding the company name followed by a NUMBER,
+    // and a designation holder has no number — "PSA AUTH" parses to no grader
+    // at all. Running this after the designation filter therefore discards
+    // exactly the listings we just went looking for, the $69,000 signed Luffy
+    // among them.
+    if (opts.grader && opts.grade == null && !designation) {
       const sameGrader = filtered.filter((l) => l.grader === opts.grader);
       if (sameGrader.length >= 2) {
         filtered = sameGrader;

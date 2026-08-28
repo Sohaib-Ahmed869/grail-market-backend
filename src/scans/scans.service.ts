@@ -1012,6 +1012,10 @@ export class ScansService {
             // the words the grading company printed, so the asks can be
             // narrowed to THIS printing even when we cannot name it
             labelTokens: askLabelTokens,
+            // An AUTHENTIC holder is normally an autograph, and its market is
+            // other autographs — not other copies of the card number printed
+            // on its face.
+            designation: slabWithoutNumericGrade && qual === "AUTHENTIC" ? qual : null,
           });
           // filteredToGrade is the condition, not a nicety: an unfiltered median
           // mixes a PSA 10 ask into a BGS 8 valuation, which is the cross-grader
