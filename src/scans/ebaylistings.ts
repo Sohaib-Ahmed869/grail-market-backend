@@ -46,6 +46,9 @@ export type ListingResult = {
   filteredToGrade: boolean;
   /** true when the asks were narrowed to the slab's own label variant */
   filteredToLabel: boolean;
+  /** true when a gradeless slab's asks were narrowed to the same grading
+   *  company — slabs compared with slabs, even without a comparable grade */
+  filteredToGrader: boolean;
   /** true when the asks were narrowed to the printing the label names */
   filteredToLabelText: boolean;
   /** listings that survived every filter, of which `listings` shows the first few */
@@ -395,6 +398,7 @@ export async function fetchListings(opts: {
     // When we know the card's grade, surface listings for THAT grade —
     // a PSA 10 asking price tells the owner of a PSA 5 very little.
     let filteredToGrade = false;
+    let filteredToGrader = false;
     let filteredToLabel = false;
     if (opts.grader && opts.grade != null) {
       const exact = filtered.filter(
@@ -479,6 +483,20 @@ export async function fetchListings(opts: {
           );
           return narrowed;
         }
+      }
+    }
+
+    // A slab whose grade is not a number still must not be priced from raw
+    // copies. PSA "AUTHENTIC" has no numeric grade, so the grade filter above
+    // cannot run — and without SOME filter the median lands on ungraded cards
+    // and proxy fan art: $5.99 for a holder whose graded copies ask $85 and up.
+    // Narrowing to the same grading company is the weakest honest filter, and
+    // it is still the difference between comparing slabs and comparing paper.
+    if (opts.grader && opts.grade == null) {
+      const sameGrader = filtered.filter((l) => l.grader === opts.grader);
+      if (sameGrader.length >= 2) {
+        filtered = sameGrader;
+        filteredToGrader = true;
       }
     }
 
@@ -586,6 +604,7 @@ export async function fetchListings(opts: {
       matched: priced.length,
       query,
       filteredToGrade,
+      filteredToGrader,
       filteredToLabel,
       filteredToLabelText,
       medianAsk: median,

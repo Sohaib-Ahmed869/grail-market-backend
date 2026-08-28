@@ -897,9 +897,22 @@ export class ScansService {
       !askGrader &&
       Boolean(readPrinting(printingHints.join(" ")).family) &&
       Boolean(scan.identification?.localId);
+    // A slab with no NUMERIC grade still has a market.
+    //
+    // PSA "AUTHENTIC" is a designation, not a grade — the company verified the
+    // card and declined to grade it. The gate here used to demand a number, so
+    // an Authentic holder fetched no listings at all and the card came back
+    // with no price and an empty listings panel, while eighty-odd copies of it
+    // were listed on eBay at the time. A blank is the right answer when we
+    // know nothing; it is the wrong answer when the asks are right there.
+    const slabWithoutNumericGrade = Boolean(
+      askGrader && askGrader !== "UNKNOWN" && askGrade == null,
+    );
     if (
       scan.valuation &&
-      ((askGrader && askGrader !== "UNKNOWN" && askGrade != null) || rawSpecialPrinting)
+      ((askGrader && askGrader !== "UNKNOWN" && askGrade != null) ||
+        slabWithoutNumericGrade ||
+        rawSpecialPrinting)
     ) {
       const sold =
         askGrader && askGrade != null
@@ -963,6 +976,28 @@ export class ScansService {
             if (p?.printing) printingHints.push(p.printing);
             if (p?.edition) printingHints.push(p.edition);
           }
+          // An AUTHENTIC slab's comps are other AUTHENTIC slabs, so that word
+          // is the discriminator here. It is passed explicitly because
+          // labelTokens treats "AUTHENTIC" as grading furniture — which it is
+          // on every other label, and is precisely not on this one.
+          const qual = (labelSlab as any)?.qualifier
+            ? String((labelSlab as any).qualifier).toUpperCase()
+            : null;
+          const askLabelTokens =
+            slabWithoutNumericGrade && qual
+              ? [qual]
+              : labelTokens(
+                  [
+                    (frontRes.ocr?.slab as any)?.name,
+                    (frontRes.ocr?.slab as any)?.setLine,
+                    ...(((frontRes.ocr?.slab as any)?.setCandidates ?? []) as string[]),
+                  ].filter(Boolean) as string[],
+                  {
+                    name: scan.identification?.name ?? null,
+                    setName: scan.identification?.setName ?? null,
+                  },
+                );
+
           const live = await fetchListings({
             name: scan.identification.name,
             setName: scan.identification.setName,
@@ -976,30 +1011,7 @@ export class ScansService {
                 : null,
             // the words the grading company printed, so the asks can be
             // narrowed to THIS printing even when we cannot name it
-            labelTokens: labelTokens(
-              [
-                (frontRes.ocr?.slab as any)?.name,
-                (frontRes.ocr?.slab as any)?.setLine,
-                ...(((frontRes.ocr?.slab as any)?.setCandidates ?? []) as string[]),
-              ].filter(Boolean) as string[],
-              {
-                name: scan.identification?.name ?? null,
-                setName: scan.identification?.setName ?? null,
-              },
-            ),
-            limit: 24,
-            // the identified name is itself evidence of the printing, and it
-            // is the repaired form: the raw label says "IST -SCYTHER" where
-            // the name says "1st Edition", and only one of those matches
-            printingHint: [
-              ...printingHints,
-              scan.identification.name,
-              scan.identification.rarity ?? "",
-            ].join(" "),
-            japanese: scan.origin?.japaneseTextDetected ?? false,
-            // English is a positive fact about the printing, not a default
-            language: scan.origin?.language === "en" ? "en" : null,
-            extraTokens: askTokens,
+            labelTokens: askLabelTokens,
           });
           // filteredToGrade is the condition, not a nicety: an unfiltered median
           // mixes a PSA 10 ask into a BGS 8 valuation, which is the cross-grader
@@ -1007,7 +1019,16 @@ export class ScansService {
           // Grade filtering is required only when there IS a grade to filter
           // to. A raw card has none, and demanding it here meant the raw path
           // fetched its listings and then threw them away.
-          const gradeOk = askGrader && askGrade != null ? live?.filteredToGrade : true;
+          // A gradeless slab needs SOME slab-to-slab filter before its median
+          // means anything. Same grading company, or the same designation on
+          // the label — either is enough; neither, and we would be quoting raw
+          // copies for a card in a holder.
+          const gradeOk =
+            askGrader && askGrade != null
+              ? live?.filteredToGrade
+              : slabWithoutNumericGrade
+                ? Boolean(live?.filteredToGrader || live?.filteredToLabelText)
+                : true;
           if (live?.medianAsk != null && gradeOk) {
             scan.valuation.liveAsk = {
               median: live.medianAsk,

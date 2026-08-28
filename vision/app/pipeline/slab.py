@@ -290,6 +290,28 @@ def _bgs_plain(U: str) -> SlabRead | None:
     return SlabRead(grader="BGS", grade=g, label=_bgs_label(g, {}))
 
 
+def _psa_authentic(U: str) -> SlabRead | None:
+    """PSA declining to assign a grade.
+
+    "AUTHENTIC" (and "AUTHENTIC ALTERED") means PSA verified the card is real
+    and did not grade it — sample cards, some promos, anything altered. It is a
+    designation, not a number, and it must survive as one: the scan path keys
+    everything off grade, so returning None for the grade with no explanation
+    produced a card with no price AND no listings, from a holder whose market
+    is sitting on eBay right now.
+
+    Any digits printed near the word are NOT the grade. Whatever that number is
+    doing on the label — a population figure, part of the cert, the card's own
+    number — PSA did not grade this card a 10, it declined to grade it at all,
+    and reading one out of the label would be inventing a fact.
+    """
+    if not re.search(r"\bAUTHENTI[C0]\b", U):
+        return None
+    if not re.search(r"\bPSA\b|\d{8,9}", U):
+        return None
+    return SlabRead(grader="PSA", grade=None, qualifier="AUTHENTIC")
+
+
 def _psa_qualified(U: str) -> SlabRead | None:
     m = re.search(r"\bPSA\s*" + _NUM + r"\s*\(?\s*(OC|ST|MK|PD|MC)\b\s*\)?", U)
     if not m:
@@ -455,6 +477,8 @@ _CASCADE = [
     _bvg,
     _bgs_subgrade_captions,
     _bgs_plain,
+    _psa_authentic,   # before any numeric PSA rule: a digit near AUTHENTIC is
+                      # not a grade, and _psa_plain would happily read it as one
     _psa_qualified,   # before plain PSA, or the qualifier is lost
     _psa_plain,
     _cgc,
