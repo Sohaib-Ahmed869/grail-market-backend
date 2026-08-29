@@ -82,7 +82,18 @@ export function labelTokens(
       out.add(word.replace(/^(?:PSA|BGS|CGC|SGC|TAG|BECKETT)/, ""));
     }
   }
-  return [...out].sort((a, b) => b.length - a.length);
+  // Emit version-stripped variants alongside the full token.
+  //
+  // A label reads "OFFLINE REGIONAL FINALIST V2" and a seller writes "Offline
+  // Regional Finalist" — the V2 is Beckett's or PSA's own versioning of the
+  // promo line and almost never appears in a title. Matching only the full
+  // glued run therefore finds nothing, on exactly the cards this exists for.
+  const withVariants = new Set<string>(out);
+  for (const tok of out) {
+    const trimmed = tok.replace(/(?:V|VOL)\d{1,2}$/, "");
+    if (trimmed.length >= 8 && trimmed !== tok) withVariants.add(trimmed);
+  }
+  return [...withVariants].sort((a, b) => b.length - a.length);
 }
 
 /** Does this listing describe the same printing the label names?

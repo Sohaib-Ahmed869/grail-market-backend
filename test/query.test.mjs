@@ -41,3 +41,14 @@ test("a name we cannot check does not reject everything", () => {
   assert.equal(mentionsCard("anything at all", "メガゲンガー"), true);
   assert.equal(mentionsCard("anything at all", ""), true);
 });
+
+test("a multi-card lot is not a comparable for one card", async () => {
+  const { NOT_ONE_CARD } = await import("../src/scans/ebaylistings.js");
+  // a $2,999 six-card lot sat among four single Finalists and dragged the
+  // top of the range with it
+  assert.ok(NOT_ONE_CARD.test("One Piece 2023 Offline Regional Finalist PSA 10 Set of 6 (Crocodile)"));
+  assert.ok(NOT_ONE_CARD.test("Pokemon lot of 12 cards PSA 9"));
+  // and a single card that merely mentions a set is untouched
+  assert.ok(!NOT_ONE_CARD.test("PSA 10 Crocodile OP02-053 Offline Regional Finalist Promo"));
+  assert.ok(!NOT_ONE_CARD.test("Charizard Base Set PSA 8"));
+});

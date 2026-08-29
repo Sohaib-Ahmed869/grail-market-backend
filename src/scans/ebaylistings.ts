@@ -88,8 +88,8 @@ export type ListingResult = {
  *  break slot, or a damaged slab all trade at prices that say nothing about
  *  what this card is worth, and they sit at both ends of the range where they
  *  do the most damage to a median. */
-const NOT_ONE_CARD =
-  /\b(lot|lots|bundle|bulk|collection|joblot|job lot|break|breaks|random|mystery|repack|custom|proxy|proxies|reprint|orica|digital|read desc|damaged|cracked|scratched|reholder|empty|case only|sleeve|toploader|binder|playset|\d{2,}\s*cards?)\b|\b(art|complete|full|master|sequential)\s+set\b|\bsequential\b/i;
+export const NOT_ONE_CARD =
+  /\b(lot|lots|bundle|bulk|collection|joblot|job lot|break|breaks|random|mystery|repack|custom|proxy|proxies|reprint|orica|digital|read desc|damaged|cracked|scratched|reholder|empty|case only|sleeve|toploader|binder|playset|\d{2,}\s*cards?)\b|\b(art|complete|full|master|sequential)\s+set\b|\bsequential\b|\bset\s+of\s+\d+\b/i;
 
 /** How long an ask must stand before its failure to sell is evidence.
  *  eBay fixed-price listings renew automatically, so two full months is a
@@ -441,13 +441,46 @@ export async function fetchListings(opts: {
     let filteredToGrade = false;
     let filteredToGrader = false;
     let filteredToLabel = false;
-    if (opts.grader && opts.grade != null) {
-      const exact = filtered.filter(
-        (l) => l.grader === opts.grader && l.grade === opts.grade,
-      );
+
+    // A graded card is never averaged against ungraded copies.
+    //
+    // The exact-grade filter only applied when it found two or more matches,
+    // and fell back to EVERYTHING otherwise — raw singles included. So a slab
+    // whose grade had too few listings got a median computed over loose cards,
+    // which is the "slab quoted at its raw price" error arriving through the
+    // asks instead of the catalogue.
+    //
+    // The cascade below narrows as far as the data allows and stops at graded.
+    // It never returns to the full set, because a raw copy is not a comparable
+    // for a card in a holder at any sample size.
+    if (opts.grader) {
+      const isGraded = (l: Listing) =>
+        l.grader != null || /\b(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|GRADED|SLAB)\b/i.test(l.title);
+
+      const exact =
+        opts.grade != null
+          ? filtered.filter((l) => l.grader === opts.grader && l.grade === opts.grade)
+          : [];
+      const sameGrader = filtered.filter((l) => l.grader === opts.grader);
+      const anyGraded = filtered.filter(isGraded);
+
       if (exact.length >= 2) {
         filtered = exact;
         filteredToGrade = true;
+        filteredToGrader = true;
+      } else if (sameGrader.length >= 2) {
+        filtered = sameGrader;
+        filteredToGrader = true;
+      } else if (anyGraded.length >= 2) {
+        filtered = anyGraded;
+      } else {
+        // Nothing graded to compare against. Say so rather than quietly
+        // pricing a slab from loose cards.
+        console.warn(
+          `[listings] no graded listings for ${opts.grader}${opts.grade != null ? " " + opts.grade : ""} ` +
+            `— refusing to average ${filtered.length} ungraded copies against a slab`,
+        );
+        filtered = [];
       }
     }
 
@@ -507,14 +540,28 @@ export async function fetchListings(opts: {
         // identification landed on the base card sharing the number, the
         // promo's listings are not in this result set at all.
         //
-        // So ask again with the label's own words in the query. Deliberately
-        // a SECOND search rather than a narrower first one: adding a printing
-        // to every query hides the listings that do not mention it, which is
-        // why the query is kept broad by default. This runs only when the
-        // broad result demonstrably contains the wrong product.
+        // So ask again WITHOUT the collector number.
+        //
+        // Not by adding the label's words to the query: OCR returns them glued
+        // ("OFFLINEREGIONALFINALISTV2") and no seller ever typed that, so as a
+        // search term it finds nothing. The number is what has to go — a prize
+        // promo reprints a card's number but is listed under the promo's name,
+        // so a number-anchored query returns the base card and only the base
+        // card. Drop it, keep the card name and the grade, and let the label
+        // token do the filtering afterwards, where a glued run works fine
+        // because titles are compared with their spaces removed too.
+        // The SET has to go too, and for the same reason as the number.
+        //
+        // A prize promo is catalogued under the set it reprints — this
+        // Crocodile is Paramount War #OP02-053 — but it is listed under the
+        // promo's own name. "Paramount War" appears in no Finalist title, so
+        // keeping it excludes every one of them. Name and grade are the only
+        // two things a promo listing reliably shares with its catalogue entry;
+        // the label token does the rest of the work afterwards.
         const narrowed = await fetchListings({
           ...opts,
-          extraTokens: [...(opts.extraTokens ?? []), ...opts.labelTokens],
+          number: null,
+          setName: null,
           labelSearchDone: true,
         });
         if (narrowed && narrowed.matched >= 2) {
@@ -566,14 +613,6 @@ export async function fetchListings(opts: {
     // at all. Running this after the designation filter therefore discards
     // exactly the listings we just went looking for, the $69,000 signed Luffy
     // among them.
-    if (opts.grader && opts.grade == null && !designation) {
-      const sameGrader = filtered.filter((l) => l.grader === opts.grader);
-      if (sameGrader.length >= 2) {
-        filtered = sameGrader;
-        filteredToGrader = true;
-      }
-    }
-
     // Narrow again to the LABEL VARIANT where we know it.
     //
     // "BGS 10" is not one price. A Black Label — all four subgrades exactly 10
