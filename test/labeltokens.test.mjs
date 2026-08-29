@@ -84,3 +84,26 @@ test("missing figures never manufacture a warning", () => {
   assert.equal(rawGradedDivergence(0.65, null).suspect, false);
   assert.equal(rawGradedDivergence(0, 615).suspect, false);
 });
+
+// ---- a card name is not the grade printed above it -------------------------
+
+test("grading furniture never becomes the card name", async () => {
+  const { NOT_A_NAME } = await import("../src/scans/scans.service.js");
+  // exactly what OCR returned from the Crocodile slab, glued as it arrives
+  const raw = ["GEMMT", "OFFLINEREGIONALFINALISTV2", "2023ONEPIECEPROMO", "Crocodile"];
+  const kept = raw.filter((n) => !NOT_A_NAME.some((re) => re.test(n)));
+  assert.ok(!kept.includes("GEMMT"), "GEM MT is a grade, not a Crocodile");
+  assert.ok(!kept.includes("2023ONEPIECEPROMO"), "the year line is not a name");
+  assert.ok(kept.includes("Crocodile"), "the actual card name survives");
+});
+
+test("a glued label line loses to a real name", async () => {
+  const { pickDescribedName } = await import("../src/scans/scans.service.js");
+  assert.equal(
+    pickDescribedName(["OFFLINEREGIONALFINALISTV2", "Crocodile", "Impel Down"]),
+    "Crocodile",
+    "a 25-character run of capitals is a product line, not a card name",
+  );
+  // and a genuine multi-word caps name is still preferred when present
+  assert.equal(pickDescribedName(["TOP TRUMPS", "LARA"]), "TOP TRUMPS");
+});

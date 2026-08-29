@@ -282,7 +282,14 @@ export class ScansService {
     // tell the user which card we saw (and what it's worth). All supported
     // game catalogs are searched in parallel; the best match wins.
     if (frontRes.ocr) {
-      scan.ocrNames = frontRes.ocr.nameCandidates ?? [];
+    // Grading furniture is not a card name, and the guard for that already
+    // existed — it was just never applied here. "GEM MT" arrives from OCR as
+    // the glued run "GEMMT", lands first in nameCandidates, and a Crocodile
+    // Offline Regional Finalist was published as a card called "Gemmt". A
+    // search for "Gemmt PSA 10" returns Pokemon Gym cards and a Pau Gasol.
+      scan.ocrNames = (frontRes.ocr.nameCandidates ?? []).filter(
+        (n) => !NOT_A_NAME.some((re) => re.test(String(n).trim())),
+      );
       // Every scrap of text that might name the PRINTING. The card number does
       // not identify a product — OP13-119 is four products — so the printing
       // has to come from somewhere else: the slab label (Beckett prints the
@@ -555,8 +562,12 @@ export class ScansService {
         const brands = BRAND_HINTS.filter(([re]) => re.test(allText)).map(([, b]) => b);
         // name banners are usually caps, and person/card names are usually
         // multi-word — prefer multi-word caps over single logo words
-        const caps = names.filter((n) => n === n.toUpperCase() && /[A-Z]{3,}/.test(n));
-        const pick = caps.find((n) => n.trim().split(/\s+/).length >= 2) ?? caps[0] ?? names[0];
+        // A long unbroken run of capitals is a LABEL line, not a card name.
+        // OCR glues a label's condensed font into things like
+        // "OFFLINEREGIONALFINALISTV2"; a character name off the card face
+        // comes through as an ordinary word. Preferring the short candidate is
+        // what separates "Crocodile" from the product line printed above it.
+        const pick = pickDescribedName(names);
         scan.identification = {
           cardId: "described",
           name: titleCase(pick),
@@ -940,6 +951,12 @@ export class ScansService {
       // What the label and the card print, over and above the name.
       const askTokens = [
         codeRead?.code,
+        // For a card no catalogue knows, the label's own product line is the
+        // only thing separating it from the ordinary print. "Crocodile" alone
+        // is fifty listings; "Crocodile Offline Regional Finalist" is the card.
+        scan.identification?.cardId === "described"
+          ? (frontRes.ocr?.slab as any)?.name ?? null
+          : null,
         // A rarity token only helps when it tells the printings apart. On a
         // Japanese Pokemon card "SAR" is exactly the discriminator; on this One
         // Piece card the base print and the SP treatment are BOTH "SR", so
@@ -1281,11 +1298,15 @@ export class ScansService {
  *  Japanese. Every label line is considered now, and the ones that are plainly
  *  not names are ruled out instead.
  */
-const NOT_A_NAME = [
+export const NOT_A_NAME = [
   /^(SPECIAL|ILLUSTRATION|SPECIALART|ART)?\s*(ART)?\s*RARE$/i,   // rarity lines
   /^(GEM\s*MT|GEMMT|MINT|NM\s*MT|PRISTINE|BLACK\s*LABEL)/i,      // grade wording
   /^(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|WOTC)\b/i,                  // grader furniture
-  /^\d{4}\b/,                                                    // the year line
+  // No \b after the year. A label's condensed font comes back from OCR with
+  // the spaces gone, so the year line arrives as "2023ONEPIECEPROMO" — and
+  // \b never matches between "3" and "O", both being word characters. The
+  // rule read correctly and caught nothing on exactly the input it was for.
+  /^\d{4}(?!\d)/,                                                // the year line
   /^\d+$/,                                                        // cert or number
   /\bJP\b|\bJAPANESE\b|\bENGLISH\b/i,                          // the set/language line
   /^(CENTERING|CORNERS|EDGES|SURFACE)/i,                          // Beckett subgrades
@@ -1520,4 +1541,23 @@ export function classifyWeakness(
     return { reason: "tiny-sample", confidence, sampleSize };
   }
   return null;
+}
+
+
+/** The best card name among OCR candidates, for a card no catalogue knows.
+ *
+ *  A long unbroken run of capitals is a LABEL line, not a card name. OCR glues
+ *  a label's condensed font into runs like "OFFLINEREGIONALFINALISTV2", while
+ *  a character name off the card face arrives as an ordinary word. Preferring
+ *  the short candidate is what separates "Crocodile" from the product line
+ *  printed above it — and grading furniture has already been filtered out of
+ *  these by NOT_A_NAME before they get here.
+ */
+export function pickDescribedName(names: string[]): string {
+  const notGlued = names.filter((n) => !/[A-Z0-9]{20,}/.test(String(n)));
+  const pool = notGlued.length ? notGlued : names;
+  const caps = pool.filter((n) => n === n.toUpperCase() && /[A-Z]{3,}/.test(n));
+  return (
+    caps.find((n) => n.trim().split(/\s+/).length >= 2) ?? caps[0] ?? pool[0] ?? names[0] ?? ""
+  );
 }
