@@ -581,6 +581,25 @@ export class ScansService {
     // catalog) reached the page with a correct card ID and no prices at all —
     // the same Gold Star priced fine from its slab photo and blank from a
     // hand-held one.
+    // A photo we declined does not get priced.
+    //
+    // Identification still runs above, because naming the card helps someone
+    // retake the shot. Pricing is different: every source below costs money,
+    // and the answer would be built on a read we have already said we do not
+    // trust. On a blurry PSA slab that produced a raw-card price for a $94,000
+    // Championship Finalist — the grade is the whole value of a slab, and a
+    // grade we could not see is not a grade we can price around.
+    //
+    // Cheaper too, which is the smaller point: a rejected scan now spends
+    // nothing at any provider.
+    if (frontRes.rejection) {
+      console.warn(
+        `[scan] ${frontRes.rejection.reason} — not pricing; ` +
+          `identification kept for context only`,
+      );
+      return scan;
+    }
+
     let pptByGrade: Record<string, GradePoint> | null = null;
     let pptByGrader: Record<string, Record<string, GradePoint>> | null = null;
     const ident = scan.identification;
