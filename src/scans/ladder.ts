@@ -50,7 +50,10 @@ export type LadderResult = {
     | "modelled-cross-grader"
     /** the recorded sale for this grade failed a data-quality check and the
      *  current asking market for the SAME grader and grade was used instead */
-    | "ask-over-suspect-sale";
+    | "ask-over-suspect-sale"
+    /** no sale exists anywhere for this key; built from weighted live listings
+     *  per docs/pricing-algorithm.md, and never to be shown as a sale */
+    | "estimated-from-listings";
   method: string;
   /** human-readable provenance, for the "how this number was reached" list */
   explain: string;

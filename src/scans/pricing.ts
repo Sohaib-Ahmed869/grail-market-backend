@@ -1,6 +1,8 @@
 import { fetchGradedPrices, gradePointsFromStore, type GradePoint } from "./gradedprices.js";
 import { readGradePrices, readRawPrice, writeRawPrice } from "../cards.store.js";
 import { priceForGrade, sanityCheck, gradeIsInverted, type LadderResult } from "./ladder.js";
+import { estimateFromListings, isRefusal } from "./estimate.js";
+import type { Listing } from "./ebaylistings.js";
 
 // One way to get a graded price, used by every caller.
 //
@@ -79,7 +81,14 @@ export async function priceForSlab(
   grade: number | null | undefined,
   /** The current asking market for the SAME grader and grade, when we have
    *  one that was genuinely filtered to it. */
-  ask?: { median: number | null; count: number; filteredToGrade: boolean } | null,
+  ask?: {
+    median: number | null;
+    count: number;
+    filteredToGrade: boolean;
+    /** the listings themselves, so the estimator can weigh them individually */
+    listings?: Listing[] | null;
+    labelTokens?: string[] | null;
+  } | null,
 ): Promise<LadderResult | null> {
   if (!byGrader || !grader || grade == null) return null;
   const G = grader.toUpperCase();
@@ -127,4 +136,40 @@ export async function priceForSlab(
   }
 
   return sanityCheck(r, byGrader, G, grade);
+}
+
+/** What a holder is worth when no sale exists to read.
+ *
+ *  Deliberately separate from priceForSlab: that walks a ladder of RECORDED
+ *  evidence and this does not have any, so keeping them apart stops an
+ *  estimate ever being returned wearing the same shape as a sale. See
+ *  docs/pricing-algorithm.md for the method and why each choice is made. */
+export async function estimateForSlab(
+  listings: Listing[],
+  opts: {
+    grader?: string | null;
+    grade?: number | null;
+    labelTokens?: string[] | null;
+  },
+): Promise<LadderResult | null> {
+  const out = estimateFromListings(listings, {
+    labelTokens: opts.labelTokens ?? null,
+    grader: opts.grader ?? null,
+    grade: opts.grade ?? null,
+  });
+
+  // A refusal is a real answer and travels as one: no price, the range, and
+  // the reason. The caller shows the listings underneath it.
+  if (isRefusal(out)) return null;
+
+  return {
+    price: out.estimate,
+    low: out.low,
+    high: out.high,
+    sampleSize: out.sampleSize,
+    confidence: out.confidence >= 4 ? "medium" : "low",
+    basis: "estimated-from-listings",
+    method: out.method,
+    explain: out.explain,
+  };
 }

@@ -22,6 +22,14 @@ export type Listing = {
   imageUrl: string | null;
   url: string;
   seller: string | null;
+  /** Seller standing. A price is a claim, and who is making it matters: an
+   *  account with six thousand feedbacks at 100% asking $93,500 is a different
+   *  signal from a brand-new account asking the same. */
+  sellerFeedbackPct: number | null;
+  sellerFeedbackCount: number | null;
+  /** Best Offer enabled — the seller telling you the number is negotiable,
+   *  which is the seller's own statement that it is above their true floor. */
+  bestOffer: boolean;
   /** grader + grade parsed out of the title, where present */
   grader: string | null;
   grade: number | null;
@@ -369,6 +377,13 @@ export async function fetchListings(opts: {
         imageUrl: it.thumbnailImages?.[0]?.imageUrl ?? it.image?.imageUrl ?? null,
         url: String(it.itemWebUrl ?? ""),
         seller: it.seller?.username ?? null,
+        sellerFeedbackPct:
+          it.seller?.feedbackPercentage != null ? Number(it.seller.feedbackPercentage) : null,
+        sellerFeedbackCount:
+          it.seller?.feedbackScore != null ? Number(it.seller.feedbackScore) : null,
+        bestOffer: Array.isArray(it.buyingOptions)
+          ? it.buyingOptions.includes("BEST_OFFER")
+          : false,
         grader,
         grade,
         labelVariant,

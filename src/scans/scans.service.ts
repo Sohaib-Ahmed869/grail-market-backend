@@ -11,7 +11,7 @@ import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
 import type { GradePoint } from "./gradedprices.js";
-import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { gradedPricesFor, priceForSlab, estimateForSlab } from "./pricing.js";
 import { findInversions, soldVsAsk } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
@@ -1084,6 +1084,31 @@ export class ScansService {
                   filteredToGrade: Boolean(live.filteredToGrade),
                 },
               );
+              // No recorded sale anywhere for this key — every non-Pokemon
+              // card, today. Estimate it from the live listings, weighted, or
+              // decline. docs/pricing-algorithm.md.
+              if (!scan.valuation.slabPrice && live.listings.length) {
+                const est = await estimateForSlab(live.listings, {
+                  grader: labelSlab?.grader ?? null,
+                  grade: labelSlab?.grade ?? null,
+                  labelTokens: askLabelTokens,
+                });
+                if (est) {
+                  scan.valuation.slabPrice = {
+                    price: est.price, low: est.low, high: est.high,
+                    sampleSize: est.sampleSize, confidence: est.confidence,
+                    basis: est.basis, method: est.method, explain: est.explain,
+                    suspect: null, suspectReason: null,
+                  };
+                  console.log(`[estimate] ${est.method} -> ${est.price.toFixed(2)}`);
+                } else {
+                  console.warn(
+                    `[estimate] declined — listings for this card do not agree well ` +
+                      `enough to price from`,
+                  );
+                }
+              }
+
               if (withAsk && withAsk.basis === "ask-over-suspect-sale") {
                 scan.valuation.slabPrice = {
                   price: withAsk.price,
