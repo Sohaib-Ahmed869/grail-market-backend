@@ -481,10 +481,22 @@ export async function fetchGradedPrices(
       typeof it.setName === "string" &&
       similarity(setName, it.setName) >= 0.6;
 
+    // A set match alone is NOT enough when we know the number.
+    //
+    // "Mega Charizard X ex, 013, Phantasmal Flames" came back as
+    // "Mega Charizard X ex - 130/094" — same name, same set, a completely
+    // different card. 130 is above the set size, so it is the Special
+    // Illustration Rare; 013 is the ordinary print. We filed the SIR's $2,200
+    // PSA 10 against the $70 card and served it for weeks.
+    //
+    // This is the number-is-not-a-product rule applied to our own price
+    // lookup: with a number in hand, a candidate that fails it is the wrong
+    // card no matter how well its set name reads. Falling back to the set is
+    // only defensible when there is no number to check against.
     const pick =
       items.find((it) => numberMatches(it) && setMatches(it)) ??
       items.find(numberMatches) ??
-      items.find(setMatches);
+      (wanted == null ? items.find(setMatches) : undefined);
     if (!pick) {
       cacheSet(localKey, empty);
       void writeCard({

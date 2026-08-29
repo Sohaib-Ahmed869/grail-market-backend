@@ -50,8 +50,17 @@ const MIN_LISTINGS = 3;
 const MAX_SPREAD = 8;
 /** Asks are biased high, so the sale sits low in their distribution. */
 const QUANTILE = 0.3;
-/** Used until we have enough (sold, ask) pairs to measure it. Stated, not hidden. */
-const ASK_TO_SOLD_PRIOR = 0.85;
+/** Measured, not borrowed.
+ *
+ *  This started as 0.85, reasoned across from property data where ~84% of
+ *  listings sell below asking. It is now 0.83, measured from a backtest of 26
+ *  (sold comp, live asks) pairs across six cards and six grading companies —
+ *  the median sold price came to 0.827 of the weighted p30 of asks. Close to
+ *  the borrowed figure, which is reassuring, but this one is ours.
+ *
+ *  Still a pool-wide constant rather than a per-card measurement, so callers
+ *  are told it is assumed unless they pass a measured factor of their own. */
+const ASK_TO_SOLD_PRIOR = 0.83;
 
 /** A fresh listing is a live claim; an old one has been refuted by the market.
  *
