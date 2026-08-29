@@ -127,3 +127,27 @@ test("a pasted marketplace title is pulled apart, not searched whole", () => {
   assert.equal(readQuery("Portgas.D.Ace (119) (Parallel) OP13-119").code, "OP13-119");
   assert.equal(readQuery("Portgas.D.Ace (119) (Parallel) OP13-119").name, "Portgas.D.Ace");
 });
+
+// One Piece prints its number on the card face, and OCR mangles it two ways at
+// once: the zero becomes a letter O, and the number glues to the trait line
+// above it. A Crocodile Offline Regional Finalist went out as "Unknown set"
+// with the number sitting legibly in its own OCR the whole time.
+test("a One Piece number survives O-for-zero and a glued trait line", async () => {
+  const { readOnePieceCode } = await import("../src/scans/setcode.js");
+  // exactly what OCR returned from the slab
+  assert.equal(
+    readOnePieceCode(["Impel Down/FormerBaroque Worksopo2-053"]),
+    "OP02-053",
+  );
+  // and the clean cases still read
+  assert.equal(readOnePieceCode(["OP05-060"]), "OP05-060");
+  assert.equal(readOnePieceCode(["ST10-013B"]), "ST10-013");
+  assert.equal(readOnePieceCode(["PRB02 005"]), "PRB02-005");
+});
+
+test("OCR noise is not read as a card number", async () => {
+  const { readOnePieceCode } = await import("../src/scans/setcode.js");
+  assert.equal(readOnePieceCode(["OPOO-OOO"]), null, "no real digits is noise");
+  assert.equal(readOnePieceCode(["Crocodile"]), null);
+  assert.equal(readOnePieceCode([]), null);
+});

@@ -150,3 +150,35 @@ const SEALED_RE =
 export function isSealedProduct(labelLines: (string | null | undefined)[]): boolean {
   return labelLines.filter(Boolean).some((l) => SEALED_RE.test(String(l)));
 }
+
+
+// One Piece prints its card number on the face, bottom-right: "OP02-053".
+//
+// Two things stop the obvious regex finding it. OCR reads the zero in "OP02"
+// as the letter O about as often as not, so the code arrives as "OPO2-053" and
+// a \d{2} never matches. And the number sits flush against the trait line, so
+// "Impel Down/Former Baroque Works" and "OP02-053" come back as one run —
+// "Worksopo2-053" — with no word boundary in front of it.
+//
+// Both are safe to be generous about because the prefix is a closed set. OP,
+// ST, EB and PRB are the only ones One Piece uses, and requiring the two-digit
+// set, a separator and a three-digit number after one of them is specific
+// enough that a false positive needs a word ending in those letters followed
+// by exactly that shape.
+const OP_CARD_RE = /(OP|ST|EB|PRB)([0-9O]{2})\s*[-–—]?\s*([0-9O]{3})/i;
+
+/** The One Piece card number printed on the card face, or null.
+ *
+ *  Vision's own setCode reader is Pokemon-Japanese and returns nothing here,
+ *  so a Crocodile whose number was legible in the OCR went out as "Unknown
+ *  set" with no catalogue match and listings for a different Crocodile. */
+export function readOnePieceCode(texts: (string | null | undefined)[]): string | null {
+  const hay = texts.filter(Boolean).join(" ");
+  const m = OP_CARD_RE.exec(hay);
+  if (!m) return null;
+  // Check for real digits BEFORE substituting, or the substitution creates the
+  // digits the check is looking for and "OPOO-OOO" reads as OP00-000.
+  if (!/\d/.test(m[2]) || !/\d/.test(m[3])) return null;
+  const zero = (t: string) => t.replace(/[oO]/g, "0");
+  return `${m[1].toUpperCase()}${zero(m[2])}-${zero(m[3])}`;
+}

@@ -15,7 +15,7 @@ import { gradedPricesFor, priceForSlab, estimateForSlab } from "./pricing.js";
 import { findInversions, soldVsAsk } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
-import { readSetCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
+import { readSetCode, readOnePieceCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
 import { recordScan, recordWeakResult, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
 import { labelTokens, rawGradedDivergence } from "./labeltokens.js";
@@ -399,7 +399,12 @@ export class ScansService {
           identifyCard(frontRes.ocr, frontRes.warpedImageB64),
           identifyScryfall(names),
           identifyYgo(names),
-          identifyOnePiece(frontRes.ocr.setCode, frontRes.warpedImageB64),
+          identifyOnePiece(
+            // vision's setCode reader is Pokemon-Japanese; the One Piece number
+            // is on the card face and needs its own, O-for-zero tolerant read
+            frontRes.ocr.setCode ?? readOnePieceCode(frontRes.ocr.texts ?? []),
+            frontRes.warpedImageB64,
+          ),
           identifyLorcana(names),
           identifyDigimon(names),
           identifySwu(names),
