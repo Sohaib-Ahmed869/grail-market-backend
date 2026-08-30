@@ -235,6 +235,46 @@ export function isDesignationListing(title: string): boolean {
  *  many cards are in the set and identifies nothing, so a digit run that a "/"
  *  immediately precedes is never the card. Everything else — "100/101", "#100",
  *  "No. 100", a bare "100" — still counts. */
+/** The words naming the franchise itself, which every card in it shares.
+ *
+ *  eBay ranks a keyword search by relevance across ALL the words given, so a
+ *  term true of a hundred thousand listings does not narrow the search — it
+ *  drowns it. A PSA 10 Nami from the Baskin Robbins campaign searched as
+ *  "Nami One Piece x Baskin Robbins Campaign Collection Card PSA 10" returned
+ *  1,029 results, not one of them a Baskin Robbins card; the same search with
+ *  the franchise dropped returned nine, all of them the right card. The card
+ *  is worth about $950 and we were quoting $63 off other people's Namis.
+ *
+ *  Only stripped where the GAME is known to be that franchise, so a Pokemon
+ *  set called "Dragon Frontiers" keeps both its words while a Dragon Ball one
+ *  loses them. */
+const FRANCHISE_WORDS: Record<string, string[]> = {
+  onepiece: ["ONE", "PIECE"],
+  pokemon: ["POKEMON"],
+  yugioh: ["YU", "GI", "OH", "YUGIOH"],
+  mtg: ["MAGIC", "GATHERING"],
+  digimon: ["DIGIMON"],
+  dragonball: ["DRAGON", "BALL"],
+  lorcana: ["LORCANA", "DISNEY"],
+  unionarena: ["UNION", "ARENA"],
+  gundam: ["GUNDAM"],
+  starwars: ["STAR", "WARS"],
+  riftbound: ["RIFTBOUND"],
+};
+
+/** The part of a set name worth searching on.
+ *
+ *  Never returns empty: if the set is nothing BUT its franchise, the franchise
+ *  is all we have and is better than no set at all. */
+export function searchableSetName(setName: string, game?: string | null): string {
+  const drop = new Set(FRANCHISE_WORDS[String(game ?? "").toLowerCase()] ?? []);
+  const kept = setName
+    .split(/\s+/)
+    .filter((w) => w && !/^[x\u00d7]$/i.test(w)) // the "x" in a crossover title
+    .filter((w) => !drop.has(w.toUpperCase().replace(/[^A-Z0-9]/g, "")));
+  return kept.length ? kept.join(" ") : setName;
+}
+
 /** Does this title name the set the card is actually from?
  *
  *  Whole words, all of them. "EX Dragon" shares its only significant word with
@@ -246,6 +286,15 @@ const SET_STOPWORDS = new Set([
   "EX", "GX", "SET", "THE", "AND", "OF", "SERIES", "POKEMON", "TCG", "CARD",
   "EDITION", "ERA", "PROMO",
 ]);
+
+/** The words of a set that are worth matching on: distinctive, and not the
+ *  franchise every card in it shares. */
+export function setWords(setName: string, game?: string | null): string[] {
+  return searchableSetName(setName, game)
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter((w) => w.length >= 3 && !SET_STOPWORDS.has(w));
+}
 
 export function setInTitle(title: string, setName: string): boolean {
   const words = setName
@@ -303,6 +352,9 @@ export function labelFromTitle(title: string): "black" | "gold" | null {
 export async function fetchListings(opts: {
   name: string;
   setName?: string | null;
+  /** which trading-card game, so the franchise can be kept out of the search
+   *  terms — see searchableSetName */
+  game?: string | null;
   number?: string | null;
   grader?: string | null;
   grade?: number | null;
@@ -385,7 +437,7 @@ export async function fetchListings(opts: {
     opts.setName &&
     !/[^\u0000-\u007F]/.test(opts.setName)
   ) {
-    parts.push(clean(opts.setName));
+    parts.push(clean(searchableSetName(opts.setName, opts.game)));
   }
   for (const t of opts.extraTokens ?? []) {
     const c = t ? clean(String(t)) : "";
@@ -481,8 +533,26 @@ export async function fetchListings(opts: {
     // carry the set, because plenty of sellers never name it and a filter that
     // empties the pool has told us nothing.
     if (opts.setName) {
-      const inSet = filtered.filter((l) => setInTitle(l.title, opts.setName as string));
-      if (inSet.length >= 2) filtered = inSet;
+      // Best overlap wins, rather than demanding every word.
+      //
+      // Requiring all of them works for a two-word set like "Dragon
+      // Frontiers" and fails for an official product name: sellers of the
+      // Baskin Robbins Nami write "One Piece Baskin Robbins ... Campaign
+      // Card" and never write "Collection", so the strict test matched none
+      // of them, declined to apply itself, and left the twelve wrong Namis in
+      // place. Keeping the listings that carry the MOST of the set's words is
+      // the same judgement without the cliff — it still separates "EX Dragon"
+      // from "EX Dragon Frontiers", and it cannot empty the pool.
+      const words = setWords(opts.setName, opts.game);
+      if (words.length) {
+        const scored = filtered.map((l) => {
+          const U = l.title.toUpperCase();
+          return { l, n: words.filter((w) => new RegExp(`\\b${w}`).test(U)).length };
+        });
+        const best = Math.max(0, ...scored.map((x) => x.n));
+        const top = scored.filter((x) => x.n === best).map((x) => x.l);
+        if (best > 0 && top.length >= 2) filtered = top;
+      }
     }
 
     // Reject anything that is not this card at all.

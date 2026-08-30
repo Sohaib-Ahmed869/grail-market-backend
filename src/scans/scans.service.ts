@@ -1066,6 +1066,7 @@ export class ScansService {
           const live = await fetchListings({
             name: scan.identification.name,
             setName: scan.identification.setName,
+            game: scan.identification.game ?? null,
             number: scan.identification.localId,
             grader: askGrader,
             grade: askGrade,

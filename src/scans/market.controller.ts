@@ -53,6 +53,7 @@ export class MarketController {
     @Query("printing") printing?: string,
     @Query("ja") ja?: string,
     @Query("lang") lang?: string,
+    @Query("game") game?: string,
   ) {
     const empty = {
       listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "",
@@ -67,6 +68,7 @@ export class MarketController {
       (await fetchListings({
         name,
         setName: set ?? null,
+        game: game ?? null,
         number: number ?? null,
         grader: grader ?? null,
         grade: Number.isFinite(g) ? g : null,
@@ -108,6 +110,8 @@ export class MarketController {
     @Query("grade") grade?: string,
     @Query("printing") printing?: string,
     @Query("lang") lang?: string,
+    // which game, so the franchise stays out of the eBay search terms
+    @Query("game") game?: string,
   ) {
     if (!name) return { error: "name required" };
     const g = grade != null && grade !== "" ? Number(grade) : null;
@@ -156,6 +160,7 @@ export class MarketController {
         ? await fetchListings({
             name,
             setName: setName ?? null,
+            game: game ?? null,
             number: number ?? null,
             grader: grader ?? null,
             grade: grade_,

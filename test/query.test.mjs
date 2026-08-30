@@ -6,7 +6,14 @@
 // Median ask: A$11.06, on a card whose market is five figures.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { latinName, mentionsCard, numberInTitle, setInTitle } from "../src/scans/ebaylistings.js";
+import {
+  latinName,
+  mentionsCard,
+  numberInTitle,
+  setInTitle,
+  setWords,
+  searchableSetName,
+} from "../src/scans/ebaylistings.js";
 
 test("a decorative glyph does not cost us the whole name", () => {
   // ☆ and δ are part of how the catalogue writes it; "Charizard" is what every
@@ -119,4 +126,41 @@ test("structural words in a set name are not evidence", () => {
   // "EX" appears in half the titles on eBay and identifies nothing. If it were
   // required, a correct listing that omits it would be thrown away.
   assert.equal(setInTitle("Charizard Gold Star Dragon Frontiers 100/101", "EX Dragon Frontiers"), true);
+});
+
+// A PSA 10 Nami from the One Piece x Baskin Robbins campaign is a ~US$950
+// card. We quoted A$98, off twelve listings for other people's Namis.
+//
+// eBay ranks a keyword search by relevance across every word given, so a term
+// true of a hundred thousand listings does not narrow the search, it drowns
+// it. Searching the full official set name returned 1,029 results with not one
+// Baskin Robbins card among them; dropping the franchise returned nine, all of
+// them the card.
+test("the franchise is not a search term for a card inside it", () => {
+  assert.equal(
+    searchableSetName("One Piece x Baskin Robbins Campaign Collection Card", "onepiece"),
+    "Baskin Robbins Campaign Collection Card",
+  );
+  // the crossover "x" is punctuation, not a word
+  assert.equal(searchableSetName("Pokemon x Van Gogh Museum", "pokemon"), "Van Gogh Museum");
+});
+
+test("a set is only stripped of ITS OWN franchise", () => {
+  // Dragon Frontiers is a Pokemon set and must keep both words; the same two
+  // words in a Dragon Ball set are the franchise and must go.
+  assert.equal(searchableSetName("Dragon Frontiers", "pokemon"), "Dragon Frontiers");
+  assert.equal(searchableSetName("Dragon Ball Super Fusion World", "dragonball"), "Super Fusion World");
+  assert.equal(searchableSetName("Dragon Frontiers", null), "Dragon Frontiers");
+});
+
+test("a set that is nothing but its franchise keeps its name", () => {
+  // Stripping to nothing would search for the card with no set at all, which
+  // is worse than searching with a weak one.
+  assert.equal(searchableSetName("One Piece", "onepiece"), "One Piece");
+});
+
+test("set words drop the franchise and the filler", () => {
+  const w = setWords("One Piece x Baskin Robbins Campaign Collection Card", "onepiece");
+  assert.deepEqual(w, ["BASKIN", "ROBBINS", "CAMPAIGN", "COLLECTION"]);
+  assert.deepEqual(setWords("Dragon Frontiers", "pokemon"), ["DRAGON", "FRONTIERS"]);
 });
