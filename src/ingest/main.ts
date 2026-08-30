@@ -1,17 +1,9 @@
 import "reflect-metadata";
+import { loadEnvFile } from "../env.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Same minimal .env loader main.ts uses. Duplicated deliberately: the job has
-// to run from cron without booting Nest, and importing the API's bootstrap to
-// get at four lines of parsing would drag the whole HTTP server in with it.
-const envPath = join(process.cwd(), ".env");
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
-  }
-}
+loadEnvFile();
 
 const { ingestPrices } = await import("./prices.js");
 const { backfillCatalogCards } = await import("./backfill.js");

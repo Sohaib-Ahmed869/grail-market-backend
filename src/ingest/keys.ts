@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { loadEnvFile } from "../env.js";
 import { join } from "node:path";
 
 // Manage the encrypted provider-key pool.
@@ -12,13 +13,7 @@ import { join } from "node:path";
 // Key material is accepted as an argument and never printed back. Everything
 // this reports is the 8-char id.
 
-const envPath = join(process.cwd(), ".env");
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
-  }
-}
+loadEnvFile();
 
 const { addKey, listKeys, setKeyDisabled, keystoreConfigured } = await import(
   "../scans/keystore.js"

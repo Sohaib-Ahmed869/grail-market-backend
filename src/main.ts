@@ -1,18 +1,12 @@
 import "reflect-metadata";
+import { loadEnvFile } from "./env.js";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import express from "express";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// minimal .env loader (apps/api/.env): KEY=VALUE lines, no quoting rules
-const envPath = join(process.cwd(), ".env");
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
-  }
-}
+loadEnvFile();
 
 import { AppModule } from "./app.module.js";
 import { initStore, storeConfigured } from "./cards.store.js";
