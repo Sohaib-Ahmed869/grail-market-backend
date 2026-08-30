@@ -6,7 +6,7 @@
 // Median ask: A$11.06, on a card whose market is five figures.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { latinName, mentionsCard } from "../src/scans/ebaylistings.js";
+import { latinName, mentionsCard, numberInTitle, setInTitle } from "../src/scans/ebaylistings.js";
 
 test("a decorative glyph does not cost us the whole name", () => {
   // ☆ and δ are part of how the catalogue writes it; "Charizard" is what every
@@ -51,4 +51,72 @@ test("a multi-card lot is not a comparable for one card", async () => {
   // and a single card that merely mentions a set is untouched
   assert.ok(!NOT_ONE_CARD.test("PSA 10 Crocodile OP02-053 Offline Regional Finalist Promo"));
   assert.ok(!NOT_ONE_CARD.test("Charizard Base Set PSA 8"));
+});
+
+// The Charizard Gold Star, #100 of EX Dragon Frontiers. Asking for "100" used
+// to return eleven other Charizards and one real one, because the filter
+// stripped punctuation and looked for the digits anywhere in the title — so
+// every card in a HUNDRED-CARD SET matched a card NUMBERED 100. The cheapest
+// of the intruders then set the price and the card was quoted at A$379.
+//
+// These are the real titles eBay returned.
+test("a set size is not a card number", () => {
+  const wrong = [
+    "Pokemon Graded: Charizard 4/100 EX Crystal Gaurdians (2006) Beckett 8.5",
+    "Pokemon Charizard Holo Stormfront Stormfront 103/100 Ita BGS 8.5",
+    "2007 Charizard Species Delta 04/100, Guardians Of the Crystals IT, BGS 8.5",
+    "Charizard 4 / 100 EX Crystal Guardians Reverse Holo Beckett 8.5",
+  ];
+  for (const t of wrong) {
+    assert.equal(numberInTitle(t, "100"), false, `denominator admitted: ${t}`);
+  }
+});
+
+test("the card's own number still matches, however it is written", () => {
+  const right = [
+    "Pokémon - Charizard Gold Star 100 | EX Dragon Frontiers | BGS 8.5",
+    "Pokemon Charizard Gold Star 100/101 Ex Dragon Frontiers BGS 8.5",
+    "BGS 8.5 Charizard Gold Star Delta Species Holo Rare 100/101 EX Dragon",
+    "2014 Pokemon XY Flashfire #100 Charizard EX Full Art BGS 8.5",
+    "Charizard No. 100 EX Dragon Frontiers BGS 8.5",
+  ];
+  for (const t of right) {
+    assert.equal(numberInTitle(t, "100"), true, `real number rejected: ${t}`);
+  }
+});
+
+test("leading zeros are the same number", () => {
+  assert.equal(numberInTitle("Luffy OP02-053 SA 10", "053"), true);
+  assert.equal(numberInTitle("Luffy OP02-053 SA 10", "53"), true);
+  // ...and a different number is still different
+  assert.equal(numberInTitle("Luffy OP02-053 SA 10", "35"), false);
+});
+
+// Card 100 exists in three different Pokemon sets, and they are a $430 card, a
+// $1,400 card and a $17,377 card. Once the number stops matching set sizes,
+// these are what is left, and only the set name separates them.
+test("a set that merely starts the same is a different set", () => {
+  assert.equal(
+    setInTitle("2003 Pokemon EX Dragon Charizard 100/97 Holo Beckett BGS 8.5", "Dragon Frontiers"),
+    false,
+    "EX Dragon is not EX Dragon Frontiers",
+  );
+  assert.equal(
+    setInTitle("2014 Pokemon XY Flashfire #100 Charizard EX Full Art", "Dragon Frontiers"),
+    false,
+  );
+  assert.equal(
+    setInTitle("Pokémon - Charizard Gold Star 100 | EX Dragon Frontiers | BGS 8.5", "Dragon Frontiers"),
+    true,
+  );
+  assert.equal(
+    setInTitle("Pokemon Charizard Gold Star 100/101 Ex Dragon Frontiers BGS 8.5", "Dragon Frontiers"),
+    true,
+  );
+});
+
+test("structural words in a set name are not evidence", () => {
+  // "EX" appears in half the titles on eBay and identifies nothing. If it were
+  // required, a correct listing that omits it would be thrown away.
+  assert.equal(setInTitle("Charizard Gold Star Dragon Frontiers 100/101", "EX Dragon Frontiers"), true);
 });

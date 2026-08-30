@@ -218,6 +218,65 @@ export function isDesignationListing(title: string): boolean {
  *
  *  And a black label only exists at 10. A title claiming one at 9.5 is a
  *  seller being loose with words, not a label. */
+/** Does this title carry THIS collector number — as the number, not the set size?
+ *
+ *  The old test stripped punctuation and asked whether the title contained the
+ *  digits anywhere. Removing the "/" is what broke it: a Charizard numbered 100
+ *  then matched every Charizard in a hundred-card set, because "4/100",
+ *  "103/100" and "04/100" all become runs containing "100".
+ *
+ *  For the Gold Star that admitted eleven unrelated Charizards — Crystal
+ *  Guardians 4/100, Stormfront 103/100, Species Delta 04/100 — alongside the
+ *  one real listing, and the cheapest of them then set the price. 100 is an
+ *  ordinary set size, so the wrong card was always going to be the common case
+ *  rather than the unlucky one.
+ *
+ *  A collector number is written NUMERATOR/DENOMINATOR. The denominator is how
+ *  many cards are in the set and identifies nothing, so a digit run that a "/"
+ *  immediately precedes is never the card. Everything else — "100/101", "#100",
+ *  "No. 100", a bare "100" — still counts. */
+/** Does this title name the set the card is actually from?
+ *
+ *  Whole words, all of them. "EX Dragon" shares its only significant word with
+ *  "EX Dragon Frontiers" and is a different set from four years earlier, so a
+ *  partial match is exactly the failure this exists to prevent. Short and
+ *  structural words carry no information about which set this is and are
+ *  dropped rather than required. */
+const SET_STOPWORDS = new Set([
+  "EX", "GX", "SET", "THE", "AND", "OF", "SERIES", "POKEMON", "TCG", "CARD",
+  "EDITION", "ERA", "PROMO",
+]);
+
+export function setInTitle(title: string, setName: string): boolean {
+  const words = setName
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter((w) => w.length >= 3 && !SET_STOPWORDS.has(w));
+  if (words.length === 0) return false; // nothing distinctive to require
+  const U = title.toUpperCase();
+  return words.every((w) => new RegExp(`\\b${w}`).test(U));
+}
+
+export function numberInTitle(title: string, number: string): boolean {
+  const wanted = number
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .replace(/^0+(?=\d)/, "");
+  if (!wanted) return false;
+  const U = title.toUpperCase();
+  const run = /[A-Z]*\d[A-Z0-9]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = run.exec(U)) !== null) {
+    if (m[0].replace(/^0+(?=\d)/, "") !== wanted) continue;
+    // walk back over spaces: "4 / 100" is as much a denominator as "4/100"
+    let i = m.index - 1;
+    while (i >= 0 && U[i] === " ") i--;
+    if (i >= 0 && U[i] === "/") continue;
+    return true;
+  }
+  return false;
+}
+
 export function labelFromTitle(title: string): "black" | "gold" | null {
   const U = title.toUpperCase();
 
@@ -405,12 +464,25 @@ export async function fetchListings(opts: {
     // number in the title, so this is a cheap and reliable way to reject the
     // wrong card from the right set — which is most of the noise.
     if (number) {
-      const wanted = number.toUpperCase().replace(/[^A-Z0-9]/g, "");
-      const sameCard = listings.filter((l) => {
-        const t = l.title.toUpperCase().replace(/[^A-Z0-9]/g, "");
-        return t.includes(wanted);
-      });
+      const sameCard = listings.filter((l) => numberInTitle(l.title, number));
       if (sameCard.length >= 2) filtered = sameCard;
+    }
+
+    // A collector number is only unique WITHIN a set. Card 100 exists in XY
+    // Flashfire, in EX Dragon and in EX Dragon Frontiers, and those are three
+    // different Charizards at $430, $1,400 and $17,377. Fixing the number
+    // boundaries removed the cards that merely came from hundred-card sets;
+    // these are cards genuinely numbered 100, and only the set tells them
+    // apart.
+    //
+    // Every significant word of the set has to be there, which is what
+    // separates "EX Dragon" from "EX Dragon Frontiers" — a shared first word
+    // and an entirely different set. Applied only when at least two listings
+    // carry the set, because plenty of sellers never name it and a filter that
+    // empties the pool has told us nothing.
+    if (opts.setName) {
+      const inSet = filtered.filter((l) => setInTitle(l.title, opts.setName as string));
+      if (inSet.length >= 2) filtered = inSet;
     }
 
     // Reject anything that is not this card at all.
@@ -706,7 +778,19 @@ export async function fetchListings(opts: {
     const stale = priced
       .filter((l) => (l.ageDays ?? 0) >= STALE_DAYS && l.price != null)
       .sort((a, b) => (a.price as number) - (b.price as number));
-    const ceilingListing = stale[0] ?? null;
+    // ...but only where it is a bound on THIS market rather than a listing for
+    // something else. The cheapest stale ask sat at $430 on the Gold Star while
+    // the body of the pool ran to $30,000, and it was an XY Flashfire that the
+    // number filter had wrongly admitted. Capping to it reported a median of
+    // $430 beneath a range starting at $600 — a middle below its own low, which
+    // is not a claim about a market so much as a contradiction.
+    //
+    // A genuine unsold ask sits ABOVE the market it is failing to clear, so it
+    // lands inside the distribution, not underneath all of it. One that falls
+    // below the whole body is evidence about the listing, not about the card.
+    const low = values[0] ?? null;
+    const ceilingListing =
+      stale.find((l) => low == null || (l.price as number) >= low) ?? null;
     const staleCeiling = ceilingListing?.price ?? null;
     const cappedByStale = rawMedian != null && staleCeiling != null && staleCeiling < rawMedian;
     const median = cappedByStale ? staleCeiling : rawMedian;
@@ -721,7 +805,7 @@ export async function fetchListings(opts: {
       filteredToLabel,
       filteredToLabelText,
       medianAsk: median,
-      askLow: values[0] ?? null,
+      askLow: low,
       askHigh: values[values.length - 1] ?? null,
       trimmed: cut > 0 ? cut * 2 : 0,
       staleCeiling,

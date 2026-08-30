@@ -174,6 +174,12 @@ test("an unfiltered or thin ask market cannot overrule anything", async () => {
 // when there was no sale — so the one rule able to overrule a bad sale was
 // gated on that sale not existing. This pins both halves: the ladder is
 // detectably broken, and it is broken AT 8.5 rather than merely somewhere.
+const GOLD_STAR_BGS_BYGRADER = { BGS: {
+  "4": { price: 3850, sampleSize: 1 },
+  "8": { price: 12715, sampleSize: 7 },
+  "8.5": { price: 10500, sampleSize: 9 },
+  "9": { price: 21338.5, sampleSize: 4 },
+} };
 const GOLD_STAR_BGS = {
   "4": { price: 3850, sampleSize: 1 },
   "4.5": { price: 6033.92, sampleSize: 2 },
@@ -198,4 +204,24 @@ test("the Gold Star's 8.5 is identified as the broken rung, not the 8", () => {
 test("a clean ladder asks for no second opinion", () => {
   const sane = { "8": { price: 8000 }, "8.5": { price: 10500 }, "9": { price: 21338 } };
   for (const g of [8, 8.5, 9]) assert.equal(gradeIsInverted(sane, g), false);
+});
+
+test("an ask below the sale it claims to correct is refused", async () => {
+  const { priceForSlab } = await import("../src/scans/pricing.js");
+  // The inversion is real, so the rule is eligible to fire. The asking market
+  // is $430 — a third of a percent of the grade below. That is not the 8.5
+  // being corrected upward; it is a contaminated ask pool, and taking it turned
+  // A$14,594 into A$379.44 on screen.
+  const bad = await priceForSlab(GOLD_STAR_BGS_BYGRADER, "BGS", 8.5, {
+    median: 430, count: 12, filteredToGrade: true,
+  });
+  assert.notEqual(bad.basis, "ask-over-suspect-sale", "a lower figure is not a correction");
+  assert.equal(bad.price, 10500, "the flagged sale stands rather than being replaced by junk");
+
+  // The genuine ask market for this card, which does point the right way.
+  const good = await priceForSlab(GOLD_STAR_BGS_BYGRADER, "BGS", 8.5, {
+    median: 17377.5, count: 3, filteredToGrade: true,
+  });
+  assert.equal(good.basis, "ask-over-suspect-sale");
+  assert.equal(good.price, 17377.5);
 });

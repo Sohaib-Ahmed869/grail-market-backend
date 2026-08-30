@@ -115,7 +115,21 @@ export async function priceForSlab(
     ask?.median != null &&
     ask.filteredToGrade &&
     ask.count >= 2 &&
-    gradeIsInverted(byGrader[G] ?? {}, grade)
+    gradeIsInverted(byGrader[G] ?? {}, grade) &&
+    // The correction has to go the way the fault points.
+    //
+    // An inversion says this grade is priced too LOW — below the grade
+    // beneath it. So a replacement that is lower STILL cannot be the fix; it
+    // is a second, larger error arriving to overwrite the first. Without this
+    // test the Gold Star's $10,500 BGS 8.5 was replaced by $430, because the
+    // ask pool had filled with Charizards from other hundred-card sets and the
+    // cheapest of them was an XY Flashfire. A$14,594 became A$379.44 on a card
+    // with three genuine listings above A$24,000.
+    //
+    // A pure direction test, with no threshold to tune: if the asking market
+    // does not clear the figure it claims to be correcting, it is not
+    // describing this card and we keep the sale, flagged, instead.
+    ask.median > r.price
   ) {
     return {
       price: ask.median,
