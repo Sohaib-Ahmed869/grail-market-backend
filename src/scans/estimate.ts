@@ -44,10 +44,23 @@ export type Refusal = {
   explain: string;
 };
 
-/** Below this a "market" is a couple of people guessing. */
-const MIN_LISTINGS = 3;
-/** Above this spread the listings are not one product. */
-const MAX_SPREAD = 8;
+/** Below this there is nothing to compute a quantile over at all.
+ *
+ *  Was 3, on the reasoning that a couple of listings is an anecdote. That is
+ *  true, and it is what CONFIDENCE is for — a refusal should mean "these
+ *  listings do not agree with each other", not "there are not many of them".
+ *  At 3 nearly half of all keys returned no number, most of them cards where
+ *  the two listings we had were the right card and in close agreement, and a
+ *  blank is not more honest than "$X, from 2 listings, confidence 1 of 5". */
+const MIN_LISTINGS = 2;
+/** Above this spread the listings are not one product.
+ *
+ *  Was 8, which refused genuinely variable markets: a BGS 9.5 Portgas.D.Ace
+ *  with a sound $1,100 median across the right listings was rejected because
+ *  its high and low differ by more than eight times, which for a thin graded
+ *  market is ordinary rather than suspicious. 12 still catches the case this
+ *  exists for — a $4 sleeve beside a $94,000 prize card is 20,000x. */
+const MAX_SPREAD = 12;
 /** Asks are biased high, so the sale sits low in their distribution. */
 const QUANTILE = 0.3;
 /** Measured, not borrowed.
@@ -145,12 +158,18 @@ export function estimateFromListings(
   } = {},
 ): Estimate | Refusal {
   const weighted = weighListings(listings, opts);
-  // Above the age floor, not above it plus a margin. ageWeight() bottoms out
-  // at 0.15 deliberately, so that a year-old ask still counts a little — and a
-  // cut at 0.2 discarded exactly those, which made the floor dead code and
-  // meant a card whose every listing was stale produced no estimate rather
-  // than a low-confidence one.
-  const usable = weighted.filter((w) => w.weight >= 0.1);
+  // The three weights MULTIPLY, so their floors compound: an old listing from
+  // an unknown seller that does not match the label scores
+  // 0.15 x 0.35 x 0.45 = 0.024, far under a cut set by thinking about the age
+  // floor alone. At 0.1 that discarded most of a thin card's listings and the
+  // estimator then refused for "too few", on cards it could perfectly well
+  // have priced — 46% of keys were coming back with no number.
+  //
+  // This gate is only meant to exclude listings that are not evidence at all.
+  // How much each one counts is what the weights are for, and they already do
+  // it: a stale unknown-seller listing survives here and then barely moves the
+  // quantile, which is the correct treatment rather than deletion.
+  const usable = weighted.filter((w) => w.weight >= 0.02);
   const prices = usable.map((w) => ({ v: w.listing.price as number, w: w.weight }));
 
   const label =

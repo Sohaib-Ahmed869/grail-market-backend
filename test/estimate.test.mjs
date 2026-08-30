@@ -89,11 +89,22 @@ test("the extreme listing is surfaced, never silently dropped", () => {
 
 // ---- refusing --------------------------------------------------------------
 
-test("two listings is an anecdote, and produces no number", () => {
+test("two listings are thin, and that is what confidence is for", () => {
+  // This used to refuse. Refusing on sample size left nearly half of all
+  // cards with no number at all, most of them cases where the two listings we
+  // had were the right card and agreed closely — and a blank is not more
+  // honest than "$X, from 2 listings, confidence 1 of 5". A refusal should
+  // mean the listings DISAGREE, which is the test below this one.
   const r = estimateFromListings([listing(100), listing(120)], { grader: "PSA", grade: 10 });
+  assert.ok(!isRefusal(r), "two agreeing listings are worth a hedged number");
+  assert.equal(r.confidence, 1, "and the hedge is the confidence, not a blank");
+  assert.equal(r.sampleSize, 2);
+});
+
+test("one listing is still nothing", () => {
+  const r = estimateFromListings([listing(100)], { grader: "PSA", grade: 10 });
   assert.ok(isRefusal(r));
   assert.equal(r.reason, "too-few");
-  assert.match(r.explain, /anecdote rather than a market/);
 });
 
 test("a 100x spread means several products, so it refuses", () => {
