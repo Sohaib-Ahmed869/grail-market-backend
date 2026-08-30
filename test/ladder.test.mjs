@@ -6,7 +6,7 @@
 // graders is the last resort and is always labelled.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { priceForGrade, sanityCheck } from "../src/scans/ladder.js";
+import { priceForGrade, sanityCheck, gradeIsInverted } from "../src/scans/ladder.js";
 
 const pt = (price, count = 20, confidence = "high") => ({ price, count, confidence });
 
@@ -161,4 +161,41 @@ test("an unfiltered or thin ask market cannot overrule anything", async () => {
     median: 17476, count: 1, filteredToGrade: true,
   });
   assert.equal(thin.basis, "observed");
+});
+
+// The Charizard Gold Star, cert #0011755115, exactly as the store held it.
+// BGS 8.5 came back at $10,500 from nine sales while the BGS 8 beneath it sat
+// at $12,715 from seven — a ladder that says half a grade of improvement cost
+// the owner two thousand dollars. Three BGS 8.5 copies were listed at a
+// A$24,153 median at the time and the owner had been valued at 25-30k.
+//
+// The inversion check below is what catches that. It was already written and
+// had never once run, because the scan path fetched the asking market ONLY
+// when there was no sale — so the one rule able to overrule a bad sale was
+// gated on that sale not existing. This pins both halves: the ladder is
+// detectably broken, and it is broken AT 8.5 rather than merely somewhere.
+const GOLD_STAR_BGS = {
+  "4": { price: 3850, sampleSize: 1 },
+  "4.5": { price: 6033.92, sampleSize: 2 },
+  "5.5": { price: 4952.41, sampleSize: 2 },
+  "6.5": { price: 6264.29, sampleSize: 2 },
+  "7.5": { price: 6350, sampleSize: 4 },
+  "8": { price: 12715, sampleSize: 7 },
+  "8.5": { price: 10500, sampleSize: 9 },
+  "9": { price: 21338.5, sampleSize: 4 },
+  "9.5": { price: 24156, sampleSize: 1 },
+};
+
+test("the Gold Star's 8.5 is identified as the broken rung, not the 8", () => {
+  assert.equal(gradeIsInverted(GOLD_STAR_BGS, 8.5), true, "8.5 sits under the 8");
+  // The 8 is the higher-priced side of the same inversion. Quoting it is not
+  // the error, so it must not be flagged — otherwise every inversion would
+  // suppress two grades and the fallback would spread instead of correcting.
+  assert.equal(gradeIsInverted(GOLD_STAR_BGS, 8), false);
+  assert.equal(gradeIsInverted(GOLD_STAR_BGS, 9), false, "the top of the ladder is sound");
+});
+
+test("a clean ladder asks for no second opinion", () => {
+  const sane = { "8": { price: 8000 }, "8.5": { price: 10500 }, "9": { price: 21338 } };
+  for (const g of [8, 8.5, 9]) assert.equal(gradeIsInverted(sane, g), false);
 });

@@ -12,7 +12,7 @@ import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
 import type { GradePoint } from "./gradedprices.js";
 import { gradedPricesFor, priceForSlab, estimateForSlab } from "./pricing.js";
-import { findInversions, soldVsAsk } from "./ladder.js";
+import { findInversions, soldVsAsk, gradeIsInverted } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, readOnePieceCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
@@ -953,6 +953,30 @@ export class ScansService {
         askGrader && askGrade != null
           ? scan.valuation.pricesByGrader?.[askGrader]?.[String(askGrade)]?.price
           : null;
+      // A recorded sale normally means the asking market is not needed. It is
+      // not enough when that sale contradicts its own grade ladder.
+      //
+      // The Charizard Gold Star came back at BGS 8.5 = $10,500 sitting UNDER
+      // the BGS 8 = $12,715 below it, while three BGS 8.5 copies were listed
+      // at a A$24,153 median and the owner had been told 25-30k. The ladder
+      // check that catches exactly this already existed in priceForSlab, and
+      // could never once have fired: it needs the asks, and the asks were only
+      // fetched when there was no sale to compare them against. A rule that
+      // runs only where its input is absent by construction is dead code.
+      //
+      // Same condition as the search path in market.controller.ts, so a scan
+      // and a search of one card cannot disagree about whether to look.
+      const soldIsSuspect = Boolean(
+        askGrader &&
+          askGrade != null &&
+          gradeIsInverted(scan.valuation.pricesByGrader?.[askGrader] ?? {}, askGrade),
+      );
+      const wantAsks = sold == null || soldIsSuspect;
+      if (soldIsSuspect) {
+        console.warn(
+          `[ask] ${askGrader} ${askGrade} = ${sold} is below a lower grade in its own ladder — fetching asks to check it`,
+        );
+      }
       // What the label and the card print, over and above the name.
       const askTokens = [
         codeRead?.code,
@@ -989,7 +1013,7 @@ export class ScansService {
         codeRead?.code || scan.identification?.localId || askTokens.filter(Boolean).length >= 2,
       );
       if (
-        sold == null &&
+        wantAsks &&
         scan.identification &&
         needsEnglishName(scan.identification.name) &&
         !hasPrintedId
@@ -997,7 +1021,7 @@ export class ScansService {
         console.warn(
           `[ask] no searchable name and no printed identifier for "${scan.identification.name}"`,
         );
-      } else if (sold == null && scan.identification) {
+      } else if (wantAsks && scan.identification) {
         try {
           // Which PRINTING is this copy? Nothing so far had to answer that:
           // the catalog match resolves a card NUMBER, and a number is not a
