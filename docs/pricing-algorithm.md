@@ -72,36 +72,38 @@ flowchart TD
 
 ## Measured accuracy
 
-Backtested against our own sold comps: the estimator sees **only live asks**,
-and its output is compared with a completed-sale figure it never saw. 26 pairs
-across six cards and six grading companies, every sold comp backed by 15 or
-more sales.
+Backtested against our own sold comps with `npm run backtest`: the estimator
+sees **only live asks**, and its output is compared with a completed-sale
+figure it never saw. **73 keys** across every card in the store holding a sold
+comp of 8 or more sales, spanning six grading companies.
 
 | metric | result |
 |---|---|
-| median absolute error | **7.0%** |
-| median error | +2.8% (very slightly high) |
-| within ±25% | **85%** |
-| within ±50% | **100%** |
-| refusals | 0 of 26 |
-| implied ask-to-sold | **0.827** |
+| keys tested | 73 |
+| priced | 64 |
+| refused | 9 (8 too-wide, 1 too-few) |
+| median absolute error | **13.3%** |
+| median signed error | +2.7% (very slightly high) |
+| within ±25% | **66%** |
+| within ±50% | **78%** |
+| implied sold ÷ weighted p30 | **0.81** against the 0.83 we apply |
 
-Two things that matter more than the headline number.
+Re-run it before quoting these anywhere. The market moves and so do they.
 
-**The first run was worse, and finding out why was the point.** Four of 26 came
-back 91-97% low, all on one card. The estimator was right and the *sold comp*
-was wrong: we had asked our price source for "Mega Charizard X ex, 013,
-Phantasmal Flames" and it answered with 130/094 — the Special Illustration
-Rare, a different card — because the matcher accepted a set-name match with no
-number match. A $2,200 SIR sale was filed against a $70 card. That is fixed
-(see `gradedprices.ts`) and the contaminated rows are purged. A backtest that
-only confirms what you hoped is not worth running.
+**These numbers replace an earlier, much flatter set** — 7.0% median error,
+85% within ±25%, 100% within ±50% — measured over 26 pairs across six cards.
+That run was not wrong so much as narrow: six well-covered cards, all of them
+ones we had already been debugging, which is close to selecting on the answer.
+Widening it to every key in the store put the median error at roughly double,
+and that is the number to plan against.
 
-**±25% is not precision, and this is not a price guide.** These are estimates
-built from asking prices for cards nobody has a recorded sale for. The
-honest claim is "the right order of magnitude, hedged, with its working shown"
-— not "accurate to the dollar". Where a real sale exists, it is used and none
-of this runs.
+The error is asymmetric and worth knowing about: the tail is on the HIGH side
+(+380%, +204%, +137% on the worst three) and there is nothing comparable below.
+That is the ask-to-sold discount being too small for cheap modern cards, where
+a $27 sale sits under $83 of asks nobody is paying. The 0.81 implied factor is
+a pool-wide median and hides that; a per-tier factor is the obvious next
+improvement, and until it exists a low-value estimate should be read as a
+ceiling rather than a midpoint.
 
 ## Signals
 
@@ -154,9 +156,9 @@ their ratio is observable. We compute it across every card where both exist,
 take a robust central estimate in log space, and shrink it toward the pool when
 thin — the same machinery as the cross-grader ratio, for the same reason.
 
-The pool-wide factor is **0.83**, and it is measured rather than borrowed: the
-backtest above put the median sold price at 0.827 of the weighted p30 of asks
-across 26 pairs. It began life as 0.85 reasoned across from property data, and
+The pool-wide factor is **0.83**, and it is measured rather than borrowed: a
+73-key backtest puts the median sold price at 0.81 of the weighted p30 of asks,
+against the 0.83 in the code. It began life as 0.85 reasoned across from property data, and
 landing within two points of that is reassuring — but the number in the code is
 now ours.
 
@@ -168,8 +170,8 @@ beats a constant we hide.
 
 The estimate is **not produced at all** when:
 
-- fewer than 3 usable listings survive weighting — that is anecdote, not market
-- the weighted spread `p90/p10` exceeds 8x — several products are mixed, and
+- fewer than 2 usable listings survive weighting — that is anecdote, not market
+- the weighted spread `p90/p10` exceeds 12x — several products are mixed, and
   averaging them describes none of them
 - no listing matches the label or printing, when the label gave us words to
   match on — we are looking at other cards
