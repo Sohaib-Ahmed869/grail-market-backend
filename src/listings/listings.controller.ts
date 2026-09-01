@@ -23,9 +23,10 @@ export class ListingsController {
     @Query("game") game?: string, @Query("grader") grader?: string,
     @Query("graded") graded?: string, @Query("min") min?: string,
     @Query("max") max?: string, @Query("sort") sort?: string,
+    @Query("catalogId") catalogId?: string,
   ) {
     const rows = await browseListings({
-      game: game ?? null, grader: grader ?? null,
+      game: game ?? null, grader: grader ?? null, catalogId: catalogId ?? null,
       graded: graded === "true" ? true : graded === "false" ? false : null,
       min: min ? Number(min) : null, max: max ? Number(max) : null,
       sort: sort ?? null,
@@ -95,6 +96,7 @@ export class ListingsController {
       setName: b.setName ?? null, cardNumber: b.cardNumber ?? null, game: b.game ?? null,
       imageUrl: b.imageUrl ?? null, grader: b.grader ?? null,
       grade: b.grade != null ? String(b.grade) : null, certNumber: b.certNumber ?? null,
+      variant: b.variant ?? null,
       isRaw: Boolean(b.isRaw), conditionNote: b.conditionNote ?? null,
       price: Number(b.price), currency: b.currency ?? "AUD",
       marketValue: b.marketValue != null ? Number(b.marketValue) : null,

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS listings (
   set_name     text,
   card_number  text,
   game         text,
+  variant      text,
   image_url    text,
   grader       text,
   grade        text,
@@ -43,6 +44,10 @@ CREATE TABLE IF NOT EXISTS listings (
 CREATE INDEX IF NOT EXISTS listings_live ON listings (status, featured_until DESC NULLS LAST, live_at DESC);
 CREATE INDEX IF NOT EXISTS listings_seller ON listings (seller_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS listings_card ON listings (catalog_id, status);
+
+-- CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+-- every column added after the first deploy needs its own idempotent ALTER.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS variant text;
 
 CREATE TABLE IF NOT EXISTS offers (
   offer_id   text PRIMARY KEY,
@@ -74,6 +79,9 @@ CREATE TABLE IF NOT EXISTS collection (
   added_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS collection_user ON collection (user_id, added_at DESC);
+
+ALTER TABLE collection ADD COLUMN IF NOT EXISTS variant text;
+ALTER TABLE collection ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 1;
 `;
 
 export async function initListings(): Promise<void> {
@@ -104,7 +112,8 @@ export async function createListing(l: {
   sellerId: string; catalogId?: string | null; cardName: string;
   setName?: string | null; cardNumber?: string | null; game?: string | null;
   imageUrl?: string | null; grader?: string | null; grade?: string | null;
-  certNumber?: string | null; isRaw?: boolean; conditionNote?: string | null;
+  certNumber?: string | null; variant?: string | null;
+  isRaw?: boolean; conditionNote?: string | null;
   price: number; currency?: string; marketValue?: number | null;
   strategy?: string | null; delivery?: string[]; suburb?: string | null;
 }): Promise<string | null> {
@@ -114,12 +123,13 @@ export async function createListing(l: {
   await pool.query(
     `insert into listings
       (listing_id, seller_id, catalog_id, card_name, set_name, card_number, game,
-       image_url, grader, grade, cert_number, is_raw, condition_note,
+       image_url, grader, grade, cert_number, variant, is_raw, condition_note,
        price, currency, market_value, strategy, delivery, suburb)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
     [id, l.sellerId, l.catalogId ?? null, l.cardName, l.setName ?? null,
      l.cardNumber ?? null, l.game ?? null, l.imageUrl ?? null, l.grader ?? null,
-     l.grade ?? null, l.certNumber ?? null, l.isRaw ?? false, l.conditionNote ?? null,
+     l.grade ?? null, l.certNumber ?? null, l.variant ?? null,
+     l.isRaw ?? false, l.conditionNote ?? null,
      l.price, l.currency ?? "AUD", l.marketValue ?? null, l.strategy ?? null,
      l.delivery ?? [], l.suburb ?? null],
   );
@@ -175,6 +185,7 @@ export async function moveListing(
  *  on screen so nobody thinks it is arbitrary. */
 export async function browseListings(q: {
   game?: string | null; grader?: string | null; graded?: boolean | null;
+  catalogId?: string | null;
   min?: number | null; max?: number | null; sort?: string | null; limit?: number;
 }): Promise<Listing[]> {
   const pool = storePool();
@@ -184,6 +195,9 @@ export async function browseListings(q: {
   const add = (sql: string, v: any) => { args.push(v); where.push(sql.replace("?", `$${args.length}`)); };
 
   if (q.game) add("game = ?", q.game);
+  // Every live copy of one exact card — what a scan result means by
+  // "available now", and what a buyer comparing two listings needs.
+  if (q.catalogId) add("catalog_id = ?", q.catalogId);
   if (q.grader) add("grader = ?", q.grader.toUpperCase());
   if (q.graded === true) where.push("grader is not null");
   if (q.graded === false) where.push("grader is null");
