@@ -24,9 +24,11 @@ export class ListingsController {
     @Query("graded") graded?: string, @Query("min") min?: string,
     @Query("max") max?: string, @Query("sort") sort?: string,
     @Query("catalogId") catalogId?: string,
+    @Req() req?: Request,
   ) {
     const rows = await browseListings({
       game: game ?? null, grader: grader ?? null, catalogId: catalogId ?? null,
+      excludeSeller: req ? callerId(req) : null,
       graded: graded === "true" ? true : graded === "false" ? false : null,
       min: min ? Number(min) : null, max: max ? Number(max) : null,
       sort: sort ?? null,

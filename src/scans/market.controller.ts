@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from "@nestjs/common";
+import { Controller, Get, Param, Query } from "@nestjs/common";
 import { fxRates } from "./fx.js";
 import { scanBudget } from "./budget.js";
 import { fetchListings } from "./ebaylistings.js";
@@ -6,6 +6,7 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
+import { getSet, listSets } from "./sets.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
@@ -80,6 +81,23 @@ export class MarketController {
         language: lang === "en" || lang === "ja" || lang === "zh" ? lang : null,
       })) ?? empty
     );
+  }
+
+  /** Every set, newest first.
+   *
+   *  The default view of search, because a search box only helps someone who
+   *  already knows the name. Browsing to the set and finding the card in it is
+   *  how someone holding an unfamiliar card gets to its page at all. */
+  @Get("sets")
+  async sets() {
+    return { sets: await listSets() };
+  }
+
+  /** One set and the cards in it. */
+  @Get("sets/:setId")
+  async set(@Param("setId") setId: string) {
+    const s = await getSet(setId);
+    return s ?? { error: "not-found", setId };
   }
 
   // Search by name, for when the card is not in front of you.

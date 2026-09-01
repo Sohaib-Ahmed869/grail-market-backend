@@ -185,7 +185,7 @@ export async function moveListing(
  *  on screen so nobody thinks it is arbitrary. */
 export async function browseListings(q: {
   game?: string | null; grader?: string | null; graded?: boolean | null;
-  catalogId?: string | null;
+  catalogId?: string | null; excludeSeller?: string | null;
   min?: number | null; max?: number | null; sort?: string | null; limit?: number;
 }): Promise<Listing[]> {
   const pool = storePool();
@@ -198,6 +198,9 @@ export async function browseListings(q: {
   // Every live copy of one exact card — what a scan result means by
   // "available now", and what a buyer comparing two listings needs.
   if (q.catalogId) add("catalog_id = ?", q.catalogId);
+  // Your own cards are not shopping. They are already yours, and seeing them
+  // in the market feed makes the feed look busier than it is.
+  if (q.excludeSeller) add("seller_id <> ?", q.excludeSeller);
   if (q.grader) add("grader = ?", q.grader.toUpperCase());
   if (q.graded === true) where.push("grader is not null");
   if (q.graded === false) where.push("grader is null");
