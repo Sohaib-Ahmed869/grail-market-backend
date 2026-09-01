@@ -18,7 +18,8 @@
     "vision:install": "node scripts/venv-python.mjs -m pip install -r vision/requirements.txt",
     "ingest": "tsx src/ingest/main.ts",
     "keys": "tsx src/ingest/keys.ts",
-    "backtest": "tsx src/ingest/backtest.ts"
+    "backtest": "tsx src/ingest/backtest.ts",
+    "stripe:setup": "tsx src/billing/setup.ts"
   },
   "dependencies": {
     "@grailcard/shared": "*",
