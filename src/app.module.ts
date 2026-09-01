@@ -1,3 +1,4 @@
+import { SalesController } from "./sales/sales.controller.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { BillingController } from "./billing/billing.controller.js";
 import { IdentityController } from "./identity/identity.controller.js";
@@ -8,7 +9,7 @@ import { ScansController } from "./scans/scans.controller.js";
 import { ScansService } from "./scans/scans.service.js";
 
 @Module({
-  controllers: [ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController],
+  controllers: [ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController],
   providers: [ScansService],
 })
 export class AppModule {}
