@@ -11,6 +11,7 @@ loadEnvFile();
 import { AppModule } from "./app.module.js";
 import { initStore, storeConfigured } from "./cards.store.js";
 import { warmSearchIndex } from "./scans/search.js";
+import { initIdentity } from "./identity/store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 
 const PORT = Number(process.env.PORT ?? 8180);
@@ -18,9 +19,23 @@ const PORT = Number(process.env.PORT ?? 8180);
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableCors();
+  // The Didit webhook signature is computed over the body, so the raw text has
+  // to survive JSON parsing. Express discards it by default and the signature
+  // then cannot be checked at all.
+  app.use(
+    express.json({
+      limit: "2mb",
+      verify: (req: any, _res, buf) => {
+        if (buf?.length) req.rawBody = buf.toString("utf8");
+      },
+    }),
+  );
   app.use("/storage", express.static(join(process.cwd(), "storage")));
   // shared card store — best-effort, a scan still works without it
-  if (storeConfigured()) await initStore();
+  if (storeConfigured()) {
+    await initStore();
+    await initIdentity();
+  }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 
   // Provider keys live encrypted in the store. Loaded before we start serving
