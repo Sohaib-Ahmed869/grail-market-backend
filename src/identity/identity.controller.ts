@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { createSession, diditConfigured, verifyWebhook, type DiditStatus } from "./didit.js";
+import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applyStatus, readStatus, recordEvent } from "./store.js";
 
 @Controller("identity")
@@ -17,9 +18,10 @@ export class IdentityController {
     if (!diditConfigured()) {
       return { error: "identity-unconfigured", message: "DIDIT_API_KEY is not set" };
     }
-    // TODO(auth): read from the authenticated session once the app has one.
-    const userId = String(req.header("x-user-id") ?? body?.userId ?? "").trim();
-    if (!userId) return { error: "no-user", message: "user id required" };
+    // The signed token, never a header the caller filled in. An app that can
+    // name its own user can verify itself as somebody else.
+    const userId = callerId(req);
+    if (!userId) return { error: "unauthenticated", message: "Sign in first." };
 
     try {
       const s = await createSession(userId);

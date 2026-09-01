@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/commo
 import type { Request } from "express";
 import { PLANS, findPlan, type PlanId } from "./plans.js";
 import { createCheckout, stripeConfigured, verifyStripe } from "./stripe.js";
+import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applySubscription, readSubscription, recordEvent } from "./store.js";
 
 /** Where Stripe sends the browser when Checkout ends. A deep link, so the app
@@ -32,9 +33,10 @@ export class BillingController {
     if (!stripeConfigured()) {
       return { error: "billing-unconfigured", message: "STRIPE_SECRET_KEY is not set" };
     }
-    // TODO(auth): from the authenticated session once one exists.
-    const userId = String(req.header("x-user-id") ?? body?.userId ?? "").trim();
-    if (!userId) return { error: "no-user", message: "user id required" };
+    // The signed token, never a header the caller filled in — otherwise
+    // anyone could subscribe, or verify, as anyone.
+    const userId = callerId(req);
+    if (!userId) return { error: "unauthenticated", message: "Sign in first." };
     if (!findPlan(String(body?.planId))) {
       return { error: "bad-plan", message: "Unknown plan." };
     }

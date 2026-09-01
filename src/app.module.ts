@@ -1,3 +1,4 @@
+import { AuthController } from "./auth/auth.controller.js";
 import { BillingController } from "./billing/billing.controller.js";
 import { IdentityController } from "./identity/identity.controller.js";
 import { Module } from "@nestjs/common";
@@ -7,7 +8,7 @@ import { ScansController } from "./scans/scans.controller.js";
 import { ScansService } from "./scans/scans.service.js";
 
 @Module({
-  controllers: [ScansController, MarketController, EbayController, IdentityController, BillingController],
+  controllers: [ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController],
   providers: [ScansService],
 })
 export class AppModule {}
