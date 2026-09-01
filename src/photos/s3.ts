@@ -34,6 +34,10 @@ function s3(): S3Client {
  *  close up on the back, one two three four sides on the back and one two
  *  three four on the front" — prescribed angles are what a downloaded stock
  *  photo cannot satisfy, which is the point of requiring them. */
+/** The floor for publishing. Four is the smallest set that shows both faces
+ *  and proves the seller turned the card over; ten earns Photo Verified. */
+export const MIN_PHOTOS = 4;
+
 export const ANGLES = [
   "front", "back",
   "front-tl", "front-tr", "front-bl", "front-br",

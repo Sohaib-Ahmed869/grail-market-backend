@@ -3,7 +3,7 @@ import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
+import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
@@ -142,6 +142,20 @@ export class ListingsController {
     if (!b?.declared) {
       return { error: "not-declared", message: "All four statements must be agreed." };
     }
+
+    // The photograph floor is enforced here as well as in the app. A rule that
+    // only the client applies is not a rule — it is a suggestion that anything
+    // holding a session token can ignore.
+    const l = await getListing(id);
+    if (!l || l.seller_id !== me) return { error: "not-found" };
+    const shots = Array.isArray(l.photos) ? l.photos.length : 0;
+    if (shots < MIN_PHOTOS) {
+      return {
+        error: "too-few-photos",
+        message: `${MIN_PHOTOS} photographs are needed before a listing can go up. This one has ${shots}.`,
+      };
+    }
+
     const r = await moveListing(id, "in_review", { sellerId: me });
     return r.ok ? { status: "in_review" } : { error: r.why };
   }
