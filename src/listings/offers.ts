@@ -41,7 +41,8 @@ export async function offersByBuyer(buyerId: string): Promise<Offer[]> {
   const pool = storePool();
   if (!pool) return [];
   const r = await pool.query(
-    `select o.*, l.card_name, l.image_url, l.price as asking
+    `select o.*, l.card_name, l.image_url, l.price as asking,
+            l.grader, l.grade, l.set_name
        from offers o join listings l using (listing_id)
       where o.buyer_id = $1 order by o.created_at desc`,
     [buyerId],

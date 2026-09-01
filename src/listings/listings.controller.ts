@@ -214,7 +214,14 @@ export class ListingsController {
     if (!me) return { error: "unauthenticated" };
     const l = await getListing(id);
     if (!l || l.seller_id !== me) return { error: "not-found" };
-    return { offers: await offersFor(id), marketValue: l.market_value, asking: l.price };
+    // The card the offers are on, not just the numbers. A grade is half of
+    // what an offer means: 900 is generous for a PSA 8 and an insult for a 10.
+    return {
+      offers: await offersFor(id),
+      marketValue: l.market_value, asking: l.price,
+      cardName: l.card_name, setName: l.set_name,
+      grader: l.grader, grade: l.grade, imageUrl: l.image_url,
+    };
   }
 
   @Post(":id/offers")
