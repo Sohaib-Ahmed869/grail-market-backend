@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
+import { note as noteEvent } from "../messages/store.js";
 
 // Offers.
 //
@@ -76,6 +77,17 @@ export async function settleOffer(
       where offer_id = $3`,
     [action, action === "countered" ? counterAmount ?? null : null, offerId],
   );
+
+  // Recorded in the conversation as well as on the offer: the thread is
+  // where both people will look for what was agreed.
+  const money = `${o.currency === "AUD" ? "A$" : "$"}${Math.round(
+    action === "countered" ? (counterAmount ?? Number(o.amount)) : Number(o.amount),
+  ).toLocaleString()}`;
+  await noteEvent(o.listing_id, o.buyer_id, {
+    accepted: `Offer accepted at ${money}. Arrange the handover here.`,
+    declined: `Offer of ${money} declined.`,
+    countered: `Seller countered at ${money}.`,
+  }[action]).catch(() => null);
 
   if (action === "accepted") {
     await pool.query(

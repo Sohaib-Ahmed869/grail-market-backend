@@ -10,6 +10,7 @@ import {
 } from "./store.js";
 import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
+import { note } from "../messages/store.js";
 
 const need = (req: Request) => callerId(req);
 
@@ -238,6 +239,11 @@ export class ListingsController {
       listingId: id, buyerId: me, sellerId: l.seller_id,
       amount, currency: l.currency, note: b?.note ?? null,
     });
+    // The offer opens the conversation. Two people negotiating in a thread
+    // that does not mention the offer they are negotiating is how a deal ends
+    // up agreed in two places with different numbers.
+    await note(id, me, `Offer of ${l.currency === "AUD" ? "A$" : "$"}${Math.round(amount).toLocaleString()} made.`)
+      .catch(() => null);
     return { offerId, amount };
   }
 
