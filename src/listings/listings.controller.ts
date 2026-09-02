@@ -263,7 +263,10 @@ export class ListingsController {
  *  and saves are for the person who listed it, never for the person deciding
  *  whether it has gone stale. */
 function publicShape(l: any) {
-  const { views, saves, reject_reason, seller_id, ...rest } = l;
+  // seller_id stays: it is an opaque handle, and without it a buyer cannot
+  // open the page of the person they are about to send money to. Views and
+  // saves are still the seller's own business — same number, opposite use.
+  const { views, saves, reject_reason, ...rest } = l;
   return { ...rest, featured: l.featured_until != null && new Date(l.featured_until) > new Date() };
 }
 const sellerShape = (l: any) => ({
