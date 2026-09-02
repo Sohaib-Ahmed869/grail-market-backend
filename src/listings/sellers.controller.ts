@@ -1,5 +1,6 @@
 import { Controller, Get, Param } from "@nestjs/common";
 import { storePool } from "../cards.store.js";
+import { reputationFor, sellerMetrics } from "../ratings/store.js";
 
 // Who you are dealing with.
 //
@@ -32,7 +33,9 @@ export class SellersController {
     const row = u.rows[0];
     if (!row) return { error: "not-found" };
 
-    const [counts, listings] = await Promise.all([
+    const [reputation, metrics, counts, listings] = await Promise.all([
+      reputationFor(sellerId),
+      sellerMetrics(sellerId),
       pool.query(
         `select
            count(*) filter (where status = 'live')::int  as live,
@@ -65,6 +68,8 @@ export class SellersController {
       live: c.live,
       sold: c.sold,
       firstListed: c.first_listed,
+      reputation,
+      metrics,
       suburbs,
       listings: listings.rows.map((l: any) => {
         const { views, saves, reject_reason, ...rest } = l;
