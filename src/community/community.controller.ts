@@ -3,7 +3,7 @@ import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import {
   addComment, commentsFor, createCommunity, createPost, feed, getPost,
-  listCommunities, setMembership, vote,
+  listCommunities, reactTo, setMembership, vote,
 } from "./store.js";
 import { censor } from "./censor.js";
 
@@ -103,6 +103,21 @@ export class CommunityController {
         ? "Contact details were removed from your reply."
         : null,
     };
+  }
+
+  /** The same five as messages. Five is enough for a card forum: agreement,
+   *  approval, excitement, amusement, and a deal. */
+  @Post("react")
+  async react(@Req() req: Request, @Body() b: any) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated", message: "Sign in to react." };
+    const allowed = ["👍", "👌", "🔥", "😂", "🤝"];
+    const emoji = b?.emoji == null ? null : String(b.emoji);
+    if (emoji !== null && !allowed.includes(emoji)) return { error: "invalid" };
+    const kind = b?.kind === "comment" ? "comment" : "post";
+    if (!b?.id) return { error: "invalid" };
+    const ok = await reactTo(kind, String(b.id), me, emoji);
+    return ok ? { ok: true, emoji } : { error: "not-found" };
   }
 
   /** Up, down, or take it back. `value` is 1, -1, or 0. */

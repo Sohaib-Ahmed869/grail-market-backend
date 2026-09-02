@@ -74,6 +74,22 @@ CREATE TABLE IF NOT EXISTS comments (
 );
 CREATE INDEX IF NOT EXISTS comments_post ON comments (post_id, created_at);
 
+-- Emoji, separate from votes.
+--
+-- A vote is a judgement about whether a post belongs here; a reaction is a
+-- response to what it says. Merging them would mean choosing between "this is
+-- worth reading" and "this made me laugh", which are not the same signal and
+-- should not compete for one control.
+CREATE TABLE IF NOT EXISTS emoji_reactions (
+  target_kind text NOT NULL,          -- 'post' | 'comment'
+  target_id   text NOT NULL,
+  user_id     text NOT NULL,
+  emoji       text NOT NULL,
+  reacted_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (target_kind, target_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS emoji_target ON emoji_reactions (target_kind, target_id);
+
 CREATE TABLE IF NOT EXISTS votes (
   target_kind text NOT NULL,           -- 'post' | 'comment'
   target_id   text NOT NULL,
@@ -228,7 +244,11 @@ export async function feed(opts: {
             p.created_at, p.flags,
             c.slug, c.name as community_name, c.accent,
             u.name as author_name, u.avatar as author_avatar,
-            coalesce(v.value, 0) as my_vote
+            coalesce(v.value, 0) as my_vote,
+            coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
+                        from emoji_reactions e
+                       where e.target_kind = 'post' and e.target_id = p.post_id),
+                     '[]'::json) as reactions
        from posts p
        join communities c on c.community_id = p.community_id
        left join users u on u.user_id = p.author_id
@@ -250,7 +270,11 @@ export async function getPost(postId: string, userId: string | null): Promise<Ro
             p.created_at, p.flags,
             c.slug, c.name as community_name, c.accent,
             u.name as author_name, u.avatar as author_avatar,
-            coalesce(v.value, 0) as my_vote
+            coalesce(v.value, 0) as my_vote,
+            coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
+                        from emoji_reactions e
+                       where e.target_kind = 'post' and e.target_id = p.post_id),
+                     '[]'::json) as reactions
        from posts p
        join communities c on c.community_id = p.community_id
        left join users u on u.user_id = p.author_id
@@ -268,7 +292,15 @@ export async function commentsFor(postId: string, userId: string | null): Promis
     `select k.comment_id, k.post_id, k.parent_id, k.author_id, k.body, k.score,
             k.removed, k.created_at, k.flags,
             u.name as author_name, u.avatar as author_avatar,
-            coalesce(v.value, 0) as my_vote
+            coalesce(v.value, 0) as my_vote,
+            coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
+                        from emoji_reactions e
+                       where e.target_kind = 'comment' and e.target_id = k.comment_id),
+                     '[]'::json) as reactions,
+            coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
+                        from emoji_reactions e
+                       where e.target_kind = 'post' and e.target_id = p.post_id),
+                     '[]'::json) as reactions
        from comments k
        left join users u on u.user_id = k.author_id
        left join votes v on v.target_kind = 'comment' and v.target_id = k.comment_id and v.user_id = $2
@@ -368,6 +400,38 @@ export async function vote(
       : "update comments set score = $2 where comment_id = $1",
     [targetId, score]);
   return score;
+}
+
+/** React to a post or a comment. Same rule as messages: one per person,
+ *  repeating it takes it back. */
+export async function reactTo(
+  kind: "post" | "comment", targetId: string, userId: string, emoji: string | null,
+): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+
+  if (!emoji) {
+    await pool.query(
+      "delete from emoji_reactions where target_kind=$1 and target_id=$2 and user_id=$3",
+      [kind, targetId, userId]);
+    return true;
+  }
+  const existing = await pool.query(
+    "select emoji from emoji_reactions where target_kind=$1 and target_id=$2 and user_id=$3",
+    [kind, targetId, userId]);
+  if (existing.rows[0]?.emoji === emoji) {
+    await pool.query(
+      "delete from emoji_reactions where target_kind=$1 and target_id=$2 and user_id=$3",
+      [kind, targetId, userId]);
+    return true;
+  }
+  await pool.query(
+    `insert into emoji_reactions (target_kind, target_id, user_id, emoji)
+     values ($1,$2,$3,$4)
+     on conflict (target_kind, target_id, user_id)
+       do update set emoji = $4, reacted_at = now()`,
+    [kind, targetId, userId, emoji]);
+  return true;
 }
 
 export async function setMembership(
