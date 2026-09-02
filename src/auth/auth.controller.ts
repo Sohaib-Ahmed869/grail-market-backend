@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { authConfigured, mintToken, readToken } from "./tokens.js";
-import { createUser, findById, signIn } from "./store.js";
+import { createUser, findById, signIn, setAvatar } from "./store.js";
 
 /** Who is calling.
  *
@@ -46,6 +46,17 @@ export class AuthController {
   }
 
   /** The token's holder, for an app restoring a session. */
+  /** Choose a face. The value is a key from the app's own set — the list
+   *  lives in the client because that is where the artwork is, and the column
+   *  is capped so a bad client cannot use it as free storage. */
+  @Post("avatar")
+  async avatar(@Req() req: Request, @Body() b: { avatar?: string | null }) {
+    const id = callerId(req);
+    if (!id) return { error: "unauthenticated" };
+    const ok = await setAvatar(id, b?.avatar ?? null);
+    return ok ? { avatar: b?.avatar ?? null } : { error: "not-found" };
+  }
+
   @Get("me")
   async me(@Req() req: Request) {
     const id = callerId(req);

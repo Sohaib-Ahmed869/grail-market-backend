@@ -21,7 +21,7 @@ export class SellersController {
     if (!pool) return { error: "no-store" };
 
     const u = await pool.query(
-      `select u.user_id, u.name, u.created_at,
+      `select u.user_id, u.name, u.avatar, u.created_at,
               coalesce(i.status, 'Not Started') as identity,
               i.verified_at
          from users u
@@ -58,6 +58,7 @@ export class SellersController {
     return {
       sellerId: row.user_id,
       name: row.name,
+      avatar: row.avatar ?? null,
       memberSince: row.created_at,
       verified: row.identity === "Approved",
       verifiedAt: row.verified_at,

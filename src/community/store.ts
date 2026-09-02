@@ -210,7 +210,7 @@ export async function feed(opts: {
   args.push(Math.min(opts.limit ?? 40, 100));
   const r = await pool.query(
     `select p.*, c.slug, c.name as community_name, c.accent,
-            u.name as author_name,
+            u.name as author_name, u.avatar as author_avatar,
             coalesce(v.value, 0) as my_vote
        from posts p
        join communities c on c.community_id = p.community_id
@@ -228,7 +228,7 @@ export async function getPost(postId: string, userId: string | null): Promise<Ro
   const pool = storePool();
   if (!pool) return null;
   const r = await pool.query(
-    `select p.*, c.slug, c.name as community_name, c.accent, u.name as author_name,
+    `select p.*, c.slug, c.name as community_name, c.accent, u.name as author_name, u.avatar as author_avatar,
             coalesce(v.value, 0) as my_vote
        from posts p
        join communities c on c.community_id = p.community_id
@@ -244,7 +244,7 @@ export async function commentsFor(postId: string, userId: string | null): Promis
   const pool = storePool();
   if (!pool) return [];
   const r = await pool.query(
-    `select k.*, u.name as author_name, coalesce(v.value, 0) as my_vote
+    `select k.*, u.name as author_name, u.avatar as author_avatar, coalesce(v.value, 0) as my_vote
        from comments k
        left join users u on u.user_id = k.author_id
        left join votes v on v.target_kind = 'comment' and v.target_id = k.comment_id and v.user_id = $2

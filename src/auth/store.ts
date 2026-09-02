@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS users (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS users_email ON users (lower(email));
+
+-- A face to put on a post. One of a fixed set the app draws, so this is a
+-- key like "charizard", never a URL and never an upload — nothing here can
+-- become a place to host an image we did not choose.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar text;
 `;
 
 export async function initAuth(): Promise<void> {
@@ -40,9 +45,21 @@ export async function findById(userId: string): Promise<User | null> {
   const pool = storePool();
   if (!pool) return null;
   const r = await pool.query(
-    "select user_id, email, name, phone from users where user_id = $1", [userId],
+    "select user_id, email, name, phone, avatar from users where user_id = $1", [userId],
   );
   return r.rows[0] ?? null;
+}
+
+/** Set the picture. Validated against the app's own list by the caller, and
+ *  length-capped here so a bad client cannot write an essay into the column. */
+export async function setAvatar(userId: string, avatar: string | null): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+  const r = await pool.query(
+    "update users set avatar = $2 where user_id = $1",
+    [userId, avatar ? avatar.slice(0, 40) : null],
+  );
+  return (r.rowCount ?? 0) > 0;
 }
 
 export type CreateResult =
