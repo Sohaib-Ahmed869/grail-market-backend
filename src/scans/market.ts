@@ -2,6 +2,8 @@
 // powered by JustTCG's price-history fields. Cached hard (12h) to stay well
 // inside the free tier alongside scan-time price lookups.
 
+import { searchCards } from "./search.js";
+
 export type PulseCard = {
   label: string;
   setName: string;
@@ -12,6 +14,10 @@ export type PulseCard = {
   low7: number | null;
   high7: number | null;
   spark: number[]; // recent price points, oldest -> newest
+  /** filled from our own catalogue, so the app can show the card rather than
+   *  a row in a table */
+  imageUrl?: string | null;
+  cardId?: string | null;
 };
 
 const WATCHLIST: { q: string; game: string; label?: string }[] = [
@@ -162,6 +168,26 @@ export async function marketPulse(): Promise<PulseCard[]> {
       /* best-effort per card */
     }
   }
+  // The artwork, from our own catalogue.
+  //
+  // The price feed has no images, which is why this data could only ever be
+  // drawn as a table. In a card marketplace the art IS the card — a list of
+  // names and percentages is a stock screener with Pokemon in it. The lookup
+  // is our own search, so it costs nothing, and the whole pulse is cached for
+  // the same period as the prices.
+  await Promise.all(out.map(async (c) => {
+    try {
+      const hits = await searchCards(`${c.label} ${c.setName ?? ""}`.trim(), 1);
+      const hit = hits[0];
+      if (hit?.imageUrl) {
+        c.imageUrl = hit.imageUrl;
+        c.cardId = hit.cardId;
+      }
+    } catch {
+      // a mover without a picture is still a mover
+    }
+  }));
+
   if (out.length > 0) cache = { at: Date.now(), data: out };
   return out;
 }
