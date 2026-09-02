@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
+import { censor } from "./censor.js";
 
 // Communities, posts, comments, votes.
 //
@@ -48,6 +49,17 @@ CREATE TABLE IF NOT EXISTS posts (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS posts_community ON posts (community_id, created_at DESC);
+
+-- What the author actually typed, kept only for moderation. Never returned by
+-- any read endpoint: the masked text is what the forum shows, and this column
+-- exists so a moderator can see whether someone is repeatedly trying to move
+-- deals off the platform. A pattern of attempts is the signal; one masked
+-- number tells you nothing.
+ALTER TABLE posts    ADD COLUMN IF NOT EXISTS raw_title text;
+ALTER TABLE posts    ADD COLUMN IF NOT EXISTS raw_body  text;
+ALTER TABLE posts    ADD COLUMN IF NOT EXISTS flags     text[] NOT NULL DEFAULT '{}';
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS raw_body  text;
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS flags     text[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS posts_new ON posts (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS comments (
@@ -209,7 +221,10 @@ export async function feed(opts: {
 
   args.push(Math.min(opts.limit ?? 40, 100));
   const r = await pool.query(
-    `select p.*, c.slug, c.name as community_name, c.accent,
+    `select p.post_id, p.community_id, p.author_id, p.title, p.body, p.image_url,
+            p.catalog_id, p.listing_id, p.score, p.comment_count, p.removed,
+            p.created_at, p.flags,
+            c.slug, c.name as community_name, c.accent,
             u.name as author_name, u.avatar as author_avatar,
             coalesce(v.value, 0) as my_vote
        from posts p
@@ -228,7 +243,11 @@ export async function getPost(postId: string, userId: string | null): Promise<Ro
   const pool = storePool();
   if (!pool) return null;
   const r = await pool.query(
-    `select p.*, c.slug, c.name as community_name, c.accent, u.name as author_name, u.avatar as author_avatar,
+    `select p.post_id, p.community_id, p.author_id, p.title, p.body, p.image_url,
+            p.catalog_id, p.listing_id, p.score, p.comment_count, p.removed,
+            p.created_at, p.flags,
+            c.slug, c.name as community_name, c.accent,
+            u.name as author_name, u.avatar as author_avatar,
             coalesce(v.value, 0) as my_vote
        from posts p
        join communities c on c.community_id = p.community_id
@@ -244,7 +263,10 @@ export async function commentsFor(postId: string, userId: string | null): Promis
   const pool = storePool();
   if (!pool) return [];
   const r = await pool.query(
-    `select k.*, u.name as author_name, u.avatar as author_avatar, coalesce(v.value, 0) as my_vote
+    `select k.comment_id, k.post_id, k.parent_id, k.author_id, k.body, k.score,
+            k.removed, k.created_at, k.flags,
+            u.name as author_name, u.avatar as author_avatar,
+            coalesce(v.value, 0) as my_vote
        from comments k
        left join users u on u.user_id = k.author_id
        left join votes v on v.target_kind = 'comment' and v.target_id = k.comment_id and v.user_id = $2
@@ -265,12 +287,21 @@ export async function createPost(p: {
   const communityId = c.rows[0]?.community_id;
   if (!communityId) return null;
 
+  // Masked on the way in, not on the way out. A read-time mask has to be
+  // applied by every endpoint that ever touches the row, and the one that
+  // forgets is the leak.
+  const t = censor(p.title);
+  const b = censor(p.body ?? "");
+  const flags = [...new Set([...t.hits, ...b.hits])];
+
   const id = `p_${randomUUID().slice(0, 12)}`;
   await pool.query(
-    `insert into posts (post_id, community_id, author_id, title, body, image_url, catalog_id, listing_id, score)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,1)`,
-    [id, communityId, p.authorId, p.title, p.body ?? null, p.imageUrl ?? null,
-     p.catalogId ?? null, p.listingId ?? null],
+    `insert into posts (post_id, community_id, author_id, title, body, image_url,
+                        catalog_id, listing_id, score, raw_title, raw_body, flags)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,$10,$11)`,
+    [id, communityId, p.authorId, t.text, b.text || null, p.imageUrl ?? null,
+     p.catalogId ?? null, p.listingId ?? null,
+     t.masked ? p.title : null, b.masked ? p.body : null, flags],
   );
   // Posting is an upvote. It keeps a new post off the bottom of hot, and it
   // means the score never starts at zero, which reads as "nobody liked this"
@@ -286,11 +317,13 @@ export async function addComment(c: {
 }): Promise<string | null> {
   const pool = storePool();
   if (!pool) return null;
+  const r = censor(c.body);
   const id = `k_${randomUUID().slice(0, 12)}`;
   await pool.query(
-    `insert into comments (comment_id, post_id, parent_id, author_id, body, score)
-     values ($1,$2,$3,$4,$5,1)`,
-    [id, c.postId, c.parentId ?? null, c.authorId, c.body],
+    `insert into comments (comment_id, post_id, parent_id, author_id, body, score, raw_body, flags)
+     values ($1,$2,$3,$4,$5,1,$6,$7)`,
+    [id, c.postId, c.parentId ?? null, c.authorId, r.text,
+     r.masked ? c.body : null, r.hits],
   );
   await pool.query(
     `insert into votes (target_kind, target_id, user_id, value) values ('comment',$1,$2,1)

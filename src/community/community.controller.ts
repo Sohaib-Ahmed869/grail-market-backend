@@ -5,6 +5,7 @@ import {
   addComment, commentsFor, createCommunity, createPost, feed, getPost,
   listCommunities, setMembership, vote,
 } from "./store.js";
+import { censor } from "./censor.js";
 
 @Controller("community")
 export class CommunityController {
@@ -71,7 +72,17 @@ export class CommunityController {
       imageUrl: b.imageUrl ?? null,
       catalogId: b.catalogId ?? null, listingId: b.listingId ?? null,
     });
-    return id ? { postId: id } : { error: "no-community", message: "That community does not exist." };
+    if (!id) return { error: "no-community", message: "That community does not exist." };
+    // Say what was taken out. A post that quietly comes back different is
+    // worse than one that was refused.
+    const c = censor(`${title} ${b.body ?? ""}`);
+    return {
+      postId: id,
+      masked: c.masked,
+      notice: c.masked
+        ? "Contact details were removed. Keep the deal on GrailMarket — off-platform trades have no ID check, no record and no way to dispute."
+        : null,
+    };
   }
 
   @Post("post/:postId/comment")
@@ -83,7 +94,15 @@ export class CommunityController {
     const id = await addComment({
       postId, authorId: me, body: body.slice(0, 8000), parentId: b?.parentId ?? null,
     });
-    return id ? { commentId: id } : { error: "no-store" };
+    if (!id) return { error: "no-store" };
+    const c = censor(body);
+    return {
+      commentId: id,
+      masked: c.masked,
+      notice: c.masked
+        ? "Contact details were removed from your reply."
+        : null,
+    };
   }
 
   /** Up, down, or take it back. `value` is 1, -1, or 0. */
