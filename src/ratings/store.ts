@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { canRate, type Deal } from "./rules.js";
+import { notify } from "../notifications/store.js";
 
 // Reputation, tied to trades that happened.
 //
@@ -103,6 +104,13 @@ export async function rate(
      raterId === deal.sellerId ? "seller" : "buyer",
      stars, comment?.slice(0, 600) ?? null],
   );
+  await notify({
+    userId: verdict.counterparty, kind: "rating", actorId: raterId,
+    title: `You were rated ${stars} out of 5`,
+    body: comment?.slice(0, 140) ?? null,
+    href: `/seller/${verdict.counterparty}`,
+  });
+
   return { ok: true, ratingId: id };
 }
 

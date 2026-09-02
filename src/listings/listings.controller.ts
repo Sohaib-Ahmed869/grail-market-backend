@@ -11,6 +11,7 @@ import {
 import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
+import { notify } from "../notifications/store.js";
 
 const need = (req: Request) => callerId(req);
 
@@ -170,6 +171,19 @@ export class ListingsController {
     // TODO(admin): gate on an admin role once one exists.
     const to = b?.approve ? "live" : "rejected";
     const r = await moveListing(id, to, { reason: b?.reason ?? null });
+    if (r.ok) {
+      const l = await getListing(id);
+      if (l) {
+        await notify({
+          userId: l.seller_id, kind: "listing",
+          title: b?.approve
+            ? `${l.card_name} is live on the market`
+            : `${l.card_name} needs changes before it can go up`,
+          body: b?.approve ? null : (b?.reason ?? null),
+          href: b?.approve ? `/listing/${id}` : "/mylistings",
+        });
+      }
+    }
     return r.ok ? { status: to } : { error: r.why };
   }
 
@@ -242,8 +256,14 @@ export class ListingsController {
     // The offer opens the conversation. Two people negotiating in a thread
     // that does not mention the offer they are negotiating is how a deal ends
     // up agreed in two places with different numbers.
-    await note(id, me, `Offer of ${l.currency === "AUD" ? "A$" : "$"}${Math.round(amount).toLocaleString()} made.`)
-      .catch(() => null);
+    const money = `${l.currency === "AUD" ? "A$" : "$"}${Math.round(amount).toLocaleString()}`;
+    await note(id, me, `Offer of ${money} made.`).catch(() => null);
+    await notify({
+      userId: l.seller_id, kind: "offer", actorId: me,
+      title: `${money} offered on ${l.card_name}`,
+      body: b?.note ? String(b.note).slice(0, 140) : null,
+      href: `/offers/${id}`,
+    });
     return { offerId, amount };
   }
 

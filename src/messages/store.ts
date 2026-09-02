@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { censor } from "../community/censor.js";
+import { notify } from "../notifications/store.js";
 
 // Buyer and seller talking about one card.
 //
@@ -140,6 +141,16 @@ export async function say(
     [id, threadId, senderId, c.text, c.masked ? body : null, c.hits, kind],
   );
   await pool.query("update threads set last_at = now() where thread_id = $1", [threadId]);
+
+  const to = thread.buyer_id === senderId ? thread.seller_id : thread.buyer_id;
+  const who = await pool.query("select name from users where user_id = $1", [senderId]);
+  await notify({
+    userId: to, kind: "message", actorId: senderId,
+    title: `${who.rows[0]?.name ?? "Someone"} sent you a message`,
+    body: c.text.slice(0, 140),
+    href: `/messages/${threadId}`,
+  });
+
   return { messageId: id, masked: c.masked };
 }
 

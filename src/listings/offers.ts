@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { note as noteEvent } from "../messages/store.js";
+import { notify } from "../notifications/store.js";
 
 // Offers.
 //
@@ -88,6 +89,17 @@ export async function settleOffer(
     declined: `Offer of ${money} declined.`,
     countered: `Seller countered at ${money}.`,
   }[action]).catch(() => null);
+
+  await notify({
+    userId: o.buyer_id, kind: "offer-settled", actorId: sellerId,
+    title: {
+      accepted: `Your ${money} offer was accepted`,
+      declined: `Your ${money} offer was declined`,
+      countered: `Countered at ${money}`,
+    }[action],
+    body: action === "accepted" ? "Arrange the handover in your messages." : null,
+    href: `/messages`,
+  });
 
   if (action === "accepted") {
     await pool.query(

@@ -21,6 +21,7 @@ import { initWatchlist } from "./watchlist/store.js";
 import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initMessages } from "./messages/store.js";
+import { initNotifications } from "./notifications/store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 
 const PORT = Number(process.env.PORT ?? 8180);
@@ -53,6 +54,7 @@ async function bootstrap() {
     await initPush();
     await initRatings();
     await initMessages();
+    await initNotifications();
   }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 

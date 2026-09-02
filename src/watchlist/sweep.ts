@@ -1,6 +1,7 @@
 import { gradedPricesFor } from "../scans/pricing.js";
 import { send } from "../push/expo.js";
 import { tokensFor } from "../push/store.js";
+import { notify } from "../notifications/store.js";
 import { recordPrice, watchedCards } from "./store.js";
 
 export { addWatch, listWatches, removeWatch, setAlert } from "./store.js";
@@ -44,6 +45,15 @@ export async function sweep(): Promise<SweepResult> {
 
       const up = hit.pct > 0;
       const grade = hit.grader ? ` ${hit.grader} ${hit.grade ?? ""}`.trim() : "";
+      // The record first, the interruption second. A push that was missed
+      // while the phone was face down still has to be findable.
+      await notify({
+        userId: hit.userId, kind: "price",
+        title: `${hit.cardName}${grade} ${up ? "up" : "down"} ${Math.abs(hit.pct).toFixed(1)}%`,
+        body: `US$${Math.round(hit.from).toLocaleString()} → US$${Math.round(hit.to).toLocaleString()} since we last told you.`,
+        href: c.catalog_id ? `/card/${c.catalog_id}` : "/watchlist",
+      });
+
       const tokens = await tokensFor(hit.userId);
       for (const to of tokens) {
         messages.push({
