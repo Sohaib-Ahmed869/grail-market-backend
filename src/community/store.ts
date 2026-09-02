@@ -296,10 +296,6 @@ export async function commentsFor(postId: string, userId: string | null): Promis
             coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
                         from emoji_reactions e
                        where e.target_kind = 'comment' and e.target_id = k.comment_id),
-                     '[]'::json) as reactions,
-            coalesce((select json_agg(json_build_object('emoji', e.emoji, 'userId', e.user_id))
-                        from emoji_reactions e
-                       where e.target_kind = 'post' and e.target_id = p.post_id),
                      '[]'::json) as reactions
        from comments k
        left join users u on u.user_id = k.author_id
