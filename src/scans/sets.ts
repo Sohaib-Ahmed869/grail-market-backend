@@ -26,9 +26,16 @@ export type SetDetail = SetSummary & {
   cards: { cardId: string; name: string; localId: string; imageUrl: string | null }[];
 };
 
-/** An image URL from TCGdex needs its size and extension. The bare URL 404s,
- *  which is why every set logo was blank the first time this was tried. */
-const img = (base: string | null | undefined, size = "low") =>
+/** TCGdex asset URLs come back without an extension, and the two kinds want
+ *  different suffixes:
+ *
+ *    set logo    .../base1/logo      -> logo.png
+ *    card art    .../base1/4         -> 4/low.png
+ *
+ *  Appending "/low.png" to a logo 404s, which is exactly what turned every
+ *  set tile into a blank white box. Verified against the CDN, not guessed. */
+const logoUrl = (base: string | null | undefined) => (base ? `${base}.png` : null);
+const cardUrl = (base: string | null | undefined, size = "low") =>
   base ? `${base}/${size}.png` : null;
 
 async function json<T>(path: string): Promise<T | null> {
@@ -51,8 +58,8 @@ export async function listSets(): Promise<SetSummary[]> {
   const sets: SetSummary[] = raw.map((s) => ({
     setId: s.id,
     name: s.name,
-    logo: img(s.logo, "low"),
-    symbol: img(s.symbol, "low"),
+    logo: logoUrl(s.logo),
+    symbol: logoUrl(s.symbol),
     total: s.cardCount?.total ?? 0,
     official: s.cardCount?.official ?? 0,
     releasedAt: s.releaseDate ?? null,
@@ -74,8 +81,8 @@ export async function getSet(setId: string): Promise<SetDetail | null> {
   const detail: SetDetail = {
     setId: s.id,
     name: s.name,
-    logo: img(s.logo, "low"),
-    symbol: img(s.symbol, "low"),
+    logo: logoUrl(s.logo),
+    symbol: logoUrl(s.symbol),
     total: s.cardCount?.total ?? 0,
     official: s.cardCount?.official ?? 0,
     releasedAt: s.releaseDate ?? null,
@@ -83,7 +90,7 @@ export async function getSet(setId: string): Promise<SetDetail | null> {
       cardId: c.id,
       name: c.name,
       localId: String(c.localId ?? ""),
-      imageUrl: img(c.image, "low"),
+      imageUrl: cardUrl(c.image, "low"),
     })),
   };
   setCache.set(setId, detail);
