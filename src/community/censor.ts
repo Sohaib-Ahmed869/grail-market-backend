@@ -27,6 +27,16 @@ const WORD_DIGITS: Record<string, string> = {
   five: "5", six: "6", seven: "7", eight: "8", nine: "9",
 };
 
+/** Words that make a long number legitimate.
+ *
+ *  This is the inversion that makes the rule work. A phone number can be
+ *  written a hundred ways — 343423423, 8 8 1 2 3 4 5 6 7 8, +61, (04) — and
+ *  chasing each shape is a losing game. So any long run of digits is treated
+ *  as a number to be removed UNLESS it is labelled as something else. In a
+ *  graded-card marketplace the legitimate long numbers are certificates, and
+ *  they are always introduced by one of these. */
+const LABELLED = /(?:cert(?:ificate|ification)?|serial|psa|bgs|cgc|sgc|tag|ace|ags|slab)\s*#?\s*$/i;
+
 const PHONE_PATTERNS: RegExp[] = [
   // +61 412 345 678 / +14155550132 — any international form
   /\+\d[\d\s().-]{7,17}\d/g,
@@ -67,6 +77,30 @@ const OFF_PLATFORM =
   /\b(whats\s?app|whatsap|telegram|signal|snap(?:chat)?|insta(?:gram)?|discord|messenger|viber|wechat|kik)\b/gi;
 const HANDLE = /(?:^|\s)@[A-Za-z0-9._]{3,30}\b/g;
 
+/** Any run of seven or more digits, however it is spaced.
+ *
+ *  Seven because that is the shortest thing anyone can dial, and because
+ *  prices, years and card numbers are all shorter. Separators inside the run
+ *  are ignored, so "8 8 1 2 3 4 5 6 7 8" and "415 555 0132" are the same
+ *  thing to this rule — which is the point: the previous version matched
+ *  shapes, and a person who wants to leak a number simply picks a different
+ *  shape. */
+function maskLongRuns(s: string): { text: string; found: boolean } {
+  let found = false;
+  const run = /\d(?:[\s.\-()]*\d){6,}/g;
+  const text = s.replace(run, (m, offset: number, whole: string) => {
+    const before = whole.slice(Math.max(0, offset - 24), offset);
+    // a certificate, a card number, or part of a larger token
+    if (LABELLED.test(before)) return m;
+    if (/[\/#\w]$/.test(before)) return m;
+    const after = whole[offset + m.length] ?? " ";
+    if (/[\/]/.test(after)) return m;
+    found = true;
+    return MASK;
+  });
+  return { text, found };
+}
+
 /** Spelled-out digits: "oh four one two ..." — only masked when there are
  *  enough in a row to be a number rather than a sentence about a card. */
 function maskWordDigits(s: string): { text: string; found: boolean } {
@@ -104,12 +138,20 @@ export function censor(input: string): CensorResult {
       const before = whole[offset - 1] ?? " ";
       const after = whole[offset + m.length] ?? " ";
       if (/[\/#\w]/.test(before) || /[\/#]/.test(after)) return m;
+      // A Beckett certificate starts 00 and is ten digits, which is exactly
+      // the shape of a landline. The label is the only thing that separates
+      // them, so this rule has to read it too — not just the newer one.
+      if (LABELLED.test(whole.slice(Math.max(0, offset - 24), offset))) return m;
       // needs enough digits to be a number at all
       if ((m.match(/\d/g) ?? []).length < 8) return m;
       if (!hits.includes("phone")) hits.push("phone");
       return MASK;
     });
   }
+
+  const runs = maskLongRuns(text);
+  text = runs.text;
+  if (runs.found && !hits.includes("phone")) hits.push("phone");
 
   const spelled = maskWordDigits(text);
   text = spelled.text;

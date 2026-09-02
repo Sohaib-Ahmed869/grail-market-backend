@@ -142,3 +142,42 @@ test("card talk is not a domain", () => {
     assert.equal(censor(s).text, s, `mangled: ${s}`);
   }
 });
+
+// ---- numbers written to dodge the rules ------------------------------------
+
+test("a long run of digits is a number, whatever it starts with", () => {
+  for (const s of [
+    "Tell tweeter 343423423",
+    "hit me 415 555 0132",
+    "8 8 1 2 3 4 5 6 7 8",
+    "my num 61412884019",
+    "9 1 2 3 4 5 6 7 8 9",
+  ]) {
+    const out = censor(s).text;
+    assert.match(out, /\[contact removed\]/, `survived: ${s}`);
+    assert.ok(!/\d{7}/.test(out.replace(/\s/g, "")), `digits left: ${out}`);
+  }
+});
+
+test("but a labelled certificate is not", () => {
+  // These are the reason the rule cannot simply eat every long number: a
+  // graded-card forum is full of them, and they are always labelled.
+  for (const s of [
+    "cert 82749113",
+    "PSA cert #91330214",
+    "certification 0015521873",
+    "BGS 0015521873",
+    "CGC 4113200871 came back a 9",
+  ]) {
+    assert.equal(censor(s).text, s, `mangled a cert: ${s}`);
+  }
+});
+
+test("prices, years and card codes are still safe", () => {
+  for (const s of [
+    "sold for 41500", "paid $3,950 in 2024", "Base Set 4/102",
+    "OP13-119", "#215 alt art", "1999 holo",
+  ]) {
+    assert.equal(censor(s).text, s, `mangled: ${s}`);
+  }
+});
