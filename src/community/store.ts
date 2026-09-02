@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS communities (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- Communities made by members, not just the five we seeded.
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS created_by text;
+
 CREATE TABLE IF NOT EXISTS community_members (
   community_id text NOT NULL,
   user_id      text NOT NULL,
@@ -121,6 +124,57 @@ const HOT = `
 `;
 
 export type Row = Record<string, any>;
+
+/** Names that cannot be taken.
+ *
+ *  Either they are routes in the app, or they are the kind of name that would
+ *  let someone impersonate us to the people using it. */
+const RESERVED = new Set([
+  "admin", "api", "grail", "grailmarket", "market", "support", "help", "mod",
+  "moderator", "staff", "official", "new", "all", "feed", "post", "settings",
+]);
+
+export type MakeResult =
+  | { ok: true; slug: string }
+  | { ok: false; why: "taken" | "reserved" | "bad-slug" | "bad-name" | "no-store" };
+
+/** A member making a community.
+ *
+ *  The slug is the address, so it is checked hard: lower case, starts with a
+ *  letter or digit, three to twenty-one characters. The rules are Reddit's
+ *  because the shape people expect from a community name is Reddit's, and a
+ *  name that works there and not here is a papercut with no upside.
+ *
+ *  Whoever makes it joins it. A community of nobody, made by somebody who is
+ *  not in it, is the emptiest thing a forum can contain. */
+export async function createCommunity(c: {
+  slug: string; name: string; tagline?: string | null;
+  description?: string | null; accent?: string | null; userId: string;
+}): Promise<MakeResult> {
+  const pool = storePool();
+  if (!pool) return { ok: false, why: "no-store" };
+
+  const slug = c.slug.trim().toLowerCase();
+  const name = c.name.trim();
+  if (!/^[a-z0-9][a-z0-9_-]{2,20}$/.test(slug)) return { ok: false, why: "bad-slug" };
+  if (RESERVED.has(slug)) return { ok: false, why: "reserved" };
+  if (name.length < 3 || name.length > 60) return { ok: false, why: "bad-name" };
+
+  const exists = await pool.query("select 1 from communities where slug = $1", [slug]);
+  if (exists.rowCount) return { ok: false, why: "taken" };
+
+  const id = `c_${randomUUID().slice(0, 12)}`;
+  await pool.query(
+    `insert into communities (community_id, slug, name, tagline, description, accent, created_by)
+     values ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, slug, name, c.tagline?.trim() || null, c.description?.trim() || null,
+     c.accent ?? null, c.userId],
+  );
+  await pool.query(
+    `insert into community_members (community_id, user_id) values ($1,$2)
+     on conflict do nothing`, [id, c.userId]);
+  return { ok: true, slug };
+}
 
 export async function listCommunities(userId: string | null): Promise<Row[]> {
   const pool = storePool();

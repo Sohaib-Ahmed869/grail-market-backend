@@ -2,8 +2,8 @@ import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import {
-  addComment, commentsFor, createPost, feed, getPost, listCommunities,
-  setMembership, vote,
+  addComment, commentsFor, createCommunity, createPost, feed, getPost,
+  listCommunities, setMembership, vote,
 } from "./store.js";
 
 @Controller("community")
@@ -13,6 +13,27 @@ export class CommunityController {
   @Get()
   async communities(@Req() req: Request) {
     return { communities: await listCommunities(callerId(req)) };
+  }
+
+  /** A member making a community. */
+  @Post()
+  async make(@Req() req: Request, @Body() b: any) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated", message: "Sign in to make a community." };
+    const r = await createCommunity({
+      slug: String(b?.slug ?? ""), name: String(b?.name ?? ""),
+      tagline: b?.tagline ?? null, description: b?.description ?? null,
+      accent: b?.accent ?? null, userId: me,
+    });
+    if (r.ok) return { slug: r.slug };
+    const message = {
+      taken: "That name is already taken.",
+      reserved: "That name is reserved.",
+      "bad-slug": "Addresses are 3–21 characters: lower case letters, numbers, - or _.",
+      "bad-name": "Give it a name between 3 and 60 characters.",
+      "no-store": "The store is unavailable.",
+    }[r.why];
+    return { error: r.why, message };
   }
 
   /** The feed. `slug` narrows it to one community; without it, everything. */
