@@ -38,6 +38,12 @@ async function dealFor(listingId: string, userId: string): Promise<Deal | null> 
   const r = await pool.query(
     `select l.status as listing_status, l.seller_id,
             o.buyer_id, o.status as offer_status,
+            -- Whether this person has ANY offer here, accepted or not. Without
+            -- it, someone whose offer is still open reads as a stranger and
+            -- gets told "you weren't part of this deal" — which is both wrong
+            -- and the opposite of encouraging: they were, it just is not done.
+            exists (select 1 from offers q
+                     where q.listing_id = l.listing_id and q.buyer_id = $2) as is_bidder,
             exists (select 1 from ratings x
                      where x.listing_id = l.listing_id and x.rater_id = $2) as already
        from listings l
@@ -48,10 +54,15 @@ async function dealFor(listingId: string, userId: string): Promise<Deal | null> 
   );
   const row = r.rows[0];
   if (!row) return null;
+
+  // If no offer has been accepted there is no buyer yet. Treating the person
+  // asking as the buyer — when they have an offer on this listing — is what
+  // lets the rules answer "not complete" instead of "not you".
+  const buyerId = row.buyer_id ?? (row.is_bidder ? userId : "");
   return {
     listingStatus: row.listing_status,
     sellerId: row.seller_id,
-    buyerId: row.buyer_id ?? "",
+    buyerId,
     offerStatus: row.offer_status ?? "none",
     already: Boolean(row.already),
   };

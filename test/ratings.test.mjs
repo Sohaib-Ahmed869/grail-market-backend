@@ -54,3 +54,11 @@ test("stars are one to five, whole numbers", () => {
   assert.equal(validStars(1), true);
   assert.equal(validStars(5), true);
 });
+
+test("someone with an open offer is told the deal is not done, not that they are a stranger", () => {
+  // The listing resolver treats a bidder as the buyer when no offer has been
+  // accepted yet, precisely so this reads correctly.
+  const r = canRate("u_buyer", deal({ offerStatus: "open", listingStatus: "live" }));
+  assert.equal(r.ok, false);
+  assert.equal(r.why, "not-complete");
+});
