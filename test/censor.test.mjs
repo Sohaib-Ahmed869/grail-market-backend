@@ -101,3 +101,16 @@ test("masking is idempotent — running it twice changes nothing", () => {
   const once = censor("call 0412 345 678").text;
   assert.equal(censor(once).text, once);
 });
+
+// ---- everywhere one member's typing reaches another ------------------------
+
+test("the shapes that actually leaked", () => {
+  // an offer note went out unmasked and reached the seller's notification
+  const offer = censor("Hey my number is 09012312321");
+  assert.equal(offer.masked, true);
+  assert.ok(!/\d{6}/.test(offer.text));
+
+  // eleven digits with no separators, which the first pattern set missed
+  assert.match(censor("09012312321").text, /\[contact removed\]/);
+  assert.match(censor("call 090 1231 2321").text, /\[contact removed\]/);
+});

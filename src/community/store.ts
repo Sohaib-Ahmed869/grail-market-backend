@@ -179,7 +179,9 @@ export async function createCommunity(c: {
   await pool.query(
     `insert into communities (community_id, slug, name, tagline, description, accent, created_by)
      values ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, slug, name, c.tagline?.trim() || null, c.description?.trim() || null,
+    [id, slug, name,
+     c.tagline ? censor(c.tagline.trim()).text : null,
+     c.description ? censor(c.description.trim()).text : null,
      c.accent ?? null, c.userId],
   );
   await pool.query(

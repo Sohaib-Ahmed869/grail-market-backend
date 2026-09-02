@@ -12,6 +12,7 @@ import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
+import { censor } from "../community/censor.js";
 
 const need = (req: Request) => callerId(req);
 
@@ -101,7 +102,10 @@ export class ListingsController {
       imageUrl: b.imageUrl ?? null, grader: b.grader ?? null,
       grade: b.grade != null ? String(b.grade) : null, certNumber: b.certNumber ?? null,
       variant: b.variant ?? null,
-      isRaw: Boolean(b.isRaw), conditionNote: b.conditionNote ?? null,
+      isRaw: Boolean(b.isRaw),
+      // A seller can put a number in the condition note just as easily as in
+      // a message. Public text is public text.
+      conditionNote: b.conditionNote ? censor(String(b.conditionNote)).text : null,
       price: Number(b.price), currency: b.currency ?? "AUD",
       marketValue: b.marketValue != null ? Number(b.marketValue) : null,
       strategy: b.strategy ?? null, delivery: b.delivery ?? [], suburb: b.suburb ?? null,
@@ -249,9 +253,14 @@ export class ListingsController {
     const amount = Number(b?.amount);
     if (!(amount > 0)) return { error: "invalid", message: "Enter an amount." };
 
+    // The note travels to the seller and into a notification body, so it is
+    // the same exposure as a message and gets the same treatment. It did not
+    // have it, and a phone number went straight through.
+    const noteText = b?.note ? censor(String(b.note)).text : null;
+
     const offerId = await makeOffer({
       listingId: id, buyerId: me, sellerId: l.seller_id,
-      amount, currency: l.currency, note: b?.note ?? null,
+      amount, currency: l.currency, note: noteText,
     });
     // The offer opens the conversation. Two people negotiating in a thread
     // that does not mention the offer they are negotiating is how a deal ends
@@ -261,7 +270,7 @@ export class ListingsController {
     await notify({
       userId: l.seller_id, kind: "offer", actorId: me,
       title: `${money} offered on ${l.card_name}`,
-      body: b?.note ? String(b.note).slice(0, 140) : null,
+      body: noteText ? noteText.slice(0, 140) : null,
       href: `/offers/${id}`,
     });
     return { offerId, amount };
