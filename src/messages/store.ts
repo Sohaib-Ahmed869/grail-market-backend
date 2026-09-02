@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread_id, created_at);
+
+-- Reactions. One per person per message: tapping the same one again takes it
+-- back, tapping a different one moves it. A message with fourteen reactions
+-- from two people is a toy, not a conversation.
+CREATE TABLE IF NOT EXISTS message_reactions (
+  message_id text NOT NULL,
+  user_id    text NOT NULL,
+  emoji      text NOT NULL,
+  reacted_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (message_id, user_id)
+);
 `;
 
 export async function initMessages(): Promise<void> {
@@ -115,7 +126,11 @@ export async function messagesIn(threadId: string, userId: string): Promise<any[
 
   const r = await pool.query(
     `select m.message_id, m.thread_id, m.sender_id, m.body, m.kind, m.flags,
-            m.read_at, m.created_at, u.name as sender_name, u.avatar as sender_avatar
+            m.read_at, m.created_at, u.name as sender_name, u.avatar as sender_avatar,
+            coalesce(
+              (select json_agg(json_build_object('emoji', x.emoji, 'userId', x.user_id))
+                 from message_reactions x where x.message_id = m.message_id),
+              '[]'::json) as reactions
        from messages m
        left join users u on u.user_id = m.sender_id
       where m.thread_id = $1 order by m.created_at`,
@@ -166,6 +181,39 @@ export async function note(listingId: string, buyerId: string, text: string): Pr
      values ($1,$2,$3,$4,'event')`,
     [id, opened.threadId, "system", text]);
   await pool.query("update threads set last_at = now() where thread_id = $1", [opened.threadId]);
+}
+
+/** React, change reaction, or take it back by repeating it. */
+export async function react(
+  messageId: string, userId: string, emoji: string | null,
+): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+
+  // Only people in the thread may react to what is in it.
+  const ok = await pool.query(
+    `select 1 from messages m join threads t on t.thread_id = m.thread_id
+      where m.message_id = $1 and (t.buyer_id = $2 or t.seller_id = $2)`,
+    [messageId, userId]);
+  if (!ok.rowCount) return false;
+
+  if (!emoji) {
+    await pool.query(
+      "delete from message_reactions where message_id = $1 and user_id = $2",
+      [messageId, userId]);
+    return true;
+  }
+  await pool.query(
+    `insert into message_reactions (message_id, user_id, emoji) values ($1,$2,$3)
+     on conflict (message_id, user_id) do update
+       set emoji = case when message_reactions.emoji = $3 then null else $3 end,
+           reacted_at = now()`,
+    [messageId, userId, emoji]);
+  // the conflict branch above sets null to mean "took it back"
+  await pool.query(
+    "delete from message_reactions where message_id = $1 and user_id = $2 and emoji is null",
+    [messageId, userId]);
+  return true;
 }
 
 export async function unreadCount(userId: string): Promise<number> {

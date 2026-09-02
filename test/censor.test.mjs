@@ -114,3 +114,31 @@ test("the shapes that actually leaked", () => {
   assert.match(censor("09012312321").text, /\[contact removed\]/);
   assert.match(censor("call 090 1231 2321").text, /\[contact removed\]/);
 });
+
+// ---- links -----------------------------------------------------------------
+
+test("links go, however they are written", () => {
+  for (const l of [
+    "https://grailmarket-verify.com/pay",
+    "http://bit.ly/xyz",
+    "www.definitely-legit.net",
+    "check grailmarket-verify.com first",
+  ]) {
+    const out = censor(`have a look ${l}`).text;
+    assert.match(out, /\[link removed\]/, `survived: ${l}`);
+    assert.ok(!/verify\.com|bit\.ly|legit\.net/.test(out), `leaked domain: ${out}`);
+  }
+});
+
+test("an email is not shredded by the link rules", () => {
+  const r = censor("email me@example.com");
+  assert.match(r.text, /\[contact removed\]/);
+  assert.ok(!/\[link removed\]/.test(r.text), "the address was eaten by the link pass");
+  assert.ok(!/example/.test(r.text));
+});
+
+test("card talk is not a domain", () => {
+  for (const s of ["Base Set 4/102", "OP13-119", "PSA 10", "1st edition 2.0 holo"]) {
+    assert.equal(censor(s).text, s, `mangled: ${s}`);
+  }
+});

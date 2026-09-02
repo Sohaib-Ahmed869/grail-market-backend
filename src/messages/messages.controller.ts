@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
-import { messagesIn, openThread, say, threadsFor, unreadCount } from "./store.js";
+import { messagesIn, openThread, react, say, threadsFor, unreadCount } from "./store.js";
 
 @Controller("messages")
 export class MessagesController {
@@ -39,6 +39,20 @@ export class MessagesController {
     const t = await openThread(String(b.listingId), me);
     if (!t) return { error: "not-found", message: "That listing can't be messaged." };
     return { threadId: t.threadId };
+  }
+
+  /** The small set. A picker with a thousand emoji is a toy; five covers
+   *  "yes", "no", "thanks", "that is funny" and "I am interested", which is
+   *  the entire emotional range of a card negotiation. */
+  @Post("react/:messageId")
+  async addReaction(@Param("messageId") messageId: string, @Req() req: Request, @Body() b: any) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    const allowed = ["👍", "👌", "🔥", "😂", "🤝"];
+    const emoji = b?.emoji == null ? null : String(b.emoji);
+    if (emoji !== null && !allowed.includes(emoji)) return { error: "invalid" };
+    const ok = await react(messageId, me, emoji);
+    return ok ? { ok: true, emoji } : { error: "not-found" };
   }
 
   @Post(":threadId")

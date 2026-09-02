@@ -38,6 +38,23 @@ const PHONE_PATTERNS: RegExp[] = [
   /\b0\d{8,9}\b/g,
 ];
 
+/** Links.
+ *
+ *  Blocked outright rather than masked selectively, because the danger is not
+ *  what the URL says — it is that a plausible-looking address goes somewhere
+ *  else. "grailmarket-verify.com" reads as ours and is not, and no amount of
+ *  displaying the text protects someone who taps it. There is nothing a
+ *  seller needs a link for that a photograph or a card page does not cover.
+ */
+const LINK_PATTERNS: RegExp[] = [
+  /\bhttps?:\/\/\S+/gi,
+  /\bwww\.[\w-]+\.[a-z]{2,}\S*/gi,
+  // bare domains with a real-looking TLD, so "grailmarket-verify.com" goes
+  // even without a scheme. Restricted to common TLDs so "4/102" and
+  // "PSA 10" survive.
+  /\b[\w-]+\.(?:com|net|org|io|co|me|au|shop|store|xyz|link|app|site|info|biz)\b\S*/gi,
+];
+
 const EMAIL_PATTERNS: RegExp[] = [
   /\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b/g,
   // me (at) example (dot) com, me [at] example [dot] com, me AT example DOT com
@@ -66,8 +83,17 @@ export function censor(input: string): CensorResult {
   let text = input;
   const hits: string[] = [];
 
+  // Emails first: an address contains a domain, and running the link rules
+  // first would eat half of it and leave "me@" behind.
   for (const re of EMAIL_PATTERNS) {
     text = text.replace(re, () => { if (!hits.includes("email")) hits.push("email"); return MASK; });
+  }
+
+  for (const re of LINK_PATTERNS) {
+    text = text.replace(re, () => {
+      if (!hits.includes("link")) hits.push("link");
+      return "[link removed]";
+    });
   }
 
   for (const re of PHONE_PATTERNS) {
