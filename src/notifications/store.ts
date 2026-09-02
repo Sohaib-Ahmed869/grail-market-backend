@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
+import { send } from "../push/expo.js";
+import { tokensFor } from "../push/store.js";
 
 // What happened while you were away.
 //
@@ -39,6 +41,22 @@ export async function initNotifications(): Promise<void> {
 export type Kind =
   | "offer" | "offer-settled" | "message" | "listing" | "rating" | "price";
 
+/** Kinds worth interrupting someone for.
+ *
+ *  Not everything that belongs in the list belongs on a lock screen. An offer,
+ *  a reply, a decision on your listing and a price alert are all things a
+ *  person would want to know within the minute. A rating you received is not
+ *  — it can wait until they open the app, and a phone that buzzes for
+ *  everything gets its notifications turned off entirely. */
+const PUSHES: Record<Kind, boolean> = {
+  offer: true,
+  "offer-settled": true,
+  message: true,
+  listing: true,
+  price: true,
+  rating: false,
+};
+
 export async function notify(n: {
   userId: string; kind: Kind; title: string;
   body?: string | null; href?: string | null; actorId?: string | null;
@@ -55,6 +73,26 @@ export async function notify(n: {
     );
   } catch {
     // deliberately swallowed
+  }
+
+  // The single place a push is sent. Every event already comes through here to
+  // be recorded, so pushing here means a notification and its push can never
+  // disagree — and there is one list of what is worth interrupting for,
+  // rather than a decision repeated at each call site.
+  if (!PUSHES[n.kind]) return;
+  try {
+    const tokens = await tokensFor(n.userId);
+    if (tokens.length === 0) return;
+    await send(tokens.map((to) => ({
+      to,
+      title: n.title,
+      body: n.body ?? "",
+      // the tap target travels with it, so opening from the lock screen lands
+      // on the message or the offer rather than on the home screen
+      data: { kind: n.kind, href: n.href ?? null },
+    })));
+  } catch {
+    // a failed push is not worth failing the write that caused it
   }
 }
 

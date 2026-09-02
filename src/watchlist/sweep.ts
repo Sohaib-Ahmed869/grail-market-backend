@@ -1,6 +1,4 @@
 import { gradedPricesFor } from "../scans/pricing.js";
-import { send } from "../push/expo.js";
-import { tokensFor } from "../push/store.js";
 import { notify } from "../notifications/store.js";
 import { recordPrice, watchedCards } from "./store.js";
 
@@ -14,11 +12,10 @@ export { addWatch, listWatches, removeWatch, setAlert } from "./store.js";
 // lookup, and the sweep cannot quietly become a second, more expensive
 // pricing path. Cards are deduplicated before pricing for the same reason.
 
-export type SweepResult = { cards: number; fired: number; sent: number; dropped: number };
+export type SweepResult = { cards: number; fired: number };
 
 export async function sweep(): Promise<SweepResult> {
   const cards = await watchedCards();
-  const messages: { to: string; title: string; body: string; data: Record<string, unknown> }[] = [];
   let fired = 0;
 
   for (const c of cards) {
@@ -45,8 +42,8 @@ export async function sweep(): Promise<SweepResult> {
 
       const up = hit.pct > 0;
       const grade = hit.grader ? ` ${hit.grader} ${hit.grade ?? ""}`.trim() : "";
-      // The record first, the interruption second. A push that was missed
-      // while the phone was face down still has to be findable.
+      // notify() writes the row and sends the push. It used to do the push
+      // here as well, which would have delivered every price alert twice.
       await notify({
         userId: hit.userId, kind: "price",
         title: `${hit.cardName}${grade} ${up ? "up" : "down"} ${Math.abs(hit.pct).toFixed(1)}%`,
@@ -54,21 +51,8 @@ export async function sweep(): Promise<SweepResult> {
         href: c.catalog_id ? `/card/${c.catalog_id}` : "/watchlist",
       });
 
-      const tokens = await tokensFor(hit.userId);
-      for (const to of tokens) {
-        messages.push({
-          to,
-          title: `${hit.cardName}${grade} ${up ? "up" : "down"} ${Math.abs(hit.pct).toFixed(1)}%`,
-          // The figures are in the alert itself. A notification that says
-          // "a card you watch has moved" makes the person open the app to
-          // learn something we already knew.
-          body: `US$${Math.round(hit.from).toLocaleString()} → US$${Math.round(hit.to).toLocaleString()} since we last told you.`,
-          data: { kind: "watch", watchId: hit.watchId, catalogId: c.catalog_id },
-        });
-      }
     }
   }
 
-  const { sent, dropped } = await send(messages);
-  return { cards: cards.length, fired, sent, dropped };
+  return { cards: cards.length, fired };
 }
