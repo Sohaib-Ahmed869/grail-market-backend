@@ -1,5 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
+import { storePool } from "../cards.store.js";
+import { HIGH_VALUE_AUD, requiredFor, tierOf, whatIsMissing, type TierInputs } from "./tiers.js";
 import { createSession, diditConfigured, verifyWebhook, type DiditStatus } from "./didit.js";
 import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applyStatus, readStatus, recordEvent } from "./store.js";
@@ -36,6 +38,70 @@ export class IdentityController {
   }
 
   /** Where this member stands. */
+  /** The tier, and what stands between this person and the next one.
+   *
+   *  Computed from the identity row, the subscription and the sales history
+   *  rather than stored: a stored tier is a copy of facts that live elsewhere,
+   *  and the copy is wrong the moment any of them changes. */
+  @Get("tier/:userId")
+  async tier(@Param("userId") userId: string) {
+    const pool = storePool();
+    const row = await readStatus(userId);
+
+    let inputs: TierInputs = {
+      phoneVerified: false, hasPaymentInstrument: false,
+      identityStatus: row?.status ?? null, completedSales: 0, addressVerified: false,
+    };
+
+    if (pool) {
+      const r = await pool.query(
+        `select
+           (select phone is not null from users where user_id = $1) as has_phone,
+           (select exists (select 1 from subscriptions
+                            where user_id = $1 and status in ('active','trialing'))) as has_plan,
+           (select count(*)::int from listings
+             where seller_id = $1 and status = 'sold') as sold`,
+        [userId],
+      );
+      const x = r.rows[0] ?? {};
+      inputs = {
+        ...inputs,
+        // The phone is collected at sign-up and confirmed by OTP. That check
+        // is stubbed in development, so this reflects "we hold a number",
+        // which is what the column can honestly claim today.
+        phoneVerified: Boolean(x.has_phone),
+        hasPaymentInstrument: Boolean(x.has_plan),
+        completedSales: x.sold ?? 0,
+      };
+    }
+
+    const tier = tierOf(inputs);
+    return {
+      userId,
+      tier,
+      identityStatus: inputs.identityStatus ?? "Not Started",
+      highValueThresholdAud: HIGH_VALUE_AUD,
+      have: {
+        phone: inputs.phoneVerified,
+        payment: inputs.hasPaymentInstrument,
+        identity: inputs.identityStatus === "Approved",
+        address: inputs.addressVerified,
+        completedSales: inputs.completedSales,
+      },
+      gates: {
+        offer: { need: requiredFor("offer"), ok: tier >= requiredFor("offer"),
+                 missing: whatIsMissing(tier, requiredFor("offer"), inputs) },
+        sell: { need: requiredFor("sell"), ok: tier >= requiredFor("sell"),
+                missing: whatIsMissing(tier, requiredFor("sell"), inputs) },
+        sellHighValue: {
+          need: requiredFor("sell-high-value"),
+          ok: tier >= requiredFor("sell-high-value"),
+          missing: whatIsMissing(tier, requiredFor("sell-high-value"), inputs),
+        },
+      },
+    };
+  }
+
   @Get("status/:userId")
   async status(@Param("userId") userId: string) {
     const row = await readStatus(userId);
