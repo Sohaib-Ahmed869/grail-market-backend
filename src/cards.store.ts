@@ -204,6 +204,39 @@ CREATE INDEX IF NOT EXISTS card_prices_fetched_at_idx       ON card_prices (fetc
 // Postgres has had ADD COLUMN IF NOT EXISTS since 9.6, so additive migrations
 // can simply be listed here and re-run on every boot. Append, never edit: a
 // statement in this list has already run against production databases.
+// Prices at a point in time.
+//
+// grade_prices is a CURRENT-value table: the refresh job upserts it, so every
+// run destroys the figure before it. That is right for "what is this worth
+// today" and it is why the app could never draw a chart — the history was
+// being overwritten twice a week and had never been anywhere else.
+//
+// One row per key per day, upserted, so a card refreshed three times on a
+// Tuesday leaves one Tuesday point rather than three. The day is the grain
+// because that is the grain the data has: these are aggregates over recent
+// sales, and pretending to an hourly figure would draw a line through noise.
+const PRICE_POINTS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS price_points (
+  catalog_id    text NOT NULL,
+  grader        text NOT NULL,
+  grade         numeric(4,2) NOT NULL,
+  qualifier     text NOT NULL DEFAULT '',
+  label_variant text NOT NULL DEFAULT '',
+  day           date NOT NULL,
+  price         numeric(12,2) NOT NULL,
+  low           numeric(12,2),
+  high          numeric(12,2),
+  sample_size   integer,
+  confidence    text,
+  source        text NOT NULL,
+  PRIMARY KEY (catalog_id, grader, grade, qualifier, label_variant, day)
+);
+CREATE INDEX IF NOT EXISTS price_points_series
+  ON price_points (catalog_id, grader, grade, day);
+-- The index view: every point for a day, for building a basket.
+CREATE INDEX IF NOT EXISTS price_points_day ON price_points (day);
+`;
+
 const MIGRATIONS = [
   `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_usd        NUMERIC(12,2)`,
   `ALTER TABLE catalog_cards ADD COLUMN IF NOT EXISTS raw_fetched_at TIMESTAMPTZ`,
@@ -218,6 +251,7 @@ export function initStore(): Promise<boolean> {
     if (!p) return false;
     try {
       await p.query(SCHEMA);
+      await p.query(PRICE_POINTS_SCHEMA);
       for (const m of MIGRATIONS) {
         try {
           await p.query(m);
@@ -475,6 +509,33 @@ export async function writeGradePrices(
          last_sale_at = COALESCE(excluded.last_sale_at, grade_prices.last_sale_at),
          fetched_at = now()`,
       params,
+    );
+    // The same rows, dated. This is inside the single funnel every price
+    // passes through, so history accumulates without any caller opting in —
+    // and a caller that forgets is how a chart ends up with gaps.
+    // Straight INSERT ... VALUES rather than a SELECT over a VALUES list: in
+    // the subquery form Postgres has no target column to infer from and types
+    // every parameter as text, which then fails against numeric columns.
+    const pcols = 11;
+    const pvalues = rows
+      .map((_, i) => `(${Array.from({ length: pcols }, (_, k) => `$${i * pcols + k + 1}`).join(",")}, current_date)`)
+      .join(",");
+    const pparams = rows.flatMap((r) => [
+      catalogId, r.grader, r.grade, r.qualifier ?? "", r.labelVariant ?? "",
+      r.price, r.low ?? null, r.high ?? null, r.sampleSize ?? null,
+      r.confidence ?? null, r.source,
+    ]);
+    await p.query(
+      `INSERT INTO price_points (
+         catalog_id, grader, grade, qualifier, label_variant,
+         price, low, high, sample_size, confidence, source, day
+       ) VALUES ${pvalues}
+       ON CONFLICT (catalog_id, grader, grade, qualifier, label_variant, day)
+       DO UPDATE SET
+         price = excluded.price, low = excluded.low, high = excluded.high,
+         sample_size = excluded.sample_size, confidence = excluded.confidence,
+         source = excluded.source`,
+      pparams,
     );
   } catch (err) {
     console.warn(`[store] grade_prices write failed for ${catalogId}: ${(err as Error).message}`);
