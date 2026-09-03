@@ -7,7 +7,7 @@ import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
-import { gamesWithCounts, setsForGame } from "./games.js";
+import { gamesWithPreviews, setsForGame } from "./games.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
@@ -93,8 +93,8 @@ export class MarketController {
    *  how someone holding an unfamiliar card gets to its page at all. */
   /** The games we can browse, for the first level of the set picker. */
   @Get("games")
-  games() {
-    return { games: gamesWithCounts() };
+  async games() {
+    return { games: await gamesWithPreviews() };
   }
 
   /** Sets for one game. Without a game this stays what it always was —
