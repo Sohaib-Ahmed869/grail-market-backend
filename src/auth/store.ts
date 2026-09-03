@@ -29,6 +29,27 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled boolean NOT NULL DEFAULT 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_recovery jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at timestamptz;
 
+-- Sign in with Google / Apple.
+--
+-- A row per provider account, pointing at a user. The provider's own subject
+-- id is stored hashed (see providerKey) — it belongs to Google or Apple, and a
+-- table of raw ones is a cross-service correlation table we have no reason to
+-- hold.
+CREATE TABLE IF NOT EXISTS identities (
+  provider     text NOT NULL,
+  provider_key text NOT NULL,
+  user_id      text NOT NULL,
+  email        text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, provider_key)
+);
+CREATE INDEX IF NOT EXISTS identities_user ON identities (user_id);
+
+-- Accounts made through a provider have no password. A nullable column rather
+-- than a sentinel, so "has no password" is a fact the database states and not
+-- a string somebody has to remember to check for.
+ALTER TABLE users ALTER COLUMN password DROP NOT NULL;
+
 -- Reset links. Only the digest is stored; see auth/reset.ts.
 CREATE TABLE IF NOT EXISTS password_resets (
   token_hash text PRIMARY KEY,
@@ -316,4 +337,89 @@ export async function spendRecoveryCode(userId: string, digest: string): Promise
     userId, JSON.stringify(codes.filter((c) => c !== digest)),
   ]);
   return true;
+}
+
+// ---- sign in with Google / Apple -------------------------------------------
+
+export type LinkResult =
+  | { ok: true; user: User; created: boolean }
+  | { ok: false; why: "no-store" | "needs-password" | "no-email" };
+
+/** Find or make the account behind a provider identity.
+ *
+ *  Three cases, and the third is the one that matters:
+ *
+ *  1. We have seen this provider account before — sign them in.
+ *  2. We have not, and the email is free — make an account.
+ *  3. We have not, and the email already belongs to a password account.
+ *
+ *  Case three is an account takeover if handled carelessly: anyone who can
+ *  make a Google account with your address could walk into your GrailCard
+ *  account. It is only safe when the provider says it has VERIFIED the
+ *  address — which is the whole value of an identity token — and even then
+ *  only because that is exactly the proof our own reset email asks for.
+ *  Unverified, we refuse and send them to the password they already have.
+ */
+export async function linkIdentity(i: {
+  provider: string; providerKey: string;
+  email: string | null; emailVerified: boolean; name: string | null;
+}): Promise<LinkResult> {
+  const pool = storePool();
+  if (!pool) return { ok: false, why: "no-store" };
+
+  const seen = await pool.query(
+    "select user_id from identities where provider = $1 and provider_key = $2",
+    [i.provider, i.providerKey],
+  );
+  const known = seen.rows[0]?.user_id;
+  if (known) {
+    const user = await findById(known);
+    if (user) return { ok: true, user, created: false };
+    // The identity outlived the account it pointed at. Fall through and make
+    // a fresh one rather than answering with nothing.
+    await pool.query("delete from identities where provider = $1 and provider_key = $2", [
+      i.provider, i.providerKey,
+    ]);
+  }
+
+  if (!i.email) return { ok: false, why: "no-email" };
+
+  const existing = await findByEmail(i.email);
+  if (existing) {
+    if (!i.emailVerified) return { ok: false, why: "needs-password" };
+    await pool.query(
+      `insert into identities (provider, provider_key, user_id, email)
+       values ($1,$2,$3,$4) on conflict do nothing`,
+      [i.provider, i.providerKey, existing.user_id, i.email],
+    );
+    const user = await findById(existing.user_id);
+    return user ? { ok: true, user, created: false } : { ok: false, why: "no-store" };
+  }
+
+  // A new account, with no password. Signing in is the provider's job from
+  // here; setting one later goes through the ordinary reset flow, which is
+  // the same proof-of-address this just used.
+  const user_id = newUserId();
+  const name = (i.name ?? i.email.split("@")[0] ?? "Collector").trim().slice(0, 60);
+  await pool.query(
+    "insert into users (user_id, email, name, phone, password) values ($1,$2,$3,null,null)",
+    [user_id, i.email, name],
+  );
+  await pool.query(
+    `insert into identities (provider, provider_key, user_id, email) values ($1,$2,$3,$4)`,
+    [i.provider, i.providerKey, user_id, i.email],
+  );
+  return {
+    ok: true,
+    user: { user_id, email: i.email, name, phone: null, avatar: null, mfa_enabled: false },
+    created: true,
+  };
+}
+
+/** Which providers are attached, for the account screen. */
+export async function linkedProviders(userId: string): Promise<string[]> {
+  const pool = storePool();
+  if (!pool) return [];
+  const r = await pool.query("select provider from identities where user_id = $1", [userId]);
+  return r.rows.map((x) => String(x.provider));
 }

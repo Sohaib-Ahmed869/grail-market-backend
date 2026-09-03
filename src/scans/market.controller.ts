@@ -10,6 +10,8 @@ import { getSet, listSets } from "./sets.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
+import { certLinks, certUrl, parseCode } from "./lookupcode.js";
+import { identifyBySetCode } from "./setcode.js";
 
 @Controller("market")
 export class MarketController {
@@ -108,6 +110,65 @@ export class MarketController {
     return {
       query: q,
       results: await searchCards(q, Number.isFinite(n) ? Math.min(n, 40) : 24),
+    };
+  }
+
+  /** Find a card from what is printed on it, without a photograph.
+   *
+   *  A set code and a number pin a card exactly, which is more than a name
+   *  ever does — "Charizard" is forty cards and four orders of magnitude. It
+   *  is also the way out for a card the camera keeps failing on.
+   *
+   *  A certificate number is handed to the grading company's own register
+   *  rather than answered here. We hold no grading company data and are not
+   *  going to pretend to; their register is the only authority on whether a
+   *  slab is real. */
+  @Get("lookup")
+  async lookup(@Query("q") q?: string) {
+    const parsed = parseCode(q ?? "");
+
+    if (parsed.kind === "cert") {
+      return {
+        kind: "cert",
+        cert: parsed.cert,
+        grader: parsed.grader || null,
+        // With no company named we offer every register rather than guessing.
+        // A PSA URL with a BGS number in it is a confident wrong answer.
+        links: parsed.grader
+          ? [{ grader: parsed.grader, url: certUrl(parsed.grader, parsed.cert) }].filter(
+              (l) => l.url,
+            )
+          : certLinks(parsed.cert),
+      };
+    }
+
+    if (parsed.kind === "code") {
+      const card = await identifyBySetCode(
+        { code: parsed.code, locale: "ja", number: parsed.number,
+          printedNumber: parsed.printedNumber, rarity: null },
+        parsed.number,
+        null,
+      ).catch(() => null);
+      // A code we cannot resolve is not an error — plenty of sets are not in
+      // the catalogue. Falling back to the text search is more use than a 404.
+      return card
+        ? { kind: "card", card }
+        : { kind: "search", query: q, results: await searchCards(q!, 24) };
+    }
+
+    if (parsed.kind === "number") {
+      return {
+        kind: "search",
+        query: parsed.printedNumber ?? parsed.number,
+        results: await searchCards(parsed.printedNumber ?? parsed.number, 24),
+        note: "A number on its own matches across sets — add the set code to pin it.",
+      };
+    }
+
+    return {
+      kind: "search",
+      query: parsed.text,
+      results: parsed.text.length >= 2 ? await searchCards(parsed.text, 24) : [],
     };
   }
 

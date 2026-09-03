@@ -15,6 +15,10 @@ const RULES: { test: RegExp; method?: string; rule: Rule; by: "ip" | "user" }[] 
   { test: /^\/auth\/login$/,        method: "POST", rule: { limit: 6,  windowMs: 15 * 60_000 }, by: "ip" },
   { test: /^\/auth\/login\/mfa$/,   method: "POST", rule: { limit: 8,  windowMs: 15 * 60_000 }, by: "ip" },
   { test: /^\/auth\/register$/,     method: "POST", rule: { limit: 5,  windowMs: 60 * 60_000 }, by: "ip" },
+  // Looser than a password: a token has already been checked by Google or
+  // Apple before it reaches us, so the thing being limited is our own JWKS
+  // fetching rather than a guessing attack.
+  { test: /^\/auth\/oauth$/,        method: "POST", rule: { limit: 15, windowMs: 15 * 60_000 }, by: "ip" },
   // Sending mail costs money and lands in someone else's inbox, so this is
   // tighter than the rest — and it is the one endpoint a stranger can aim at
   // an address that is not theirs.

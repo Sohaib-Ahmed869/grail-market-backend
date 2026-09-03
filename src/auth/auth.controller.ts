@@ -4,9 +4,11 @@ import { createHash } from "node:crypto";
 import { authConfigured, mintToken, readToken } from "./tokens.js";
 import {
   changePassword, consumeReset, createReset, createUser, disableMfa, enableMfa,
-  findByEmail, findById, pendingMfaSecret, setAvatar, signIn, spendRecoveryCode,
-  stageMfa, updateProfile,
+  findByEmail, findById, linkIdentity, linkedProviders, pendingMfaSecret, setAvatar,
+  signIn, spendRecoveryCode, stageMfa, updateProfile,
 } from "./store.js";
+import { oauthConfigured, verifyIdentity, type Provider } from "./oauth.js";
+import { providerKey } from "./jwt.js";
 import { RESET_TTL_MS } from "./reset.js";
 import { newSecret, otpauthUrl, recoveryCodes, verifyTotp } from "./totp.js";
 import { forgetLoginAttempts } from "../limits/middleware.js";
@@ -104,6 +106,65 @@ export class AuthController {
         (await spendRecoveryCode(userId, digest(code))));
     if (!ok) return { error: "bad-code", message: "That code isn't right. Codes change every 30 seconds." };
     return { token: mintToken(userId), user };
+  }
+
+  /** Sign in with Google or Apple.
+   *
+   *  The app never sends us a password here and never handles one — it hands
+   *  over the identity token the provider gave it, and everything that makes
+   *  that trustworthy happens in verifyIdentity: the signature, the issuer,
+   *  the audience and the expiry. */
+  @Post("oauth")
+  async oauth(
+    @Body() b: { provider?: string; idToken?: string; name?: string },
+    @Req() req?: Request,
+  ) {
+    if (!authConfigured()) return { error: "auth-unconfigured", message: "AUTH_SECRET is not set" };
+    const provider = String(b?.provider ?? "") as Provider;
+    if (provider !== "google" && provider !== "apple") {
+      return { error: "invalid", message: "Unknown sign-in method." };
+    }
+    if (!oauthConfigured(provider)) {
+      return {
+        error: "not-configured",
+        message: `Signing in with ${provider === "google" ? "Google" : "Apple"} isn't set up yet.`,
+      };
+    }
+
+    const v = await verifyIdentity(provider, String(b?.idToken ?? ""), b?.name ?? null);
+    if (!v.ok) {
+      // One message for every bad-token reason, and a different one for the
+      // provider being down — the first is nothing the user can act on, the
+      // second is worth trying again in a minute.
+      return v.why === "provider-unreachable"
+        ? { error: "provider-down", message: "Couldn't reach that sign-in service. Try again shortly." }
+        : { error: "bad-token", message: "That sign-in didn't check out. Try again." };
+    }
+
+    const r = await linkIdentity({
+      provider,
+      providerKey: providerKey(provider, v.identity.sub),
+      email: v.identity.email,
+      emailVerified: v.identity.emailVerified,
+      name: v.identity.name,
+    });
+    if (!r.ok) {
+      const message = {
+        "no-store": "Accounts are unavailable right now.",
+        "no-email": "That account didn't share an email address, so we can't create one for you.",
+        // Deliberately specific: this is the one case where telling them what
+        // to do next is more use than a generic refusal, and it reveals
+        // nothing — they already proved they hold the address.
+        "needs-password": "An account already uses that email. Sign in with your password instead.",
+      }[r.why];
+      return { error: r.why, message };
+    }
+
+    if (r.created) {
+      await sendMail({ to: r.user.email, ...welcomeEmail(r.user.name) });
+    }
+    if (req) forgetLoginAttempts(req);
+    return { token: mintToken(r.user.user_id), user: r.user, created: r.created };
   }
 
   // ---- forgotten password --------------------------------------------------
@@ -246,6 +307,19 @@ export class AuthController {
     const id = callerId(req);
     if (!id) return { error: "unauthenticated" };
     const user = await findById(id);
-    return user ? { user } : { error: "unauthenticated" };
+    if (!user) return { error: "unauthenticated" };
+    return { user, providers: await linkedProviders(id) };
+  }
+
+  /** Which sign-in methods this build can actually offer. The app asks before
+   *  it draws the buttons — a Google button on a server with no client id is
+   *  a button that fails after the person has already left the app. */
+  @Get("methods")
+  methods() {
+    return {
+      password: authConfigured(),
+      google: oauthConfigured("google"),
+      apple: oauthConfigured("apple"),
+    };
   }
 }
