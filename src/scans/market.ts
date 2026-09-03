@@ -179,10 +179,15 @@ export async function marketPulse(): Promise<PulseCard[]> {
     try {
       const hits = await searchCards(`${c.label} ${c.setName ?? ""}`.trim(), 1);
       const hit = hits[0];
-      if (hit?.imageUrl) {
-        c.imageUrl = hit.imageUrl;
-        c.cardId = hit.cardId;
-      }
+      if (hit?.imageUrl) c.imageUrl = hit.imageUrl;
+      // "market" is search's sentinel for "priced from live listings, not in
+      // a catalogue we hold" — see the last block of searchCards. Copying it
+      // here handed the app /card/market as a destination, and every mover
+      // that only matched the fallback opened on "Card Not Found".
+      //
+      // A mover without a real catalogue id keeps its picture and loses its
+      // link, and the client sends those to the market instead.
+      if (hit && hit.cardId && hit.cardId !== "market") c.cardId = hit.cardId;
     } catch {
       // a mover without a picture is still a mover
     }
