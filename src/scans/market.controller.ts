@@ -7,6 +7,7 @@ import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
+import { gamesWithCounts, setsForGame } from "./games.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
@@ -90,9 +91,19 @@ export class MarketController {
    *  The default view of search, because a search box only helps someone who
    *  already knows the name. Browsing to the set and finding the card in it is
    *  how someone holding an unfamiliar card gets to its page at all. */
+  /** The games we can browse, for the first level of the set picker. */
+  @Get("games")
+  games() {
+    return { games: gamesWithCounts() };
+  }
+
+  /** Sets for one game. Without a game this stays what it always was —
+   *  Pokemon — so nothing that already calls it changes behaviour. */
   @Get("sets")
-  async sets() {
-    return { sets: await listSets() };
+  async sets(@Query("game") game?: string) {
+    // No game keeps the old behaviour — Pokemon — so anything already calling
+    // this is unaffected.
+    return { sets: game ? await setsForGame(game) : await listSets() };
   }
 
   /** One set and the cards in it. */
