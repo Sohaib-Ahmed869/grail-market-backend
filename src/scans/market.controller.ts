@@ -8,6 +8,7 @@ import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
 import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
+import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
@@ -194,6 +195,15 @@ export class MarketController {
   // Deliberately the same chain a scan uses — sold comps for the exact grader
   // and grade first, live asks for the exact printing second — because a scan
   // and a search that land on the same card must not quote two prices for it.
+  /** How many people here follow, hold or have looked at a card.
+   *
+   *  Counted, never estimated. A card nobody has touched says so. */
+  @Get("interest")
+  async interest(@Query("catalogId") catalogId?: string) {
+    if (!catalogId) return { following: 0, holding: 0, views: 0, faces: [] };
+    return interestIn(catalogId);
+  }
+
   @Get("price")
   async price(
     @Query("name") name?: string,
