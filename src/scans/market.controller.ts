@@ -4,7 +4,7 @@ import { scanBudget } from "./budget.js";
 import { fetchListings } from "./ebaylistings.js";
 import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
-import { cardNews, marketPulse } from "./market.js";
+import { cardNews, cardTrend, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
 import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
@@ -202,6 +202,17 @@ export class MarketController {
   async interest(@Query("catalogId") catalogId?: string) {
     if (!catalogId) return { following: 0, holding: 0, views: 0, faces: [] };
     return interestIn(catalogId);
+  }
+
+  /** One card's price history and period returns, for its own page. */
+  @Get("trend")
+  async trend(
+    @Query("cardId") cardId?: string,
+    @Query("name") name?: string,
+    @Query("game") game?: string,
+  ) {
+    if (!cardId || !name) return { trend: null };
+    return { trend: await cardTrend({ catalogId: cardId, name, game: game ?? null }) };
   }
 
   @Get("price")

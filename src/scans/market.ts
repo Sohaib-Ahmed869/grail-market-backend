@@ -15,6 +15,7 @@
 // free tier alongside scan-time price lookups.
 
 import { demandedCards } from "./demand.js";
+import { TtlCache } from "./ttlcache.js";
 
 export type PulseCard = {
   label: string;
@@ -64,6 +65,89 @@ function gameOf(row: { game: string | null; catalogId: string }): string | null 
 
 const TTL_MS = 12 * 3600 * 1000;
 let cache: { at: number; data: PulseCard[] } | null = null;
+
+// ---------------- one card's trend ------------------------------------------
+
+export type CardTrend = {
+  price: number | null;
+  change24h: number | null;
+  change7d: number | null;
+  change30d: number | null;
+  change90d: number | null;
+  spark: number[];
+  low7: number | null;
+  high7: number | null;
+};
+
+/** Cached hard and per card. A card page is opened far more often than a card
+ *  is repriced, and this is the only paid call the page makes — twelve hours
+ *  means a card everybody is looking at costs two lookups a day, not one per
+ *  visitor. */
+const trendCache = new TtlCache<CardTrend | null>(TTL_MS, 400);
+
+/** What one card has done, for the page about that card.
+ *
+ *  The pulse already asks this question for a dozen cards; this asks it for
+ *  whichever card somebody is actually looking at. Same feed, same shape, so
+ *  the chart and the period strip on a card page are the ones from the
+ *  dashboard rather than a second implementation that will drift.
+ */
+export async function cardTrend(a: {
+  catalogId: string; name: string; game?: string | null;
+}): Promise<CardTrend | null> {
+  const key = process.env.JUSTTCG_API_KEY;
+  if (!key || !a.name) return null;
+
+  const hit = trendCache.entry(a.catalogId);
+  if (hit) return hit.v;
+
+  try {
+    const game = gameOf({ game: a.game ?? null, catalogId: a.catalogId });
+    const url =
+      `https://api.justtcg.com/v1/cards?q=${encodeURIComponent(a.name)}` +
+      (game ? `&game=${game}` : "") + `&limit=3`;
+    const res = await fetch(url, {
+      headers: { "X-API-Key": key },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as any;
+
+    let v: any = null;
+    let best = -1;
+    for (const c of (body?.data ?? []) as any[]) {
+      for (const variant of (c.variants ?? []) as any[]) {
+        const richness =
+          ((variant.priceHistory?.length ?? 0) as number) * 10 +
+          ((variant.priceChangesCount30d ?? 0) as number);
+        if (richness > best) { best = richness; v = variant; }
+      }
+    }
+    if (!v) {
+      // Cache the miss too. A card this feed does not carry is not going to
+      // start carrying it in the next five minutes, and asking again on every
+      // page view is the same call paid for repeatedly.
+      trendCache.set(a.catalogId, null);
+      return null;
+    }
+
+    const trend: CardTrend = {
+      price: pct(v.price),
+      change24h: pct(v.priceChange24hr),
+      change7d: pct(v.priceChange7d),
+      change30d: pct(v.priceChange30d),
+      change90d: pct(v.priceChange90d),
+      low7: pct(v.minPrice7d),
+      high7: pct(v.maxPrice7d),
+      spark: ((v.priceHistory ?? []) as { p: number }[])
+        .map((h) => h.p).filter((n) => Number.isFinite(n)).slice(-24),
+    };
+    trendCache.set(a.catalogId, trend);
+    return trend;
+  } catch {
+    return null;
+  }
+}
 
 // ---------------- hobby news (Google News RSS — free, no key) ----------------
 
