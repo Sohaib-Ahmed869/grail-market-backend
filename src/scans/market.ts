@@ -1,8 +1,20 @@
-// Market Pulse: live rates + trend data for a watchlist of iconic cards,
-// powered by JustTCG's price-history fields. Cached hard (12h) to stay well
-// inside the free tier alongside scan-time price lookups.
+// Market Pulse: what the cards this market actually trades are doing.
+//
+// The set of cards used to be eight names typed into this file — Charizard,
+// Pikachu, Sol Ring. That is a stand-in for a market, not a market: it never
+// changed, so "what moved this week" was the same eight cards forever, none of
+// which anybody here necessarily owns or wants, and three of them were games
+// with no listings on the platform at all.
+//
+// It now comes from demandedCards(): the cards people here have listed,
+// watched, held or scanned, ranked by how much of that they have done. The
+// board grows with the product and needs no maintenance.
+//
+// The price movement itself still comes from JustTCG, because it is the only
+// source of a seven-day change we have. Cached hard (12h) to stay inside the
+// free tier alongside scan-time price lookups.
 
-import { searchCards } from "./search.js";
+import { demandedCards } from "./demand.js";
 
 export type PulseCard = {
   label: string;
@@ -20,16 +32,33 @@ export type PulseCard = {
   cardId?: string | null;
 };
 
-const WATCHLIST: { q: string; game: string; label?: string }[] = [
-  { q: "Charizard ex", game: "pokemon" },
-  { q: "Pikachu", game: "pokemon" },
-  { q: "Umbreon ex", game: "pokemon" },
-  { q: "Monkey.D.Luffy", game: "one-piece-card-game", label: "Monkey.D.Luffy" },
-  { q: "Elsa", game: "disney-lorcana" },
-  { q: "Darth Vader", game: "star-wars-unlimited" },
-  { q: "Blue-Eyes White Dragon", game: "yugioh" },
-  { q: "Sol Ring", game: "magic-the-gathering" },
-];
+/** Our game keys to JustTCG's. Anything we cannot map is asked for without a
+ *  game filter rather than skipped — a wrong filter returns nothing, and no
+ *  filter returns something we can still check the name against. */
+const JUSTTCG_GAME: Record<string, string> = {
+  pokemon: "pokemon",
+  onepiece: "one-piece-card-game",
+  lorcana: "disney-lorcana",
+  mtg: "magic-the-gathering",
+  yugioh: "yugioh",
+  swu: "star-wars-unlimited",
+  digimon: "digimon-card-game",
+};
+
+/** The game, from the row or from the catalogue id it was registered under.
+ *  Watchlist and collection rows carry no game column, and guessing from the
+ *  id prefix is better than asking for a Pokemon card in every game at once. */
+function gameOf(row: { game: string | null; catalogId: string }): string | null {
+  if (row.game && JUSTTCG_GAME[row.game]) return JUSTTCG_GAME[row.game]!;
+  const id = row.catalogId;
+  if (id.startsWith("optcg-")) return JUSTTCG_GAME.onepiece!;
+  if (id.startsWith("lorcana-")) return JUSTTCG_GAME.lorcana!;
+  if (id.startsWith("ygo-")) return JUSTTCG_GAME.yugioh!;
+  if (id.startsWith("mtg-") || id.startsWith("scry-")) return JUSTTCG_GAME.mtg!;
+  // base1-, swsh7-, cel25-, sv..., M2- and the rest of the Pokemon families.
+  if (/^[a-z]+\d/.test(id) || id.startsWith("smp-")) return JUSTTCG_GAME.pokemon!;
+  return null;
+}
 
 const TTL_MS = 12 * 3600 * 1000;
 let cache: { at: number; data: PulseCard[] } | null = null;
@@ -122,17 +151,34 @@ export async function marketPulse(): Promise<PulseCard[]> {
   const key = process.env.JUSTTCG_API_KEY;
   if (!key) return cache?.data ?? [];
 
+  // The cards this market actually trades, not a list somebody typed.
+  const wanted = await demandedCards(12).catch(() => []);
+  if (!wanted.length) return cache?.data ?? [];
+
   const out: PulseCard[] = [];
-  for (const w of WATCHLIST) {
+  // Which feed cards have already been claimed. Two of our rows can resolve
+  // to the same one — "Charizard" and "Charizard ☆ δ" both matched plain
+  // Charizard, and the board showed the identical −1.85% twice under two
+  // names. The higher-demand row comes first and keeps it; the other is
+  // dropped rather than borrowing a number that is not about it.
+  const claimed = new Set<string>();
+
+  for (const w of wanted) {
     try {
-      const res = await fetch(
-        `https://api.justtcg.com/v1/cards?q=${encodeURIComponent(w.q)}&game=${w.game}&limit=3`,
-        { headers: { "X-API-Key": key }, signal: AbortSignal.timeout(8000) },
-      );
+      const game = gameOf(w);
+      const url =
+        `https://api.justtcg.com/v1/cards?q=${encodeURIComponent(w.name)}` +
+        (game ? `&game=${game}` : "") +
+        `&limit=3`;
+      const res = await fetch(url, {
+        headers: { "X-API-Key": key },
+        signal: AbortSignal.timeout(8000),
+      });
       if (!res.ok) continue;
       const body = (await res.json()) as any;
-      // pick the most-traded variant across the top hits — the one with the
-      // richest price history makes a real trend line, not a flat placeholder
+
+      // The most-traded variant across the top hits — the one with the
+      // richest price history makes a real trend line, not a flat placeholder.
       let card: any = null;
       let v: any = null;
       let best = -1;
@@ -149,49 +195,38 @@ export async function marketPulse(): Promise<PulseCard[]> {
         }
       }
       if (!card || !v) continue;
+
+      const feedId = String(card.id ?? `${card.name}|${card.set_name ?? ""}`);
+      if (claimed.has(feedId)) continue;
+      claimed.add(feedId);
+
       const spark = ((v.priceHistory ?? []) as { p: number }[])
         .map((h) => h.p)
         .filter((p) => Number.isFinite(p))
         .slice(-24);
+
       out.push({
-        label: w.label ?? card.name,
-        setName: card.set_name ?? "",
-        game: card.game ?? w.game,
+        // Our name and our catalogue id, not the feed's. The feed is being
+        // asked about a card we already hold a record of, and its own naming
+        // is what produced rows like "Umbreon ex - 176" on the dashboard.
+        label: w.name,
+        setName: w.setName ?? card.set_name ?? "",
+        game: w.game ?? card.game ?? "",
         price: pct(v.price),
         change24h: pct(v.priceChange24hr),
         change7d: pct(v.priceChange7d),
         low7: pct(v.minPrice7d),
         high7: pct(v.maxPrice7d),
         spark,
+        imageUrl: w.imageUrl,
+        // A real id every time, because it came from our own tables rather
+        // than from a search that can answer with a sentinel.
+        cardId: w.catalogId,
       });
     } catch {
       /* best-effort per card */
     }
   }
-  // The artwork, from our own catalogue.
-  //
-  // The price feed has no images, which is why this data could only ever be
-  // drawn as a table. In a card marketplace the art IS the card — a list of
-  // names and percentages is a stock screener with Pokemon in it. The lookup
-  // is our own search, so it costs nothing, and the whole pulse is cached for
-  // the same period as the prices.
-  await Promise.all(out.map(async (c) => {
-    try {
-      const hits = await searchCards(`${c.label} ${c.setName ?? ""}`.trim(), 1);
-      const hit = hits[0];
-      if (hit?.imageUrl) c.imageUrl = hit.imageUrl;
-      // "market" is search's sentinel for "priced from live listings, not in
-      // a catalogue we hold" — see the last block of searchCards. Copying it
-      // here handed the app /card/market as a destination, and every mover
-      // that only matched the fallback opened on "Card Not Found".
-      //
-      // A mover without a real catalogue id keeps its picture and loses its
-      // link, and the client sends those to the market instead.
-      if (hit && hit.cardId && hit.cardId !== "market") c.cardId = hit.cardId;
-    } catch {
-      // a mover without a picture is still a mover
-    }
-  }));
 
   if (out.length > 0) cache = { at: Date.now(), data: out };
   return out;
