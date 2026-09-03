@@ -260,7 +260,14 @@ export async function browseListings(q: {
   // catalogue says "Base Set", but a buyer may type "base". Exact matching
   // here would return nothing and look broken.
   if (q.setName) add("set_name ilike '%' || ? || '%'", q.setName);
-  if (q.cardNumber) add("card_number = ?", q.cardNumber);
+  // A buyer types "#4", the catalogue holds "4", and some sets hold "004/102".
+  // Compare with the hash and any leading zeros stripped, both sides.
+  if (q.cardNumber) {
+    add(
+      "regexp_replace(lower(card_number), '^[#0]+', '') = ?",
+      q.cardNumber.trim().toLowerCase().replace(/^[#0]+/, ""),
+    );
+  }
   // Language, edition and finish all live in `variant` until the catalogue
   // models them separately — see the note in the scope gap list.
   if (q.variant) add("variant = ?", q.variant);
