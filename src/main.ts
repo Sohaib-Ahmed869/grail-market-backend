@@ -23,6 +23,7 @@ import { initRatings } from "./ratings/store.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
+import { rateLimit } from "./limits/middleware.js";
 
 const PORT = Number(process.env.PORT ?? 8180);
 
@@ -40,6 +41,10 @@ async function bootstrap() {
       },
     }),
   );
+  // After the body parser — a rule keyed on the caller needs the auth header,
+  // which is on the request either way, but a 429 should not be paid for by
+  // parsing a 2MB body first. Before the routes, so nothing reaches a handler.
+  app.use(rateLimit);
   app.use("/storage", express.static(join(process.cwd(), "storage")));
   // shared card store — best-effort, a scan still works without it
   if (storeConfigured()) {

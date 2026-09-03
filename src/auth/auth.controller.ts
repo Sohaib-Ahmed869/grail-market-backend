@@ -9,6 +9,7 @@ import {
 } from "./store.js";
 import { RESET_TTL_MS } from "./reset.js";
 import { newSecret, otpauthUrl, recoveryCodes, verifyTotp } from "./totp.js";
+import { forgetLoginAttempts } from "../limits/middleware.js";
 import { sendMail } from "../mail/mailer.js";
 import { mfaChangedEmail, passwordChangedEmail, resetEmail, welcomeEmail } from "../mail/templates.js";
 
@@ -60,11 +61,15 @@ export class AuthController {
   }
 
   @Post("login")
-  async login(@Body() b: { email?: string; password?: string }) {
+  async login(@Body() b: { email?: string; password?: string }, @Req() req?: Request) {
     if (!authConfigured()) return { error: "auth-unconfigured", message: "AUTH_SECRET is not set" };
     const email = String(b?.email ?? "");
     const r = await signIn(email, String(b?.password ?? ""));
     if (!r.ok) return { error: "bad-credentials", message: "That email and password don't match." };
+    // The password was right, whichever branch we take below. Clearing here
+    // means four typos before the correct password do not leave someone one
+    // mistake from a lockout on the account they are getting into.
+    if (req) forgetLoginAttempts(req);
 
     // Second step, if the account has one. The password was correct, so a
     // short-lived token is minted to carry that fact to the /login/mfa call —
