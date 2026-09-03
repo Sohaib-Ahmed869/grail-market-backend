@@ -5,7 +5,7 @@ import { readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
 import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
 import {
-  browseListings, bumpView, createListing, getListing, listingsBySeller,
+  browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
 } from "./store.js";
 import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
@@ -27,10 +27,17 @@ export class ListingsController {
     @Query("graded") graded?: string, @Query("min") min?: string,
     @Query("max") max?: string, @Query("sort") sort?: string,
     @Query("catalogId") catalogId?: string,
+    @Query("set") setName?: string,
+    @Query("number") cardNumber?: string,
+    @Query("variant") variant?: string,
+    @Query("grade") grade?: string,
+    @Query("q") q?: string,
     @Req() req?: Request,
   ) {
     const rows = await browseListings({
       game: game ?? null, grader: grader ?? null, catalogId: catalogId ?? null,
+      setName: setName ?? null, cardNumber: cardNumber ?? null,
+      variant: variant ?? null, grade: grade ?? null, q: q ?? null,
       excludeSeller: req ? callerId(req) : null,
       graded: graded === "true" ? true : graded === "false" ? false : null,
       min: min ? Number(min) : null, max: max ? Number(max) : null,
@@ -189,6 +196,47 @@ export class ListingsController {
       }
     }
     return r.ok ? { status: to } : { error: r.why };
+  }
+
+  /** Edit a listing that is already up. */
+  @Post(":id/edit")
+  async edit(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const me = need(req);
+    if (!me) return { error: "unauthenticated" };
+
+    const before = await getListing(id);
+    const r = await editListing(id, me, {
+      price: b?.price != null ? Number(b.price) : undefined,
+      conditionNote: b?.conditionNote ?? undefined,
+      delivery: Array.isArray(b?.delivery) ? b.delivery : undefined,
+      suburb: b?.suburb ?? undefined,
+    });
+    if (!r.ok) return { error: r.why };
+
+    // Anyone with an open offer has a stake in the price changing — they are
+    // negotiating against a number that just moved, and finding out by
+    // accident is how a buyer feels tricked by an honest discount.
+    if (r.priceChanged && before) {
+      const pool = (await import("../cards.store.js")).storePool();
+      const rows = pool
+        ? (await pool.query(
+            "select distinct buyer_id from offers where listing_id = $1 and status = 'open'",
+            [id],
+          )).rows
+        : [];
+      const money = (n: number) =>
+        `${before.currency === "AUD" ? "A$" : "$"}${Math.round(n).toLocaleString()}`;
+      const down = Number(b.price) < Number(before.price);
+      for (const row of rows) {
+        await notify({
+          userId: row.buyer_id, kind: "listing", actorId: me,
+          title: `${before.card_name} is now ${money(Number(b.price))}`,
+          body: `${down ? "Down" : "Up"} from ${money(Number(before.price))}. Your offer still stands.`,
+          href: `/listing/${id}`,
+        });
+      }
+    }
+    return { ok: true, priceChanged: r.priceChanged };
   }
 
   @Post(":id/withdraw")

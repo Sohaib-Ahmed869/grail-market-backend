@@ -136,6 +136,46 @@ export async function createListing(l: {
   return id;
 }
 
+/** Change a live listing.
+ *
+ *  Only the things a seller can honestly change after publishing: the price,
+ *  the condition note, how it gets to the buyer, and where from. Not the card,
+ *  not the grade, not the certificate — those are what the listing IS, and a
+ *  listing that can become a different card after people have made offers on
+ *  it is a bait-and-switch with a database behind it.
+ *
+ *  A price change on a live listing is allowed and deliberate: the offers
+ *  screen tells sellers their card is priced above market, and telling someone
+ *  to do a thing they cannot do is worse than staying quiet. */
+export async function editListing(
+  id: string, sellerId: string,
+  patch: { price?: number; conditionNote?: string | null; delivery?: string[]; suburb?: string | null },
+): Promise<{ ok: true; priceChanged: boolean } | { ok: false; why: string }> {
+  const pool = storePool();
+  if (!pool) return { ok: false, why: "no-store" };
+
+  const cur = await getListing(id);
+  if (!cur || cur.seller_id !== sellerId) return { ok: false, why: "not-found" };
+  if (!["draft", "rejected", "live"].includes(cur.status)) {
+    return { ok: false, why: `a ${cur.status} listing cannot be edited` };
+  }
+  if (patch.price != null && !(patch.price > 0)) return { ok: false, why: "invalid-price" };
+
+  const priceChanged = patch.price != null && Number(patch.price) !== Number(cur.price);
+
+  await pool.query(
+    `update listings set
+       price = coalesce($2, price),
+       condition_note = coalesce($3, condition_note),
+       delivery = coalesce($4, delivery),
+       suburb = coalesce($5, suburb)
+     where listing_id = $1`,
+    [id, patch.price ?? null, patch.conditionNote ?? null,
+     patch.delivery && patch.delivery.length ? patch.delivery : null, patch.suburb ?? null],
+  );
+  return { ok: true, priceChanged };
+}
+
 export async function getListing(id: string): Promise<Listing | null> {
   const pool = storePool();
   if (!pool) return null;
@@ -186,13 +226,22 @@ export async function moveListing(
 export async function browseListings(q: {
   game?: string | null; grader?: string | null; graded?: boolean | null;
   catalogId?: string | null; excludeSeller?: string | null;
+  // the rest of the acceptance criteria: "search filters by game, set, number,
+  // language, edition, finish, grade and price"
+  setName?: string | null; cardNumber?: string | null; variant?: string | null;
+  grade?: string | null; q?: string | null;
   min?: number | null; max?: number | null; sort?: string | null; limit?: number;
 }): Promise<Listing[]> {
   const pool = storePool();
   if (!pool) return [];
   const where: string[] = ["status = 'live'"];
   const args: any[] = [];
-  const add = (sql: string, v: any) => { args.push(v); where.push(sql.replace("?", `$${args.length}`)); };
+  const add = (sql: string, v: any) => {
+    // one value, however many times the clause names it
+    args.push(v);
+    const n = args.length;
+    where.push(sql.replace(/\?/g, `$${n}`));
+  };
 
   if (q.game) add("game = ?", q.game);
   // Every live copy of one exact card — what a scan result means by
@@ -206,6 +255,18 @@ export async function browseListings(q: {
   if (q.graded === false) where.push("grader is null");
   if (q.min != null) add("price >= ?", q.min);
   if (q.max != null) add("price <= ?", q.max);
+
+  // Set and number are matched loosely — a seller types "Base Set" and the
+  // catalogue says "Base Set", but a buyer may type "base". Exact matching
+  // here would return nothing and look broken.
+  if (q.setName) add("set_name ilike '%' || ? || '%'", q.setName);
+  if (q.cardNumber) add("card_number = ?", q.cardNumber);
+  // Language, edition and finish all live in `variant` until the catalogue
+  // models them separately — see the note in the scope gap list.
+  if (q.variant) add("variant = ?", q.variant);
+  if (q.grade) add("grade = ?", q.grade);
+  // A free-text box over the two fields people actually remember.
+  if (q.q) add("(card_name ilike '%' || ? || '%' or set_name ilike '%' || ? || '%')", q.q);
 
   const order =
     q.sort === "price_desc" ? "price desc"
