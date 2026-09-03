@@ -30,6 +30,7 @@ const RULES: { test: RegExp; method?: string; rule: Rule; by: "ip" | "user" }[] 
   { test: /^\/messages\//,          method: "POST", rule: { limit: 90, windowMs: 10 * 60_000 }, by: "user" },
   { test: /^\/listings\/[^/]+\/offer/, method: "POST", rule: { limit: 20, windowMs: 10 * 60_000 }, by: "user" },
   { test: /^\/ratings/,             method: "POST", rule: { limit: 15, windowMs: 60 * 60_000 }, by: "user" },
+  { test: /^\/disputes/,            method: "POST", rule: { limit: 25, windowMs: 60 * 60_000 }, by: "user" },
 
   // A scan is the most expensive request we serve — it can reach a paid
   // provider. The plan quota is the real ceiling; this stops a loop.

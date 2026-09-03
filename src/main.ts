@@ -20,6 +20,7 @@ import { initCommunity } from "./community/store.js";
 import { initWatchlist } from "./watchlist/store.js";
 import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
+import { initDisputes } from "./disputes/store.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
@@ -58,6 +59,7 @@ async function bootstrap() {
     await initWatchlist();
     await initPush();
     await initRatings();
+    await initDisputes();
     await initMessages();
     await initNotifications();
   }
