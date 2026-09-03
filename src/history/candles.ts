@@ -83,10 +83,16 @@ export function candles(closes: Close[], bucket: Bucket): Candle[] {
  *  offered only when the series actually reaches back into it.
  */
 export const RANGES = [
+  // 1W is daily, and daily is one reading a bar — so it draws as dashes, not
+  // candles. That is correct and it is also the only range a brand-new
+  // history can offer, which is why 1M buckets by WEEK rather than by day:
+  // a month of daily dashes is thirty marks saying one thing each, where a
+  // month of weekly bars is four real candles. It is both the better chart
+  // and the first one that can exist.
   { id: "1W", days: 7, bucket: "day" as Bucket },
-  { id: "1M", days: 30, bucket: "day" as Bucket },
+  { id: "1M", days: 30, bucket: "week" as Bucket },
   { id: "6M", days: 182, bucket: "week" as Bucket },
-  { id: "1Y", days: 365, bucket: "week" as Bucket },
+  { id: "1Y", days: 365, bucket: "month" as Bucket },
 ] as const;
 
 export type RangeId = (typeof RANGES)[number]["id"];
