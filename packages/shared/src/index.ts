@@ -396,6 +396,15 @@ export const Scan = z.object({
   grade: Grade.nullish(),
   authenticity: Authenticity.nullish(),
   identification: Identification.nullish(),
+  /** The runner-up matches, best first, with the chosen one at index 0.
+   *
+   *  Every catalogue is asked and the results are already ranked — this used
+   *  to keep the top one and throw the rest away. A wrong pick then had no
+   *  route out except scanning again, which produces the same wrong pick. The
+   *  alternatives are what let somebody say "no, it's the other one". */
+  candidates: z
+    .array(z.object({ identification: Identification, valuation: Valuation.nullish() }))
+    .nullish(),
   valuation: Valuation.nullish(),
   origin: Origin.nullish(),
   recommendation: Recommendation.nullish(),

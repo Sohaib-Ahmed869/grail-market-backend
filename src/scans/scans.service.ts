@@ -1,4 +1,5 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
+import { rankedCandidates } from "./candidates.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -511,6 +512,10 @@ export class ScansService {
       if (match) {
         scan.identification = match.identification;
         scan.valuation = match.valuation;
+        // Keep the ones we did not choose. They cost nothing — every catalogue
+        // was already asked — and they are the only way somebody can correct a
+        // wrong pick without rescanning and getting the same wrong pick.
+        scan.candidates = rankedCandidates(matches, match);
       } else if (!scan.identification) {
         // catalogs failed — ask the vision LLM to NAME the card (identification
         // only, never condition or price). If it names a catalog-supported
@@ -1261,6 +1266,36 @@ export class ScansService {
       | { record: string }
       | undefined;
     return row ? (JSON.parse(row.record) as Scan) : null;
+  }
+
+  /** Choose one of the alternatives.
+   *
+   *  Never re-runs vision: the photograph has not changed, only our reading of
+   *  it, and re-analysing would cost the vision box a slot to arrive at the
+   *  same pixels. The candidate list is
+   *  kept as it was so the choice can be changed again — a picker that
+   *  disappears after one use is a picker you get one attempt at.
+   *
+   *  Nothing is fetched: each candidate already carries the valuation the
+   *  catalogue that found it returned, so this is a swap. */
+  pickCandidate(id: string, cardId: string): Scan | null {
+    const scan = this.getById(id);
+    if (!scan) return null;
+    const pick = (scan.candidates ?? []).find(
+      (c) =>
+        c.identification.cardId === cardId ||
+        `${c.identification.game}:${c.identification.name}` === cardId,
+    );
+    if (!pick) return null;
+
+    scan.identification = pick.identification;
+    scan.valuation = pick.valuation ?? null;
+    // The summary quotes the identification, so it has to be rebuilt or the
+    // page ends up describing the card the user just rejected.
+    scan.summary = buildSummary(scan);
+
+    db.prepare("UPDATE scans SET record = ? WHERE id = ?").run(JSON.stringify(scan), id);
+    return scan;
   }
 
   listRecent(limit = 20): Scan[] {
