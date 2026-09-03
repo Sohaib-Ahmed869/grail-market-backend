@@ -47,7 +47,12 @@ export class HistoryController {
   ) {
     if (!catalogId) return { candles: [], ranges: [], ohlc: false };
 
-    const spec = RANGES.find((r) => r.id === range) ?? RANGES[0];
+    // Weekly is the default, because it is the first size whose bars are
+    // real candles — daily is one reading a bar however much history there is.
+    const spec =
+      RANGES.find((r) => r.id === range) ??
+      RANGES.find((r) => r.id === "W") ??
+      RANGES[0];
     // A year is asked for over a year, but the ranges offered are decided on
     // everything we hold — otherwise a short window hides the fact that a
     // longer one exists.
@@ -62,6 +67,10 @@ export class HistoryController {
     return {
       candles: bars,
       ranges,
+      // The labels travel with the ids so the client is not holding a second
+      // copy of this table.
+      rangeLabels: RANGES.filter((r) => ranges.includes(r.id))
+        .map((r) => ({ id: r.id, label: r.label })),
       range: spec.id,
       grader: all.grader,
       ohlc: bars.some((b) => b.readings > 1),

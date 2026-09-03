@@ -80,23 +80,28 @@ test("nothing in, nothing out", () => {
   assert.deepEqual(candles([c("2026-03-02", 10)], "week").length, 1);
 });
 
-test("a range is offered only when the data reaches into it", () => {
-  const now = new Date("2026-03-10T00:00:00Z");
-  // eight days of history: a week is real, a year is not
-  const short = [c("2026-03-02", 10), c("2026-03-10", 12)];
-  const got = availableRanges(short, now);
-  assert.ok(got.includes("1W"));
-  assert.ok(!got.includes("6M"), "six months of nothing is not six months");
-  assert.ok(!got.includes("1Y"));
+test("a bar size is offered once there are two bars of it", () => {
+  // eight days spanning two calendar weeks but one month
+  const eight = [c("2026-03-01", 10), c("2026-03-03", 11), c("2026-03-08", 12)];
+  const got = availableRanges(eight);
+  assert.ok(got.includes("D"), "three separate days is a daily chart");
+  assert.ok(got.includes("W"), "1 Mar is one week and 3 Mar the next");
+  assert.ok(!got.includes("M"), "all of it is March, so monthly is one bar");
 });
 
-test("a long series offers every range", () => {
-  const now = new Date("2026-03-10T00:00:00Z");
-  const long = [c("2024-01-01", 10), c("2026-03-10", 20)];
-  assert.deepEqual(availableRanges(long, now), RANGES.map((r) => r.id));
+test("one bar is not a chart", () => {
+  // three readings, all in the same week
+  const week = [c("2026-03-02", 10), c("2026-03-03", 11), c("2026-03-04", 12)];
+  assert.ok(!availableRanges(week).includes("W"), "one weekly bar is a rectangle");
+  assert.ok(availableRanges(week).includes("D"));
 });
 
-test("one reading offers no range at all", () => {
+test("a long series offers every bar size", () => {
+  const long = [c("2024-01-01", 10), c("2025-06-01", 15), c("2026-03-10", 20)];
+  assert.deepEqual(availableRanges(long), RANGES.map((r) => r.id));
+});
+
+test("one reading offers nothing at all", () => {
   assert.deepEqual(availableRanges([c("2026-03-02", 10)]), []);
   assert.deepEqual(availableRanges([]), []);
 });

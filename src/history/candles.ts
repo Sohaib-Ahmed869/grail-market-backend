@@ -82,32 +82,33 @@ export function candles(closes: Close[], bucket: Bucket): Candle[] {
  *  picker — it claims a year of history that does not exist. A range is
  *  offered only when the series actually reaches back into it.
  */
+// The options name the BAR, not the window.
+//
+// They used to say 1W / 1M / 6M / 1Y, which is a claim about how far back the
+// data goes — and a "1Y" button over a fortnight of history draws a fortnight
+// under a label saying a year. Worse, it hid the candles: the only range a new
+// history could offer was the daily one, and a daily bar is a single reading,
+// so the chart was dashes even though the weekly bars underneath were real.
+//
+// Naming the bar makes every option honest the moment it has two bars to draw,
+// and "Weekly" over three weeks of data is exactly what it says it is.
 export const RANGES = [
-  // 1W is daily, and daily is one reading a bar — so it draws as dashes, not
-  // candles. That is correct and it is also the only range a brand-new
-  // history can offer, which is why 1M buckets by WEEK rather than by day:
-  // a month of daily dashes is thirty marks saying one thing each, where a
-  // month of weekly bars is four real candles. It is both the better chart
-  // and the first one that can exist.
-  { id: "1W", days: 7, bucket: "day" as Bucket },
-  { id: "1M", days: 30, bucket: "week" as Bucket },
-  { id: "6M", days: 182, bucket: "week" as Bucket },
-  { id: "1Y", days: 365, bucket: "month" as Bucket },
+  { id: "D", label: "Daily", days: 60, bucket: "day" as Bucket },
+  { id: "W", label: "Weekly", days: 400, bucket: "week" as Bucket },
+  { id: "M", label: "Monthly", days: 1200, bucket: "month" as Bucket },
 ] as const;
 
 export type RangeId = (typeof RANGES)[number]["id"];
 
-/** Which ranges this series can honestly draw.
+/** Which bar sizes this series can actually draw.
  *
- *  A range needs enough span to be a different picture from the one below it;
- *  offering 1Y over eight days of data draws the same eight days under a
- *  label that says a year. */
-export function availableRanges(closes: Close[], now = new Date()): RangeId[] {
+ *  Two bars is the floor. One bar is not a chart — it is a single rectangle,
+ *  and offering a button that draws one is offering a button that does
+ *  nothing. */
+export function availableRanges(closes: Close[]): RangeId[] {
   if (closes.length < 2) return [];
-  const oldest = closes.reduce((a, b) => (a.day < b.day ? a : b)).day;
-  const spanDays =
-    (now.getTime() - new Date(`${oldest}T00:00:00Z`).getTime()) / 86_400_000;
-  // Half the window is enough to be worth showing — a "1M" over eighteen days
-  // is still a month's worth of shape, where three days is not.
-  return RANGES.filter((r) => spanDays >= r.days / 2).map((r) => r.id);
+  return RANGES.filter((r) => {
+    const buckets = new Set(closes.map((c) => bucketOf(c.day, r.bucket)));
+    return buckets.size >= 2;
+  }).map((r) => r.id);
 }
