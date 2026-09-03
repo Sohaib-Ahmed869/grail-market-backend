@@ -22,6 +22,7 @@ import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initDisputes } from "./disputes/store.js";
 import { initScanQuota } from "./scans/scanquota.store.js";
+import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
@@ -62,6 +63,7 @@ async function bootstrap() {
     await initRatings();
     await initDisputes();
     await initScanQuota();
+    await initMaintenance();
     await initMessages();
     await initNotifications();
   }

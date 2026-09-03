@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { SlidingWindow, type Rule } from "./bucket.js";
 import { readToken } from "../auth/tokens.js";
+import { tickMaintenance } from "../maintenance/jobs.js";
 
 // What is worth limiting, and how hard.
 //
@@ -68,6 +69,12 @@ function callerFor(req: Request): string | null {
 }
 
 export function rateLimit(req: Request, res: Response, next: NextFunction): void {
+  // Piggybacked here rather than given a middleware of its own: this already
+  // runs on every request, and the check is a subtraction against an in-memory
+  // clock that touches nothing in the common case. There is no cron process
+  // and no worker dyno — see maintenance/schedule.ts for why.
+  tickMaintenance();
+
   const path = req.path;
   const match = RULES.find(
     (r) => r.test.test(path) && (!r.method || r.method === req.method),
