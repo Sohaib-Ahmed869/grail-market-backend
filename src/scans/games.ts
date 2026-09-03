@@ -32,6 +32,9 @@ export const GAMES: Game[] = [
 
 const DAY = 24 * 3600 * 1000;
 const cache = new TtlCache<SetSummary[]>(DAY, 8);
+/** Games whose artwork is being fetched right now, so a second request while
+ *  the first is still running does not start it again. */
+const enriching = new Set<string>();
 
 async function json<T>(url: string): Promise<T | null> {
   try {
@@ -127,11 +130,53 @@ async function ygoSets(): Promise<SetSummary[]> {
     .sort((a, b) => (b.releasedAt ?? "").localeCompare(a.releasedAt ?? ""));
 }
 
+/** A picture for every set in a catalogue that publishes none.
+ *
+ *  One Piece and Lorcana list a set as a code and a name, so every tile in
+ *  those two games rendered as its own name in grey. One card from each set
+ *  fixes it — 22 sets apiece, fetched once and then cached for a day like the
+ *  list itself, so it is 44 upstream requests a day and not 44 per visitor.
+ *
+ *  Bounded to six at a time. Firing twenty-two at a public API the moment
+ *  somebody taps a tile is how a free catalogue starts refusing us. */
+async function withCardArt(gameId: string, sets: SetSummary[]): Promise<SetSummary[]> {
+  const out = [...sets];
+  const queue = out.map((s, i) => ({ s, i })).filter((x) => !x.s.logo);
+
+  const worker = async () => {
+    for (;;) {
+      const job = queue.shift();
+      if (!job) return;
+      const code = job.s.setId.split(":")[1];
+      if (!code) continue;
+      try {
+        if (gameId === "lorcana") {
+          const r = await json<any>(`https://api.lorcast.com/v0/sets/${encodeURIComponent(code)}/cards`);
+          const list = Array.isArray(r) ? r : (r?.results ?? []);
+          const url = list.find((c: any) => c?.image_uris?.digital?.small)?.image_uris?.digital?.small;
+          if (url) out[job.i] = { ...job.s, logo: url };
+        } else if (gameId === "onepiece") {
+          const r = await json<any>(`https://optcgapi.com/api/sets/${encodeURIComponent(code)}/`);
+          const list = Array.isArray(r) ? r : (r?.data ?? []);
+          const url = list.find((c: any) => c?.card_image)?.card_image;
+          if (url) out[job.i] = { ...job.s, logo: url };
+        }
+      } catch {
+        // A set without a picture keeps its name, which is the fallback the
+        // tile already draws.
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return out;
+}
+
 export async function setsForGame(gameId: string): Promise<SetSummary[]> {
   const hit = cache.get(gameId);
   if (hit) return hit;
 
-  const sets =
+  let sets =
     gameId === "pokemon" ? await listPokemonSets()
     : gameId === "onepiece" ? await onePieceSets()
     : gameId === "yugioh" ? await ygoSets()
@@ -142,6 +187,21 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
   // Never cache an empty answer. An upstream having a bad minute would
   // otherwise leave a game looking permanently empty for a day.
   if (sets.length) cache.set(gameId, sets);
+
+  // The two catalogues that publish no set artwork get a card instead — but
+  // NOT on the request that asked for the list. Twenty-two lookups is fifteen
+  // seconds, and making the first person to tap One Piece wait fifteen
+  // seconds to see names they could have had immediately is a bad trade for
+  // pictures. It runs after the answer has gone out and updates the cache, so
+  // the art is there a moment later and for the rest of the day.
+  if (sets.length && !enriching.has(gameId) && (gameId === "onepiece" || gameId === "lorcana")) {
+    enriching.add(gameId);
+    void withCardArt(gameId, sets)
+      .then((withArt) => cache.set(gameId, withArt))
+      .catch(() => {})
+      .finally(() => enriching.delete(gameId));
+  }
+
   return sets;
 }
 
