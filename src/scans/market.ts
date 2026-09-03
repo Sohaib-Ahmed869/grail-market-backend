@@ -23,6 +23,8 @@ export type PulseCard = {
   price: number | null;
   change24h: number | null; // percent
   change7d: number | null; // percent
+  change30d: number | null;
+  change90d: number | null;
   low7: number | null;
   high7: number | null;
   spark: number[]; // recent price points, oldest -> newest
@@ -215,6 +217,11 @@ export async function marketPulse(): Promise<PulseCard[]> {
         price: pct(v.price),
         change24h: pct(v.priceChange24hr),
         change7d: pct(v.priceChange7d),
+        // The feed carries all four and we were dropping half of them. One
+        // number tells you a card moved; four tell you whether it is a spike
+        // or a trend, which is the difference between news and noise.
+        change30d: pct(v.priceChange30d),
+        change90d: pct(v.priceChange90d),
         low7: pct(v.minPrice7d),
         high7: pct(v.maxPrice7d),
         spark,
