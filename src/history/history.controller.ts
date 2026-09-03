@@ -1,7 +1,8 @@
 import { Controller, Get, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
-import { cardHistory, collectionHistory, marketIndex } from "./store.js";
+import { cardHistory, closesFor, collectionHistory, marketIndex } from "./store.js";
+import { availableRanges, candles, RANGES } from "./candles.js";
 
 @Controller("history")
 export class HistoryController {
@@ -31,6 +32,40 @@ export class HistoryController {
     // Not an error. We have no history for most cards yet, and saying so is
     // the honest answer — a chart drawn from nothing would be a lie with axes.
     return h ?? { history: null, reason: "no-history" };
+  }
+
+  /** Bars for a card, at whatever grain the range asks for.
+   *
+   *  `ohlc` says whether the bars are real candles. A bar built from ONE daily
+   *  close has an open, high, low and close that are all the same number, and
+   *  drawing that as a candle is four claims where the data supports one — so
+   *  the client is told, and draws a line instead. */
+  @Get("candles")
+  async candlesFor(
+    @Query("catalogId") catalogId?: string,
+    @Query("range") range?: string,
+  ) {
+    if (!catalogId) return { candles: [], ranges: [], ohlc: false };
+
+    const spec = RANGES.find((r) => r.id === range) ?? RANGES[0];
+    // A year is asked for over a year, but the ranges offered are decided on
+    // everything we hold — otherwise a short window hides the fact that a
+    // longer one exists.
+    const all = await closesFor(catalogId, 400);
+    const ranges = availableRanges(all.closes);
+
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - spec.days);
+    const iso = cutoff.toISOString().slice(0, 10);
+    const bars = candles(all.closes.filter((c) => c.day >= iso), spec.bucket);
+
+    return {
+      candles: bars,
+      ranges,
+      range: spec.id,
+      grader: all.grader,
+      ohlc: bars.some((b) => b.readings > 1),
+    };
   }
 
   @Get("index")

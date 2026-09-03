@@ -75,6 +75,9 @@ export type CardTrend = {
   change30d: number | null;
   change90d: number | null;
   spark: number[];
+  /** The same readings with their dates, so they can be stored as history
+   *  rather than only drawn and thrown away. */
+  history: { day: string; price: number }[];
   low7: number | null;
   high7: number | null;
 };
@@ -141,6 +144,14 @@ export async function cardTrend(a: {
       high7: pct(v.maxPrice7d),
       spark: ((v.priceHistory ?? []) as { p: number }[])
         .map((h) => h.p).filter((n) => Number.isFinite(n)).slice(-24),
+      history: ((v.priceHistory ?? []) as { p: number; t: number }[])
+        .filter((h) => Number.isFinite(h.p) && Number.isFinite(h.t))
+        .map((h) => ({
+          // The feed stamps each reading, so it is dated by when it was
+          // observed rather than by when we happened to ask.
+          day: new Date(h.t * 1000).toISOString().slice(0, 10),
+          price: h.p,
+        })),
     };
     trendCache.set(a.catalogId, trend);
     return trend;

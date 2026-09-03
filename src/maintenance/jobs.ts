@@ -1,5 +1,7 @@
 import { storePool } from "../cards.store.js";
 import { canClaim, isDue, worthChecking, DAILY, type Job } from "./schedule.js";
+import { demandedCards } from "../scans/demand.js";
+import { cardTrend } from "../scans/market.js";
 
 // The background work, and the machinery that decides when it runs.
 //
@@ -72,7 +74,55 @@ async function prunePoints(): Promise<string> {
   return `${r.rowCount ?? 0} pruned`;
 }
 
+/** The feed's own daily closes, kept.
+ *
+ *  JustTCG returns six dated readings per card and we were drawing them and
+ *  throwing them away. Written into price_points they become history that
+ *  accumulates: six days on the first run, and a day more every day after,
+ *  until there is enough of it to draw a real candle and mean a real year.
+ *
+ *  Twelve cards a day — the same list the pulse already asks about, so this
+ *  is not new spend on new cards. It runs once a day, not per visitor.
+ *
+ *  Raw prices, marked as such. These are ungraded market figures from a
+ *  price feed, not sold comps at a grade, and writing them under a grader
+ *  would be claiming a graded sale that never happened.
+ */
+async function ingestFeedHistory(): Promise<string> {
+  const pool = storePool();
+  if (!pool) return "no store";
+
+  const wanted = await demandedCards(12).catch(() => []);
+  if (!wanted.length) return "nothing demanded";
+
+  let rows = 0;
+  for (const w of wanted) {
+    const t = await cardTrend({
+      catalogId: w.catalogId, name: w.name, game: w.game,
+    }).catch(() => null);
+    if (!t?.history?.length) continue;
+
+    const values = t.history
+      .map((_, i) => `($1, 'MARKET', 0, '', '', $${i * 2 + 2}, $${i * 2 + 3}, 'feed')`)
+      .join(",");
+    const args: any[] = [w.catalogId];
+    for (const h of t.history) args.push(h.price, h.day);
+
+    await pool.query(
+      `insert into price_points
+         (catalog_id, grader, grade, qualifier, label_variant, price, day, source)
+       values ${values}
+       on conflict (catalog_id, grader, grade, qualifier, label_variant, day)
+       do update set price = excluded.price, source = excluded.source`,
+      args,
+    );
+    rows += t.history.length;
+  }
+  return `${rows} readings from ${wanted.length} cards`;
+}
+
 const JOBS: (Job & { run: () => Promise<string> })[] = [
+  { name: "ingest-feed-history", everyMs: DAILY, run: ingestFeedHistory },
   { name: "snapshot-prices", everyMs: DAILY, run: snapshotPrices },
   { name: "prune-points", everyMs: 7 * DAILY, run: prunePoints },
 ];
