@@ -261,7 +261,14 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
   const hit = detailCache.entry(setId);
   if (hit) return hit.v;
 
-  const summary = (cache.get(gameOfPrefix(prefix)) ?? []).find((x) => x.setId === setId);
+  // Load the list if it is not already held. A cold instance has nothing
+  // cached, and Yu-Gi-Oh cannot be queried without the set's NAME — so
+  // opening a set link directly, or after a deploy, answered "not found" for
+  // a set that exists. The list is cached for a day, so this happens once.
+  const game = gameOfPrefix(prefix);
+  let known = cache.get(game);
+  if (!known) known = await setsForGame(game).catch(() => []);
+  const summary = (known ?? []).find((x) => x.setId === setId);
   const base = {
     setId,
     name: summary?.name ?? code,
