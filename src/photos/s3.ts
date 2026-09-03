@@ -55,11 +55,18 @@ export type Upload = { key: string; uploadUrl: string; publicUrl: string };
  *  could name a path inside somebody else's listing and overwrite their
  *  photographs. */
 export async function signUpload(
-  listingId: string, angle: Angle | "video", contentType: string,
+  ownerId: string,
+  angle: Angle | "video" | string,
+  contentType: string,
+  /** Which folder the object lands in. Listings were the only thing with
+   *  photographs until disputes needed evidence, and evidence must not sit
+   *  under `listings/` — a lifecycle rule that expires listing photos when a
+   *  listing goes would take the proof with it. */
+  prefix: "listings" | "disputes" = "listings",
 ): Promise<Upload> {
   if (!photosConfigured()) throw new Error("photo storage is not configured");
   const ext = contentType.includes("png") ? "png" : contentType.startsWith("video") ? "mp4" : "jpg";
-  const key = `listings/${listingId}/${angle}-${randomUUID().slice(0, 8)}.${ext}`;
+  const key = `${prefix}/${ownerId}/${angle}-${randomUUID().slice(0, 8)}.${ext}`;
 
   const uploadUrl = await getSignedUrl(
     s3(),

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
+import { photosConfigured, signUpload } from "../photos/s3.js";
 import { REASONS } from "./rules.js";
 import {
   addEvent, getDispute, myDisputes, raiseDispute, resolveDispute, withdrawDispute,
@@ -45,6 +46,27 @@ export class DisputesController {
       detail: b?.detail ?? null, photos: b?.photos,
     });
     return r.ok ? { disputeId: r.disputeId } : { error: r.why, message: r.message };
+  }
+
+  /** Signed URLs for evidence photographs. The bytes go straight to S3 — the
+   *  API only signs, so six images do not occupy six request slots on the box
+   *  that also runs the scan pipeline. */
+  @Post(":id/photo-urls")
+  async photoUrls(@Param("id") id: string, @Req() req: Request, @Body() b: { count?: number }) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    if (!photosConfigured()) {
+      return { error: "photos-unconfigured", message: "Photo storage is not configured." };
+    }
+    // Only a party to the dispute, and getDispute already refuses anyone else.
+    const d = await getDispute(id, me);
+    if (!d) return { error: "not-found", message: "That dispute doesn't exist." };
+
+    const n = Math.min(Math.max(Number(b?.count ?? 1), 1), 6);
+    const uploads = await Promise.all(
+      Array.from({ length: n }, (_, i) => signUpload(id, `evidence-${i}`, "image/jpeg", "disputes")),
+    );
+    return { uploads };
   }
 
   @Post(":id/reply")
