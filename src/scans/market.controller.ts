@@ -7,7 +7,7 @@ import { scanCounts } from "./ledger.js";
 import { cardNews, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
-import { gamesWithPreviews, setsForGame } from "./games.js";
+import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
@@ -109,6 +109,12 @@ export class MarketController {
   /** One set and the cards in it. */
   @Get("sets/:setId")
   async set(@Param("setId") setId: string) {
+    // A prefixed id belongs to one of the catalogues TCGdex does not cover.
+    // `undefined` means "not one of mine", which is the Pokemon path.
+    const other = await setDetailForGame(setId);
+    if (other !== undefined) {
+      return other ?? { error: "not-found", message: "That set couldn't be loaded." };
+    }
     const s = await getSet(setId);
     return s ?? { error: "not-found", setId };
   }

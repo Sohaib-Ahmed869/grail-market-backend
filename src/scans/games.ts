@@ -1,5 +1,5 @@
 import { TtlCache } from "./ttlcache.js";
-import { listSets as listPokemonSets, type SetSummary } from "./sets.js";
+import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
 
 // Browsing, one level up.
 //
@@ -241,6 +241,96 @@ async function cardPreview(gameId: string, sets: SetSummary[]): Promise<string |
   previewCache.set(gameId, url);
   return url;
 }
+
+const detailCache = new TtlCache<SetDetail | null>(DAY, 120);
+
+/** One set and the cards in it, for the games TCGdex does not cover.
+ *
+ *  The set list gave every non-Pokemon set an id like "mtg:trk", and nothing
+ *  could open one: getSet only speaks TCGdex, so every tile outside Pokemon
+ *  answered "that set couldn't be loaded". The list was built and the door at
+ *  the end of it was not.
+ *
+ *  Returns null for an id with no prefix, which is the caller's signal to use
+ *  the Pokemon path it always used. */
+export async function setDetailForGame(setId: string): Promise<SetDetail | null | undefined> {
+  const [prefix, ...rest] = setId.split(":");
+  const code = rest.join(":");
+  if (!code) return undefined;   // no prefix — not ours
+
+  const hit = detailCache.entry(setId);
+  if (hit) return hit.v;
+
+  const summary = (cache.get(gameOfPrefix(prefix)) ?? []).find((x) => x.setId === setId);
+  const base = {
+    setId,
+    name: summary?.name ?? code,
+    logo: summary?.logo ?? null,
+    symbol: summary?.symbol ?? null,
+    total: summary?.total ?? 0,
+    official: summary?.official ?? 0,
+    releasedAt: summary?.releasedAt ?? null,
+  };
+
+  let cards: SetDetail["cards"] = [];
+  try {
+    if (prefix === "mtg") {
+      const r = await json<any>(
+        `https://api.scryfall.com/cards/search?q=set:${encodeURIComponent(code)}&order=set&unique=prints`,
+      );
+      cards = (r?.data ?? []).map((c: any) => ({
+        cardId: `mtg-${c.id}`,
+        name: c.name,
+        localId: String(c.collector_number ?? ""),
+        imageUrl: c.image_uris?.normal ?? c.card_faces?.[0]?.image_uris?.normal ?? null,
+      }));
+    } else if (prefix === "lorcana") {
+      const r = await json<any>(`https://api.lorcast.com/v0/sets/${encodeURIComponent(code)}/cards`);
+      const list = Array.isArray(r) ? r : (r?.results ?? []);
+      cards = list.map((c: any) => ({
+        cardId: `lorcana-${c.id}`,
+        name: [c.name, c.version].filter(Boolean).join(" — "),
+        localId: String(c.collector_number ?? ""),
+        imageUrl: c.image_uris?.digital?.normal ?? c.image_uris?.digital?.small ?? null,
+      }));
+    } else if (prefix === "optcg") {
+      const r = await json<any>(`https://optcgapi.com/api/sets/${encodeURIComponent(code)}/`);
+      const list = Array.isArray(r) ? r : (r?.data ?? []);
+      cards = list.map((c: any) => ({
+        cardId: `optcg-${c.card_set_id}`,
+        name: c.card_name,
+        localId: String(c.card_set_id ?? ""),
+        imageUrl: c.card_image ?? null,
+      }));
+    } else if (prefix === "ygo") {
+      // ygoprodeck queries by set NAME, not by code, so the name has to come
+      // from the list we already hold. Without it there is nothing to ask.
+      if (!summary?.name) return null;
+      const r = await json<any>(
+        `https://db.ygoprodeck.com/api/v7/cardinfo.php?cardset=${encodeURIComponent(summary.name)}`,
+      );
+      cards = (r?.data ?? []).map((c: any) => ({
+        cardId: `ygo-${c.id}`,
+        name: c.name,
+        localId: String(c.card_sets?.[0]?.set_code ?? ""),
+        imageUrl: c.card_images?.[0]?.image_url_small ?? null,
+      }));
+    } else {
+      return undefined;
+    }
+  } catch {
+    return null;
+  }
+
+  const detail: SetDetail = { ...base, total: cards.length || base.total, cards };
+  // Only a set with cards is worth remembering. Caching an empty one turns a
+  // bad minute upstream into an empty set for a day.
+  if (cards.length) detailCache.set(setId, detail);
+  return cards.length ? detail : null;
+}
+
+const gameOfPrefix = (p: string) =>
+  p === "optcg" ? "onepiece" : p === "ygo" ? "yugioh" : p;
 
 /** The games, each with a count and a picture.
  *
