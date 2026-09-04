@@ -86,13 +86,28 @@ export class CollectionController {
     return { entryId: id };
   }
 
+  /** Take a card out of the collection.
+   *
+   *  The user id is in the WHERE clause, not checked beforehand: one statement
+   *  that cannot delete somebody else's row is safer than two that could race.
+   *
+   *  It reports whether a row actually went. Answering ok to a delete that
+   *  matched nothing is indistinguishable from a real one, so a screen holding
+   *  a stale entry id would show the card disappear and then find it still
+   *  there on the next load. */
   @Delete(":entryId")
   async remove(@Param("entryId") entryId: string, @Req() req: Request) {
     const me = callerId(req);
     if (!me) return { error: "unauthenticated" };
     const pool = storePool();
     if (!pool) return { error: "no-store" };
-    await pool.query("delete from collection where entry_id = $1 and user_id = $2", [entryId, me]);
+    const r = await pool.query(
+      "delete from collection where entry_id = $1 and user_id = $2",
+      [entryId, me],
+    );
+    if (!r.rowCount) {
+      return { error: "not-found", message: "That card is no longer in your collection." };
+    }
     return { ok: true };
   }
 }
