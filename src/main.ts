@@ -25,6 +25,7 @@ import { initScanQuota } from "./scans/scanquota.store.js";
 import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
+import { initNotificationPrefs } from "./notifications/prefs.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 import { rateLimit } from "./limits/middleware.js";
 
@@ -66,6 +67,7 @@ async function bootstrap() {
     await initMaintenance();
     await initMessages();
     await initNotifications();
+    await initNotificationPrefs();
   }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 
