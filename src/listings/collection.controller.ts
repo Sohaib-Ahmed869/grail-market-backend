@@ -4,6 +4,7 @@ import type { Request } from "express";
 import { storePool } from "../cards.store.js";
 import { callerId } from "../auth/auth.controller.js";
 import { gradedPricesFor } from "../scans/pricing.js";
+import { valueOfEntry, type Unpriced } from "./collectionvalue.js";
 
 @Controller("collection")
 export class CollectionController {
@@ -26,18 +27,23 @@ export class CollectionController {
     const entries = await Promise.all(
       r.rows.map(async (e: any) => {
         let value: number | null = null;
+        let unpriced: Unpriced | null = null;
         try {
           const p = await gradedPricesFor({
             catalogId: e.catalog_id, name: e.card_name,
             number: e.card_number, setName: e.set_name,
           });
-          // Invariant 1: priced at its own grader and grade, never a
-          // grade-only lookup and never another company's figure.
-          value = e.grader && e.grade
-            ? p.byGrader?.[e.grader]?.[String(e.grade)]?.price ?? null
-            : p.rawUsd ?? null;
+          // Invariant 1, and its inverse: priced at its own grader and its own
+          // grade, never a grade-only lookup, never another company's figure,
+          // and never the RAW price standing in for a slab whose grade we do
+          // not have. See collectionvalue.ts for why that last one is the
+          // whole reason this moved out of here.
+          ({ value, unpriced } = valueOfEntry(
+            { grader: e.grader, grade: e.grade }, p,
+          ));
         } catch {
-          value = null;   // a missing price is a blank, not a zero
+          value = null;         // a missing price is a blank, not a zero
+          unpriced = "price";
         }
         return {
           entryId: e.entry_id, catalogId: e.catalog_id, cardName: e.card_name,
@@ -45,7 +51,9 @@ export class CollectionController {
           grader: e.grader, grade: e.grade, variant: e.variant ?? null,
           quantity: e.quantity ?? 1,
           paid: e.paid == null ? null : Number(e.paid),
-          value, addedAt: e.added_at,
+          // `unpriced` says WHY there is no figure. "grade" is the owner's to
+          // fix and the screen offers the edit; the other two are ours.
+          value, unpriced, addedAt: e.added_at,
         };
       }),
     );
