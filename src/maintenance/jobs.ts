@@ -2,13 +2,20 @@ import { storePool } from "../cards.store.js";
 import { canClaim, isDue, worthChecking, DAILY, type Job } from "./schedule.js";
 import { demandedCards } from "../scans/demand.js";
 import { cardTrend } from "../scans/market.js";
+import { sweep } from "../watchlist/sweep.js";
 
 // The background work, and the machinery that decides when it runs.
 //
-// Nothing here calls a paid API. That is the design constraint, not an
-// accident: a scheduled job that spends money is a bill that arrives whether
-// or not anybody opened the app, and the two jobs below are both rearrangements
-// of data we have already bought.
+// The constraint is that a job must not be able to run up a bill nobody asked
+// for: a scheduled task that spends money spends it whether or not anybody
+// opened the app. Most of what is here is a rearrangement of data already
+// bought, and costs nothing.
+//
+// The alert sweep is the one that can reach a provider, and only on a card
+// somebody follows whose price is not already in the store. It is bounded by
+// how many distinct cards are being watched, deduplicated before pricing, and
+// runs once a day — which is also the shortest useful period for a rule
+// written as "tell me if it moves 10%".
 
 export const MAINTENANCE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS maintenance (
@@ -98,7 +105,7 @@ async function ingestFeedHistory(): Promise<string> {
   let rows = 0;
   for (const w of wanted) {
     const t = await cardTrend({
-      catalogId: w.catalogId, name: w.name, game: w.game,
+      catalogId: w.catalogId, name: w.name, game: w.game, setName: w.setName,
     }).catch(() => null);
     if (!t?.history?.length) continue;
 
@@ -121,7 +128,24 @@ async function ingestFeedHistory(): Promise<string> {
   return `${rows} readings from ${wanted.length} cards`;
 }
 
+/** Price everything anyone follows and tell whoever asked to be told.
+ *
+ *  This is the other half of the Follow button. Without it the app says "we
+ *  will tell you if it moves 10%" and then nothing ever checks — the sweep
+ *  existed but only behind POST /watchlist/sweep, which needs a cron calling
+ *  in, which is the machine we are deliberately not paying for.
+ *
+ *  Once a day is the right cadence for a 10% rule, and it is cheap for the
+ *  same reason the rest of this file is: the sweep prices through the store
+ *  first, deduplicates cards before pricing, and a hundred people watching one
+ *  card cost one lookup. */
+async function runAlertSweep(): Promise<string> {
+  const r = await sweep();
+  return `${r.cards} cards, ${r.fired} alerts`;
+}
+
 const JOBS: (Job & { run: () => Promise<string> })[] = [
+  { name: "alert-sweep", everyMs: DAILY, run: runAlertSweep },
   { name: "ingest-feed-history", everyMs: DAILY, run: ingestFeedHistory },
   { name: "snapshot-prices", everyMs: DAILY, run: snapshotPrices },
   { name: "prune-points", everyMs: 7 * DAILY, run: prunePoints },
