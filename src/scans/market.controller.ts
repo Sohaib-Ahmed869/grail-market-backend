@@ -10,6 +10,7 @@ import { getSet, listSets } from "./sets.js";
 import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { ebayShop, shopsFor, type ShopQuote } from "./shops.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
@@ -331,6 +332,13 @@ export class MarketController {
             }
           : null,
       listings: live?.listings ?? [],
+      // Where to actually buy one. The eBay row is built from the pool above
+      // rather than a second search, so this costs one tcgdex fetch and
+      // nothing else. Live rows first: a listing somebody can click beats a
+      // marketplace's summary of its own market, however good the summary.
+      shops: [ebayShop(live), ...(await shopsFor(cardId ?? null))]
+        .filter((s): s is ShopQuote => s != null)
+        .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "live" ? -1 : 1)),
       printingRead: printing ? readPrinting(printing) : null,
     };
   }
