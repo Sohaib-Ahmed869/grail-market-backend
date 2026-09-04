@@ -16,6 +16,7 @@
 
 import { demandedCards } from "./demand.js";
 import { TtlCache } from "./ttlcache.js";
+import { feedMatches } from "./feedmatch.js";
 
 export type PulseCard = {
   label: string;
@@ -96,7 +97,7 @@ const trendCache = new TtlCache<CardTrend | null>(TTL_MS, 400);
  *  dashboard rather than a second implementation that will drift.
  */
 export async function cardTrend(a: {
-  catalogId: string; name: string; game?: string | null;
+  catalogId: string; name: string; game?: string | null; setName?: string | null;
 }): Promise<CardTrend | null> {
   const key = process.env.JUSTTCG_API_KEY;
   if (!key || !a.name) return null;
@@ -108,7 +109,16 @@ export async function cardTrend(a: {
     const game = gameOf({ game: a.game ?? null, catalogId: a.catalogId });
     const url =
       `https://api.justtcg.com/v1/cards?q=${encodeURIComponent(a.name)}` +
-      (game ? `&game=${game}` : "") + `&limit=3`;
+      // Twenty, not three.
+      //
+      // The feed answers a name query with every printing of that name, in its
+      // own order, and three of them is whichever three it felt like. Asking
+      // for Meganium returns ten sets with BREAKpoint seventh — so with a limit
+      // of three the match guard correctly rejected all three and the card came
+      // back unpriced, while BEFORE the guard the richest of those three wrong
+      // printings was priced as if it were ours. One request either way; the
+      // limit was the whole reason a card the feed carries looked absent.
+      (game ? `&game=${game}` : "") + `&limit=20`;
     const res = await fetch(url, {
       headers: { "X-API-Key": key },
       signal: AbortSignal.timeout(8000),
@@ -119,6 +129,9 @@ export async function cardTrend(a: {
     let v: any = null;
     let best = -1;
     for (const c of (body?.data ?? []) as any[]) {
+      if (!feedMatches({ name: a.name, setName: a.setName }, { name: c.name, set: c.set }).ok) {
+        continue;
+      }
       for (const variant of (c.variants ?? []) as any[]) {
         const richness =
           ((variant.priceHistory?.length ?? 0) as number) * 10 +
@@ -266,7 +279,9 @@ export async function marketPulse(): Promise<PulseCard[]> {
       const url =
         `https://api.justtcg.com/v1/cards?q=${encodeURIComponent(w.name)}` +
         (game ? `&game=${game}` : "") +
-        `&limit=3`;
+        // Same reason as cardTrend: three is whichever three the feed felt
+        // like, and the printing we asked about is routinely further down.
+        `&limit=20`;
       const res = await fetch(url, {
         headers: { "X-API-Key": key },
         signal: AbortSignal.timeout(8000),
@@ -280,6 +295,13 @@ export async function marketPulse(): Promise<PulseCard[]> {
       let v: any = null;
       let best = -1;
       for (const c of (body?.data ?? []) as any[]) {
+        // Only cards that are actually the one we asked about. The feed
+        // answers a name query with whatever is closest, and "closest" to
+        // "Lurantis ex" was three different Lurantis from three other sets —
+        // which the pulse then priced our card with.
+        if (!feedMatches({ name: w.name, setName: w.setName }, { name: c.name, set: c.set }).ok) {
+          continue;
+        }
         for (const variant of (c.variants ?? []) as any[]) {
           const richness =
             ((variant.priceHistory?.length ?? 0) as number) * 10 +
@@ -291,6 +313,8 @@ export async function marketPulse(): Promise<PulseCard[]> {
           }
         }
       }
+      // Nothing that is really this card. A mover with no price is not shown
+      // at all rather than shown with somebody else's.
       if (!card || !v) continue;
 
       const feedId = String(card.id ?? `${card.name}|${card.set_name ?? ""}`);

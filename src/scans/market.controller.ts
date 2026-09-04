@@ -210,9 +210,14 @@ export class MarketController {
     @Query("cardId") cardId?: string,
     @Query("name") name?: string,
     @Query("game") game?: string,
+    @Query("set") setName?: string,
   ) {
     if (!cardId || !name) return { trend: null };
-    return { trend: await cardTrend({ catalogId: cardId, name, game: game ?? null }) };
+    return {
+      trend: await cardTrend({
+        catalogId: cardId, name, game: game ?? null, setName: setName ?? null,
+      }),
+    };
   }
 
   @Get("price")
