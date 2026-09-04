@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { PLANS, findPlan, type PlanId } from "./plans.js";
+import { livePrices } from "./liveprice.js";
 import { createCheckout, stripeConfigured, verifyStripe } from "./stripe.js";
 import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applySubscription, readSubscription, recordEvent } from "./store.js";
@@ -14,10 +15,27 @@ export class BillingController {
   /** The plans, so the app renders one list rather than keeping its own copy
    *  that drifts from the prices actually charged. */
   @Get("plans")
-  plans() {
+  async plans() {
+    // Stripe's figure, not the constant beside it. A price edited in the
+    // dashboard archives the old price and mints a new id, so a hand-typed
+    // amountCents and a pinned price id both go stale the moment anybody
+    // touches billing — which is how Collector came to advertise A$10 while
+    // being unbuyable. What Stripe charges is the only true answer, so it is
+    // the one that ships.
+    const live = await livePrices();
     return {
       configured: stripeConfigured(),
-      plans: PLANS.map(({ priceEnv, ...rest }) => rest),
+      plans: PLANS.map(({ priceEnv, ...rest }) => {
+        const l = live.get(rest.id);
+        return {
+          ...rest,
+          amountCents: l?.amountCents ?? rest.amountCents,
+          currency: l?.currency ?? "AUD",
+          // A plan Stripe will not sell is shown as unavailable rather than
+          // offered at a price the checkout would then refuse.
+          available: l != null,
+        };
+      }),
     };
   }
 

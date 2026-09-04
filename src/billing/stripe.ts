@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { findPlan, priceIdFor } from "./plans.js";
+import { livePriceFor } from "./liveprice.js";
 
 // Stripe, over plain HTTP rather than the SDK.
 //
@@ -37,7 +38,13 @@ export async function createCheckout(opts: {
 
   const plan = findPlan(opts.planId);
   if (!plan) throw new Error(`unknown plan: ${opts.planId}`);
-  const price = priceIdFor(plan);
+  // The price Stripe currently sells this product at, which is not necessarily
+  // the id in the environment: editing a price archives it and creates a new
+  // one, and Stripe rejects an archived price with "The price specified is
+  // inactive". Falling back to the pinned id keeps this working when Stripe
+  // cannot be reached to resolve anything better.
+  const live = await livePriceFor(plan);
+  const price = live?.priceId ?? priceIdFor(plan);
   if (!price) throw new Error(`${plan.priceEnv} is not set`);
 
   const res = await fetch(`${API}/checkout/sessions`, {
