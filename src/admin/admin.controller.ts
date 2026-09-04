@@ -29,6 +29,12 @@ import {
 import {
   compsFor, excludedComps, feedHealth, gradeSets, medianOf, ruleOnComp,
 } from "./pricing.store.js";
+import { isPeriod, reportsFor } from "./reports.store.js";
+import { auditActors, auditEntries, auditTotals, isArea, writeAudit } from "./audit.store.js";
+import {
+  allAnnouncements, audiences, getAnnouncement, isChannel, isSegment, isTone,
+  liveBanner, publish, setState as setAnnouncementState, type Channel,
+} from "./announce.store.js";
 
 // The admin console's own API.
 //
@@ -189,6 +195,21 @@ export class AdminController {
       href: to === "live" ? `/listing/${id}` : "/mylistings",
     }).catch(() => null);
 
+    void writeAudit({
+      actorId: who.userId,
+      actor: by,
+      area: "listing",
+      action:
+        to === "live" ? "Approved a listing"
+        : to === "rejected" ? "Rejected a listing"
+        : "Requested more from the seller",
+      target: `${before.card_name} · ${id}`,
+      detail: reason || null,
+      // A rejection ends somebody's sale and is filed on their record; an
+      // approval is the queue working normally.
+      weight: to === "live" ? "normal" : "high",
+    });
+
     return { listing: await adminListing(id), decidedBy: by };
   }
 
@@ -214,6 +235,20 @@ export class AdminController {
     const reason = typeof b?.reason === "string" ? b.reason.trim() : "";
     const r = await moveListing(id, to, { reason: reason || null, reviewedBy: who.name });
     if (!r.ok) return { error: r.why };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "listing",
+      action:
+        to === "paused" ? "Paused a listing"
+        : to === "live" ? "Put a listing back on the market"
+        : "Withdrew a listing",
+      target: id,
+      detail: reason || null,
+      // Withdrawing is final and kills the listing. Pausing gives it back.
+      weight: to === "withdrawn" ? "high" : "normal",
+    });
     return { listing: await adminListing(id) };
   }
 
@@ -289,7 +324,21 @@ export class AdminController {
     }
     const ok = await setStanding(id, standing as MemberStatus, reason, who.name);
     if (!ok) return { error: "not-found" };
-    return { member: await adminMember(id) };
+
+    const m = await adminMember(id);
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "member",
+      action:
+        standing === "restricted" ? "Restricted an account"
+        : standing === "revoked" ? "Revoked marketplace access"
+        : "Put an account back in good standing",
+      target: m?.handle ?? id,
+      detail: reason || null,
+      weight: "high",
+    });
+    return { member: m };
   }
 
   /** Internal labels and the staff note. Never visible to the member. */
@@ -330,10 +379,196 @@ export class AdminController {
     }
     const ok = await setRole(id, role, who.name);
     if (!ok) return { error: "not-found" };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "staff",
+      action: role === "member" ? "Revoked console access" : `Granted the ${ROLE_LABEL[role]} role`,
+      target: id,
+      weight: "high",
+    });
     return { staff: await adminStaff() };
   }
 
+  /* ======================================================== the audit log */
+
+  /**
+   * Who did what, and the reason they recorded at the time.
+   *
+   * Read-only, and there is deliberately no route that edits or removes an
+   * entry. The page says "nothing here can be edited or deleted by anyone"
+   * underneath itself, and that has to be true of the API rather than of the
+   * screen — a console that hides a delete button still has one.
+   *
+   * Filtering is the database's job. The console used to hold the whole log in
+   * the bundle and cut it down in the browser, which is fine at thirteen rows
+   * and not at the seven years of retention the page promises.
+   */
+  @Get("audit")
+  async audit(
+    @Req() req: Request,
+    @Query("area") area?: string,
+    @Query("actor") actor?: string,
+    @Query("weight") weight?: string,
+    @Query("q") q?: string,
+  ) {
+    const who = await requireCapability(req, "audit.read");
+    if (denied(who)) return who;
+    const [entries, actors, totals] = await Promise.all([
+      auditEntries({
+        area: area && isArea(area) ? area : null,
+        actor: actor ?? null,
+        weight: weight ?? null,
+        search: q?.trim() || null,
+      }),
+      auditActors(),
+      auditTotals(),
+    ]);
+    return { entries, actors, totals };
+  }
+
+  /* ====================================================== announcements */
+
+  /**
+   * Everything broadcast, queued or currently on the app.
+   *
+   * The audience counts come back with it. The compose screen promises a
+   * number before anybody presses send, and counting it in the browser off a
+   * bundled member list is how that number ends up being about a different set
+   * of people than the send is.
+   */
+  @Get("announcements")
+  async announcements(@Req() req: Request) {
+    const who = await requireCapability(req, "announce.write");
+    if (denied(who)) return who;
+    const [list, banner, segments] = await Promise.all([
+      allAnnouncements(),
+      liveBanner(),
+      audiences(),
+    ]);
+    return { announcements: list, banner, segments };
+  }
+
+  /**
+   * Send it, or queue it.
+   *
+   * What is recorded is what was sent and to how many. Nothing is dispatched:
+   * push and email both need a provider that is not wired, so every row comes
+   * back `delivered: false` and the console says so rather than implying a
+   * member received anything. Saying "sent to 5,218" when nothing left the
+   * building is the failure this endpoint is careful about.
+   */
+  @Post("announcements")
+  async announce(@Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "announce.write");
+    if (denied(who)) return who;
+
+    const title = String(b?.title ?? "").trim();
+    const body = String(b?.body ?? "").trim();
+    if (title.length < 4 || body.length < 10) {
+      return { error: "invalid", message: "A title and a message are both needed." };
+    }
+
+    /* Deduplicated, because the compose screen has three independent toggles
+       and a repeated channel would be sent twice. */
+    const named: string[] = Array.isArray(b?.channels)
+      ? (b.channels as unknown[]).map((c) => String(c))
+      : [];
+    const channels: Channel[] = [...new Set(named)].filter(isChannel);
+    if (channels.length === 0) {
+      return { error: "invalid", message: "Pick at least one channel." };
+    }
+
+    const tone = typeof b?.tone === "string" && isTone(b.tone) ? b.tone : "info";
+    const audience = typeof b?.audience === "string" && isSegment(b.audience) ? b.audience : "all";
+    const when = b?.when === "later" ? "later" : "now";
+    if (when === "later" && !b?.at) {
+      return { error: "invalid", message: "Say when it goes out." };
+    }
+    // A time already past is not a schedule, it is a send nobody asked for.
+    if (when === "later" && new Date(String(b.at)).getTime() <= Date.now()) {
+      return { error: "invalid", message: "That time has already passed." };
+    }
+
+    const a = await publish({
+      title, body, channels, audience, tone, when,
+      at: b?.at ?? null,
+      until: b?.until ?? null,
+      byName: who.name,
+      byId: who.userId,
+    });
+    if (!a) return { error: "no-store" };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "settings",
+      action: a.state === "scheduled" ? "Scheduled an announcement" : "Sent an announcement",
+      target: a.title,
+      detail: `${a.channels.join(" + ")} · ${a.audience === "all" ? "everyone" : a.audience}${
+        a.reach === undefined ? "" : ` · ${a.reach} accounts`
+      }`,
+      weight: "high",
+    });
+    return { announcement: a };
+  }
+
+  /** Pull a queued send, or take the live banner down. Nothing is deleted —
+   *  a broadcast that was queued and pulled is a thing that happened, and the
+   *  audit entry would otherwise point at a row that is gone. */
+  @Post("announcements/:id/state")
+  async announcementState(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "announce.write");
+    if (denied(who)) return who;
+
+    const state = String(b?.state ?? "");
+    if (state !== "cancelled" && state !== "taken-down") {
+      return { error: "invalid", message: "A send can be cancelled, or a banner taken down." };
+    }
+
+    const before = await getAnnouncement(id);
+    if (!before) return { error: "not-found" };
+
+    const a = await setAnnouncementState(id, state);
+    if (!a) {
+      return {
+        error: "already-settled",
+        message: "That announcement has already gone out or been pulled.",
+      };
+    }
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "settings",
+      action: state === "cancelled" ? "Cancelled a queued announcement" : "Took the banner down",
+      target: a.title,
+      weight: "normal",
+    });
+    return { announcement: a };
+  }
+
   /* ================================================== reports & conduct */
+
+  /**
+   * The reporting page, in one read.
+   *
+   * Every figure is an aggregate computed now, over the period asked for —
+   * there is no reports table, because a stored count is stale the moment
+   * anything writes and this page's only value is that it can be checked
+   * against the queues it summarises.
+   *
+   * A period the console does not offer falls back to 30 days rather than
+   * erroring: the query string is a preference, not a command, and a bad one
+   * should not leave a moderator staring at an error page.
+   */
+  @Get("reports")
+  async reports(@Req() req: Request, @Query("period") period?: string) {
+    const who = await requireCapability(req, "reports.read");
+    if (denied(who)) return who;
+    return reportsFor(period && isPeriod(period) ? period : "30d");
+  }
 
   @Get("cases")
   async cases(
@@ -432,6 +667,22 @@ export class AdminController {
       });
     }
 
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "conduct",
+      action:
+        outcome === "warned" ? "Recorded a formal warning"
+        : outcome === "restricted" ? "Restricted an account on a case"
+        : outcome === "closed" ? "Closed an account on a case"
+        : outcome === "police" ? "Referred a case to police"
+        : "Closed a case with no action",
+      target: `${id} · ${againstId}`,
+      detail: note,
+      // Only "no action" leaves the person where it found them.
+      weight: outcome === "none" ? "normal" : "high",
+    });
+
     return { case: await adminCase(id) };
   }
 
@@ -514,6 +765,15 @@ export class AdminController {
         href: `/listing/${boost.listingId}`,
       });
     }
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "billing",
+      action: "Applied a paid boost that never ran",
+      target: boost ? `${boost.handle} · ${boost.listingId}` : id,
+      detail: `Extended by ${r.daysAdded} day${r.daysAdded === 1 ? "" : "s"} for the delay.`,
+      weight: "high",
+    });
     return { boost, daysAdded: r.daysAdded };
   }
 
@@ -530,7 +790,17 @@ export class AdminController {
     if (!ok) {
       return { error: "already-settled", message: "That boost has already been comped." };
     }
-    return { boost: await adminBoost(id) };
+    const comped = await adminBoost(id);
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "billing",
+      action: "Comped a boost",
+      target: comped ? comped.handle : id,
+      detail: reason.slice(0, 1000),
+      weight: "high",
+    });
+    return { boost: comped };
   }
 
   /** One billing cycle given away. Not a standing arrangement. */
@@ -557,6 +827,15 @@ export class AdminController {
       title: "A month on us",
       body: reason.slice(0, 120),
       href: "/plans",
+    });
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "billing",
+      action: `Comped ${months} month${months === 1 ? "" : "s"} of a plan`,
+      target: `${id} · ${memberId}`,
+      detail: reason.slice(0, 1000),
+      weight: "high",
     });
     return { plans: await adminPlans() };
   }
@@ -626,6 +905,18 @@ export class AdminController {
       by: who.name,
     });
     if (!ok) return { error: "not-found", message: "No sale on the ledger with that id." };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "pricing",
+      action: Boolean(b?.excluded)
+        ? "Excluded a sale as an outlier"
+        : "Put an excluded sale back into the figure",
+      target: saleId,
+      detail: reason.slice(0, 1000),
+      weight: "normal",
+    });
     return { excluded: await excludedComps() };
   }
 
@@ -681,6 +972,15 @@ export class AdminController {
       Boolean(b?.internal),
     );
     if (!ok) return { error: "not-found" };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "support",
+      action: Boolean(b?.internal) ? "Added an internal note to a ticket" : "Replied to a ticket",
+      target: id,
+      weight: "normal",
+    });
     return { ticket: await adminTicket(id), thread: await ticketThread(id) };
   }
 

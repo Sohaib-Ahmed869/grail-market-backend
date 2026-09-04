@@ -1,4 +1,6 @@
 import { storePool } from "../cards.store.js";
+import { ANNOUNCE_SCHEMA } from "./announce.store.js";
+import { AUDIT_SCHEMA } from "./audit.store.js";
 import { COMMERCE_SCHEMA } from "./commerce.store.js";
 import { CONDUCT_SCHEMA } from "./conduct.store.js";
 import { PRICING_SCHEMA } from "./pricing.store.js";
@@ -37,13 +39,16 @@ export async function initAdmin(): Promise<void> {
   if (!pool) return;
   // One call for everything the console owns: the staff role, the member
   // record's admin-only columns, the conduct board, the support desk, the
-  // boost ledger and the price-engine exclusions.
+  // boost ledger, the price-engine exclusions, the audit log and the
+  // announcement queue.
   await pool.query(ADMIN_SCHEMA);
   await pool.query(MEMBERS_SCHEMA);
   await pool.query(CONDUCT_SCHEMA);
   await pool.query(SUPPORT_SCHEMA);
   await pool.query(COMMERCE_SCHEMA);
   await pool.query(PRICING_SCHEMA);
+  await pool.query(AUDIT_SCHEMA);
+  await pool.query(ANNOUNCE_SCHEMA);
   await bootstrapOwner();
 }
 
