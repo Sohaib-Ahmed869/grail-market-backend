@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
-import { readSubscription } from "../billing/store.js";
+import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
 import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
 import {
@@ -50,8 +50,12 @@ export class ListingsController {
   async mine(@Req() req: Request) {
     const me = need(req);
     if (!me) return { error: "unauthenticated" };
-    const [rows, sub] = await Promise.all([listingsBySeller(me), readSubscription(me)]);
-    const plan = findPlan(sub?.plan_id ?? "");
+    // Same entitlement question as create(), so the ceiling shown on the
+    // screen is the ceiling that will actually be enforced. Reading plan_id
+    // here and the paying plan there is how "1 of 10 live" sits above a
+    // refusal to publish.
+    const [rows, planId] = await Promise.all([listingsBySeller(me), activePlanId(me)]);
+    const plan = findPlan(planId ?? "");
     const live = rows.filter((r) => ["live", "in_review"].includes(r.status)).length;
     return {
       listings: rows.map(sellerShape),
@@ -88,8 +92,12 @@ export class ListingsController {
     const me = need(req);
     if (!me) return { error: "unauthenticated", message: "Sign in first." };
 
-    const sub = await readSubscription(me);
-    const plan = findPlan(sub?.plan_id ?? "");
+    // The plan they are actually PAYING for. This read plan_id straight off
+    // the row with no status check, so a cancelled or past_due subscription —
+    // which keeps its plan_id, because Stripe does not blank it — still bought
+    // the right to list. The scan path already guarded this; both now ask the
+    // same function so one subscription cannot mean two different things.
+    const plan = findPlan((await activePlanId(me)) ?? "");
     if (!plan) {
       return { error: "no-plan", message: "Choose a plan before listing.", plans: PLANS.map((p) => p.id) };
     }
