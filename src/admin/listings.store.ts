@@ -435,11 +435,11 @@ export function shape(r: any): AdminListing {
     setLine: [r.set_name, r.variant, r.card_number ? `#${String(r.card_number).replace(/^#/, "")}` : null]
       .filter(Boolean)
       .join(" · "),
-    game: r.game ?? "—",
+    game: r.game ?? "Unknown",
     grader: r.is_raw || !r.grader ? "Raw" : r.grader,
     grade: r.grade ?? "None",
     labelGrade: r.label_grade ?? undefined,
-    cert: r.cert_number ?? "—",
+    cert: r.cert_number ?? "None on the label",
     askPrice: ask,
     currency: r.currency ?? "AUD",
     marketPrice: market,

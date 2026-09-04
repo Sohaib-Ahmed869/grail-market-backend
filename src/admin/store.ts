@@ -1,6 +1,7 @@
 import { storePool } from "../cards.store.js";
 import { ANNOUNCE_SCHEMA } from "./announce.store.js";
 import { AUDIT_SCHEMA } from "./audit.store.js";
+import { SETTINGS_SCHEMA } from "./settings.store.js";
 import { COMMERCE_SCHEMA } from "./commerce.store.js";
 import { CONDUCT_SCHEMA } from "./conduct.store.js";
 import { PRICING_SCHEMA } from "./pricing.store.js";
@@ -34,6 +35,73 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS role_granted_at timestamptz;
 CREATE INDEX IF NOT EXISTS users_staff ON users (role) WHERE role <> 'member';
 `;
 
+/**
+ * Indexes for the console's own read patterns.
+ *
+ * They live here rather than beside each table because they exist for the
+ * admin queries specifically: the app asks `listings` "what is this seller
+ * selling", the console asks it "what was decided between these two dates",
+ * and those want different indexes over the same rows. Adding them to the
+ * owning module would look arbitrary there.
+ *
+ * What each one is for:
+ *
+ *   - `/admin/reports` bounds every one of its aggregates on a date range over
+ *     `reviewed_at`, `sold_at`, `created_at` or `decided_at`, and not one of
+ *     those columns was indexed. Every panel on that page was a sequential
+ *     scan of the whole table, and there are fourteen of them per load.
+ *   - The listing queue and the member directory both compute per-row seller
+ *     statistics with correlated subqueries. Those are cheap when the column
+ *     they correlate on is indexed and quadratic when it is not.
+ *
+ * Partial indexes where the query always carries the same predicate: an index
+ * over sold listings is a fraction of the size of one over all of them, and
+ * the console never asks about the rest.
+ */
+export const ADMIN_INDEXES = `
+-- reports: GMV, the game split and seller concentration, all bounded on sold_at
+CREATE INDEX IF NOT EXISTS listings_sold_at
+  ON listings (sold_at DESC) WHERE status = 'sold';
+
+-- reports: throughput, the decision split, time-to-decision and the
+-- low-confidence audit, all bounded on reviewed_at
+CREATE INDEX IF NOT EXISTS listings_reviewed_at
+  ON listings (reviewed_at DESC) WHERE reviewed_at IS NOT NULL;
+
+-- reports: member growth, and the running total it is drawn from
+CREATE INDEX IF NOT EXISTS users_created_at ON users (created_at);
+
+-- reports: conflict outcomes and conduct actions
+CREATE INDEX IF NOT EXISTS conduct_decided_at
+  ON conduct_cases (decided_at DESC) WHERE decided_at IS NOT NULL;
+
+-- reports: tickets opened in the period
+CREATE INDEX IF NOT EXISTS support_created_at ON support_tickets (created_at DESC);
+
+-- the member directory counts a member's strikes per row, and this join had
+-- no index at all: conduct_cases was scanned once per member on screen
+CREATE INDEX IF NOT EXISTS conduct_against ON conduct_cases (against_id)
+  WHERE outcome IS NOT NULL AND outcome <> 'none';
+
+-- the listing queue and the directory both count a seller's completed sales
+CREATE INDEX IF NOT EXISTS listings_seller_sold
+  ON listings (seller_id) WHERE status = 'sold';
+
+-- and both average the reviews they were left. ratings_ratee is ordered by
+-- date for the profile feed; this one carries the role the console filters on
+-- and the stars it averages, so the average is read from the index alone.
+CREATE INDEX IF NOT EXISTS ratings_ratee_role
+  ON ratings (ratee_id, rater_role) INCLUDE (stars);
+
+-- the directory counts accepted offers per member
+CREATE INDEX IF NOT EXISTS offers_buyer_accepted
+  ON offers (buyer_id) WHERE status = 'accepted';
+
+-- the queue orders by submission time within a status on every load
+CREATE INDEX IF NOT EXISTS listings_queue_order
+  ON listings (submitted_at) WHERE status = 'in_review';
+`;
+
 export async function initAdmin(): Promise<void> {
   const pool = storePool();
   if (!pool) return;
@@ -49,6 +117,15 @@ export async function initAdmin(): Promise<void> {
   await pool.query(PRICING_SCHEMA);
   await pool.query(AUDIT_SCHEMA);
   await pool.query(ANNOUNCE_SCHEMA);
+  await pool.query(SETTINGS_SCHEMA);
+  /* Last, and separately: these index tables the blocks above have just
+     created, and one that fails must not take the schema with it. An index is
+     a speed-up, not a correctness requirement — a console that will not boot
+     because `INCLUDE` needs a newer Postgres than this one is a worse outcome
+     than a console that is slow. */
+  await pool.query(ADMIN_INDEXES).catch((e) => {
+    console.warn("[admin] some indexes were not created:", (e as Error).message);
+  });
   await bootstrapOwner();
 }
 
@@ -135,6 +212,27 @@ export async function staffList(): Promise<(Staff & { grantedAt: string | null }
     role: roleOf(x.role),
     grantedAt: x.role_granted_at ? new Date(x.role_granted_at).toISOString() : null,
   }));
+}
+
+/**
+ * Find an account to give a role to, by address.
+ *
+ * Deliberately not `findByEmail` from the auth store: that returns the
+ * password hash and the MFA secret alongside the name, and the admin
+ * controller has no business holding either. Three columns is what granting a
+ * role needs.
+ */
+export async function userByEmail(
+  email: string,
+): Promise<{ userId: string; name: string; role: Role } | null> {
+  const pool = storePool();
+  if (!pool) return null;
+  const r = await pool.query(
+    "select user_id, name, role from users where lower(email) = lower($1)",
+    [email],
+  );
+  const row = r.rows[0];
+  return row ? { userId: row.user_id, name: row.name, role: roleOf(row.role) } : null;
 }
 
 /** Invite, scope, revoke — all three are this one write. */

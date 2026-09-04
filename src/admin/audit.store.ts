@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
+import { TtlCache } from "../scans/ttlcache.js";
 
 // The audit log.
 //
@@ -81,6 +82,10 @@ export type AuditEntry = {
  * throwing. See the note at the top: the action is the thing that matters, and
  * a logger that can veto it is a logger that will one day stop the console
  * working. A dropped entry is loud in the server log instead.
+ *
+ * Returns the id it wrote, or null if it could not. Every caller in the
+ * controller ignores it; the seed script uses it to date its entries, which is
+ * the only thing in the codebase that needs to name an entry after writing it.
  */
 export async function writeAudit(e: {
   actorId?: string | null;
@@ -90,16 +95,17 @@ export async function writeAudit(e: {
   target: string;
   detail?: string | null;
   weight?: "high" | "normal";
-}): Promise<void> {
+}): Promise<string | null> {
   const pool = storePool();
-  if (!pool) return;
+  if (!pool) return null;
+  const id = `au_${randomUUID().slice(0, 12)}`;
   try {
     await pool.query(
       `insert into admin_audit
          (entry_id, actor_id, actor, area, action, target, detail, weight)
        values ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
-        `au_${randomUUID().slice(0, 12)}`,
+        id,
         e.actorId ?? null,
         e.actor.slice(0, 120),
         e.area,
@@ -109,8 +115,10 @@ export async function writeAudit(e: {
         e.weight ?? "normal",
       ],
     );
+    return id;
   } catch (err) {
     console.error("[audit] entry dropped:", (err as Error).message, e.action, e.target);
+    return null;
   }
 }
 
@@ -167,8 +175,40 @@ export async function auditEntries(q: {
   return r.rows.map(shape);
 }
 
+/**
+ * The two figures the page needs but the filters do not change.
+ *
+ * The operator list and the totals are the same answer whatever is typed in
+ * the search box, and the console re-reads the log on every keystroke. Without
+ * this, each letter cost a `SELECT DISTINCT` and two `count(*)` over the whole
+ * table — three sequential scans, per character, of the one table in this
+ * system that only ever grows and is kept for seven years.
+ *
+ * Half a minute is the right staleness: an operator who has just taken a
+ * decision wants to see it in the list, which they will, because the entries
+ * themselves are never cached. What can lag is whether a colleague's name has
+ * appeared in a dropdown.
+ */
+const SIDECAR = new TtlCache<{ actors: string[]; totals: { all: number; high: number } }>(
+  30_000,
+  1,
+);
+
+async function sidecar() {
+  const hit = SIDECAR.get("log");
+  if (hit) return hit;
+  const [actors, totals] = await Promise.all([readActors(), readTotals()]);
+  const v = { actors, totals };
+  SIDECAR.set("log", v);
+  return v;
+}
+
 /** Every name that has written to the log, for the operator filter. */
 export async function auditActors(): Promise<string[]> {
+  return (await sidecar()).actors;
+}
+
+async function readActors(): Promise<string[]> {
   const pool = storePool();
   if (!pool) return [];
   const r = await pool.query("select distinct actor from admin_audit order by actor");
@@ -183,6 +223,10 @@ export async function auditActors(): Promise<string[]> {
  * tautology.
  */
 export async function auditTotals(): Promise<{ all: number; high: number }> {
+  return (await sidecar()).totals;
+}
+
+async function readTotals(): Promise<{ all: number; high: number }> {
   const pool = storePool();
   if (!pool) return { all: 0, high: 0 };
   const r = await pool.query(

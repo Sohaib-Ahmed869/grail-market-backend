@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { getListing, moveListing } from "../listings/store.js";
 import { notify } from "../notifications/store.js";
+import { tokensFor } from "../push/store.js";
 import { denied, devAuthActive, requireCapability, requireStaff } from "./guard.js";
 import { capabilitiesOf, isRole, ROLE_LABEL } from "./roles.js";
 import {
@@ -12,7 +13,7 @@ import {
   adminMember, adminMembers, adminStaff, annotateMember, memberTimeline,
   setStanding, type MemberStatus,
 } from "./members.store.js";
-import { setRole } from "./store.js";
+import { setRole, userByEmail } from "./store.js";
 import {
   adminTicket, adminTickets, isPriority, isStatus, isTier, openTicket,
   replyToTicket, REPLY_TARGET, setTicket, ticketContext, ticketCounts,
@@ -24,12 +25,20 @@ import {
 } from "./listings.store.js";
 import {
   adminBoost, adminPlans, applyBoost, billingLedger, boostLedger, BOOST_TIERS,
-  compBoost, compPlan, planExists,
+  cachePlan, compBoost, compPlan, planCatalog, planExists,
 } from "./commerce.store.js";
+import { findPlan, priceIdFor } from "../billing/plans.js";
+import {
+  archivePrice, createPrice, getPrice, getProduct, setDefaultPrice,
+  stripeConfigured, updateProduct,
+} from "../billing/stripe.js";
 import {
   compsFor, excludedComps, feedHealth, gradeSets, medianOf, ruleOnComp,
 } from "./pricing.store.js";
 import { isPeriod, reportsFor } from "./reports.store.js";
+import { attention } from "./attention.store.js";
+import { dashboard } from "./dashboard.store.js";
+import { readSettings, writeSettings } from "./settings.store.js";
 import { auditActors, auditEntries, auditTotals, isArea, writeAudit } from "./audit.store.js";
 import {
   allAnnouncements, audiences, getAnnouncement, isChannel, isSegment, isTone,
@@ -69,6 +78,42 @@ export class AdminController {
       // signed in because the development shortcut is on.
       devAuth: devAuthActive(req) || undefined,
     };
+  }
+
+  /**
+   * What has gone past a line, for the bell in the topbar.
+   *
+   * Derived on every read, never stored. An alert that has to be created and
+   * then dismissed goes stale the moment somebody else does the work, and two
+   * operators end up looking at different bells; read again, and this is
+   * current by construction.
+   *
+   * Only `requireStaff`, not a capability: every row here links to a page the
+   * reader may or may not be able to open, and cutting the list to the role
+   * would need one capability check per row for a handful of counts. What it
+   * exposes is how much work is late, which every console role can already
+   * see on the pages themselves.
+   */
+  /**
+   * Everything the dashboard draws, in one read.
+   *
+   * It was the last page quoting sample money — ~4,900 subscribers from a
+   * fixture, where `/admin/pricing` read the real number off the database.
+   * Two pages of one console disagreeing about the same figure is worse than
+   * either being wrong alone.
+   */
+  @Get("dashboard")
+  async dashboard(@Req() req: Request) {
+    const who = await requireStaff(req);
+    if (denied(who)) return who;
+    return dashboard();
+  }
+
+  @Get("attention")
+  async attention(@Req() req: Request) {
+    const who = await requireStaff(req);
+    if (denied(who)) return who;
+    return { items: await attention() };
   }
 
   /** The queue, and every other view of it. One shape for the table and the
@@ -203,7 +248,7 @@ export class AdminController {
         to === "live" ? "Approved a listing"
         : to === "rejected" ? "Rejected a listing"
         : "Requested more from the seller",
-      target: `${before.card_name} · ${id}`,
+      target: before.card_name,
       detail: reason || null,
       // A rejection ends somebody's sale and is filed on their record; an
       // approval is the queue working normally.
@@ -233,6 +278,7 @@ export class AdminController {
     if (!to) return { error: "invalid", message: "Action must be pause, resume or withdraw." };
 
     const reason = typeof b?.reason === "string" ? b.reason.trim() : "";
+    const before = await getListing(id);
     const r = await moveListing(id, to, { reason: reason || null, reviewedBy: who.name });
     if (!r.ok) return { error: r.why };
 
@@ -244,7 +290,7 @@ export class AdminController {
         to === "paused" ? "Paused a listing"
         : to === "live" ? "Put a listing back on the market"
         : "Withdrew a listing",
-      target: id,
+      target: before?.card_name ?? id,
       detail: reason || null,
       // Withdrawing is final and kills the listing. Pausing gives it back.
       weight: to === "withdrawn" ? "high" : "normal",
@@ -261,8 +307,20 @@ export class AdminController {
     const flags = Array.isArray(b?.flags)
       ? b.flags.map((f: any) => String(f).trim().slice(0, 200)).filter(Boolean).slice(0, 20)
       : undefined;
-    await annotate(id, { flags, note: typeof b?.note === "string" ? b.note.slice(0, 2000) : undefined });
-    return { listing: await adminListing(id) };
+    const note = typeof b?.note === "string" ? b.note.slice(0, 2000) : undefined;
+    await annotate(id, { flags, note });
+
+    const l = await adminListing(id);
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "listing",
+      action: "Flagged a listing",
+      target: l?.card ?? id,
+      detail: [flags?.join(", "), note].filter(Boolean).join(" · ") || null,
+      weight: "normal",
+    });
+    return { listing: l };
   }
 
   /* ======================================================= members / CRM */
@@ -349,12 +407,133 @@ export class AdminController {
     const tags = Array.isArray(b?.tags)
       ? b.tags.map((t: any) => String(t).trim().slice(0, 40)).filter(Boolean).slice(0, 20)
       : undefined;
-    const ok = await annotateMember(id, {
-      tags,
-      note: typeof b?.note === "string" ? b.note.slice(0, 2000) : undefined,
-    });
+    const note = typeof b?.note === "string" ? b.note.slice(0, 2000) : undefined;
+    const ok = await annotateMember(id, { tags, note });
     if (!ok) return { error: "not-found" };
-    return { member: await adminMember(id) };
+
+    const m = await adminMember(id);
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "member",
+      action: note !== undefined ? "Wrote an internal note on a member" : "Changed a member's labels",
+      target: m?.handle ?? id,
+      // The note itself, because "wrote a note" without the note is a
+      // timestamp. It is internal either way — the member never sees it.
+      detail: note ? note.slice(0, 1000) : tags ? tags.join(", ") : null,
+      weight: "normal",
+    });
+    return { member: m };
+  }
+
+  /**
+   * Write to members, from the console.
+   *
+   * This is the one that used to be a lie. The directory's "Message this
+   * segment" button closed its dialog and showed a toast, and the per-member
+   * Message button had no handler at all — so the console offered two ways to
+   * contact somebody and neither sent anything.
+   *
+   * It goes through `notify`, the same path every other event in the system
+   * uses, which means one row per member in `notifications` and a push where
+   * the member has a device registered. It reports back how many of each,
+   * separately, because those are different facts: a notification is in the
+   * app when they next open it, a push is on their lock screen now, and a
+   * member with no device registered gets the first and not the second.
+   */
+  @Post("members/message")
+  async messageMembers(@Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "members.act");
+    if (denied(who)) return who;
+
+    const ids: string[] = Array.isArray(b?.memberIds)
+      ? [...new Set((b.memberIds as unknown[]).map((x) => String(x)))].slice(0, 2000)
+      : [];
+    const subject = typeof b?.subject === "string" ? b.subject.trim() : "";
+    const body = typeof b?.body === "string" ? b.body.trim() : "";
+
+    if (ids.length === 0) return { error: "invalid", message: "Nobody to write to." };
+    if (subject.length < 3) return { error: "invalid", message: "A subject is needed." };
+    if (body.length < 10) return { error: "invalid", message: "Write the message first." };
+
+    let delivered = 0;
+    let pushed = 0;
+    const failed: string[] = [];
+
+    for (const id of ids) {
+      try {
+        /* Asked before sending rather than after: `notify` swallows its own
+           push failures by design, so it cannot tell us afterwards whether
+           there was a device to push to. */
+        const tokens = await tokensFor(id).catch(() => []);
+        await notify({
+          userId: id,
+          kind: "message",
+          title: subject.slice(0, 200),
+          body: body.slice(0, 2000),
+          href: "/notifications",
+        });
+        delivered += 1;
+        if (tokens.length > 0) pushed += 1;
+      } catch {
+        failed.push(id);
+      }
+    }
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "member",
+      action:
+        ids.length === 1 ? "Wrote to a member" : `Wrote to ${ids.length} members`,
+      target: subject,
+      detail: `${delivered} in-app, ${pushed} pushed to a device.`,
+      // One member is correspondence; a broadcast to a segment is not.
+      weight: ids.length > 1 ? "high" : "normal",
+    });
+
+    return { delivered, pushed, failed: failed.length, of: ids.length };
+  }
+
+  /* ============================================================ settings */
+
+  /**
+   * The operational knobs.
+   *
+   * Every one of these was a `useState` in the settings page: typed into a
+   * form, applied to nothing, and gone on reload. They are stored now, and the
+   * defaults live beside them so a value nobody has set and a value that will
+   * not parse give the same safe answer.
+   *
+   * Readable by anyone with a console role — the thresholds describe rules
+   * every operator works under. Writing is `settings.write`.
+   */
+  @Get("settings")
+  async settings(@Req() req: Request) {
+    const who = await requireStaff(req);
+    if (denied(who)) return who;
+    return { settings: await readSettings(), canEdit: who.can("settings.write") };
+  }
+
+  @Post("settings")
+  async saveSettings(@Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "settings.write");
+    if (denied(who)) return who;
+
+    const changed = await writeSettings(b ?? {}, who.name);
+    if (changed.length > 0) {
+      void writeAudit({
+        actorId: who.userId,
+        actor: who.name,
+        area: "settings",
+        action: `Changed ${changed.length} setting${changed.length === 1 ? "" : "s"}`,
+        /* Named, so the entry can be checked against something. "Settings
+           updated" is a timestamp, not an audit trail. */
+        target: changed.join(", "),
+        weight: "normal",
+      });
+    }
+    return { settings: await readSettings(), changed };
   }
 
   /* ============================================================ the team */
@@ -366,7 +545,55 @@ export class AdminController {
     return { staff: await adminStaff() };
   }
 
-  /** Invite, scope, revoke — one write, and only an owner may take it. */
+  /**
+   * Give an existing account a console role.
+   *
+   * This is what "invite" actually is here, and the difference matters. There
+   * is no way to create an account from the console — a person signs up like
+   * anybody else and is then granted a role, which is why `users.role` is a
+   * column rather than a separate staff table: a member IS a staff member with
+   * a role on them, and revoking is one UPDATE rather than two records to keep
+   * in step.
+   *
+   * So an address with no account behind it is refused, by name, rather than
+   * queued as a pending invitation that nothing will ever deliver.
+   */
+  @Post("staff/grant")
+  async grantStaff(@Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "settings.write");
+    if (denied(who)) return who;
+
+    const email = String(b?.email ?? "").trim().toLowerCase();
+    const role = String(b?.role ?? "");
+    if (!email.includes("@")) return { error: "invalid", message: "That is not an email address." };
+    if (!isRole(role) || role === "member") {
+      return { error: "invalid", message: `${role} is not a console role.` };
+    }
+
+    const found = await userByEmail(email);
+    if (!found) {
+      return {
+        error: "no-account",
+        message: `Nobody has signed up with ${email}. They need an account before it can be given a role.`,
+      };
+    }
+
+    const ok = await setRole(found.userId, role, who.name);
+    if (!ok) return { error: "not-found" };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "staff",
+      action: `Granted the ${ROLE_LABEL[role]} role`,
+      target: `${found.name} · ${email}`,
+      detail: typeof b?.why === "string" && b.why.trim() ? b.why.trim().slice(0, 1000) : null,
+      weight: "high",
+    });
+    return { staff: await adminStaff() };
+  }
+
+  /** Scope and revoke — one write, and only an owner may take it. */
   @Post("staff/:id/role")
   async staffRole(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
     const who = await requireCapability(req, "settings.write");
@@ -380,15 +607,19 @@ export class AdminController {
     const ok = await setRole(id, role, who.name);
     if (!ok) return { error: "not-found" };
 
+    const team = await adminStaff();
+    const person = team.find((x) => x.id === id);
     void writeAudit({
       actorId: who.userId,
       actor: who.name,
       area: "staff",
       action: role === "member" ? "Revoked console access" : `Granted the ${ROLE_LABEL[role]} role`,
-      target: id,
+      // A revoked account is no longer on the team list, so its name has to be
+      // read before the write or the entry is left pointing at an id.
+      target: person ? `${person.name} · ${person.email}` : id,
       weight: "high",
     });
-    return { staff: await adminStaff() };
+    return { staff: team };
   }
 
   /* ======================================================== the audit log */
@@ -612,9 +843,22 @@ export class AdminController {
     if (!isState(state)) return { error: "invalid", message: `${state} is not a case state.` };
     const ok = await setCaseState(id, state);
     if (!ok) return { error: "not-found" };
-    if (typeof b?.note === "string" && b.note.trim()) {
-      await addCaseNote(id, who.name, b.note.trim().slice(0, 2000));
-    }
+    const note = typeof b?.note === "string" ? b.note.trim() : "";
+    if (note) await addCaseNote(id, who.name, note.slice(0, 2000));
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "conduct",
+      action:
+        state === "awaiting-evidence" ? "Asked a case for evidence"
+        : state === "escalated" ? "Escalated a case"
+        : state === "resolved" ? "Closed a case"
+        : "Reopened a case",
+      target: (await adminCase(id))?.against.handle ?? id,
+      detail: note || null,
+      weight: "normal",
+    });
     return { case: await adminCase(id) };
   }
 
@@ -677,7 +921,10 @@ export class AdminController {
         : outcome === "closed" ? "Closed an account on a case"
         : outcome === "police" ? "Referred a case to police"
         : "Closed a case with no action",
-      target: `${id} · ${againstId}`,
+      target:
+        againstId === record.against.id
+          ? `${record.against.handle}, raised by ${record.raisedBy.handle}`
+          : `${record.raisedBy.handle}, who raised it against ${record.against.handle}`,
       detail: note,
       // Only "no action" leaves the person where it found them.
       weight: outcome === "none" ? "normal" : "high",
@@ -711,7 +958,14 @@ export class AdminController {
     const ok = await addCaseNote(id, who.name, `Grail Market: ${body.slice(0, 2000)}`);
     if (!ok) return { error: "not-found" };
 
+    /* Reported back rather than assumed. The console used to say "sent to both
+       parties" on the strength of having tried, which is not the same claim —
+       a member with no device registered gets it in the app and not on their
+       lock screen, and that is worth being able to see. */
+    let delivered = 0;
+    let pushed = 0;
     for (const party of [record.raisedBy, record.against]) {
+      const tokens = await tokensFor(party.id).catch(() => []);
       await notify({
         userId: party.id,
         kind: "message",
@@ -719,8 +973,24 @@ export class AdminController {
         body: body.slice(0, 120),
         href: `/dispute/${id}`,
       });
+      delivered += 1;
+      if (tokens.length > 0) pushed += 1;
     }
-    return { case: await adminCase(id), thread: await caseThread(id) };
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "conduct",
+      action: "Wrote to both parties on a case",
+      target: `${record.raisedBy.handle} and ${record.against.handle}`,
+      detail: body.slice(0, 1000),
+      weight: "normal",
+    });
+
+    return {
+      case: await adminCase(id),
+      thread: await caseThread(id),
+      delivery: { delivered, pushed, of: 2 },
+    };
   }
 
   /* ========================================================= subscriptions */
@@ -741,7 +1011,182 @@ export class AdminController {
       boostLedger(),
       billingLedger(),
     ]);
-    return { plans, boosts, billing, boostTiers: BOOST_TIERS };
+    return {
+      plans,
+      boosts,
+      billing,
+      boostTiers: BOOST_TIERS,
+      /* Whether the console may edit anything here at all. Without a secret
+         key every plan control is a button that cannot work, and the page
+         says so rather than failing on the click. */
+      stripe: { configured: stripeConfigured(), canEdit: who.can("settings.write") },
+    };
+  }
+
+  /**
+   * Read the plans back from Stripe.
+   *
+   * The console caches what Stripe says so opening the page is not three round
+   * trips; this is what fills that cache. It is a read against Stripe and a
+   * write to our own table — it changes nothing at Stripe's end, which is why
+   * it needs only `billing.read`.
+   */
+  @Post("plans/sync")
+  async syncPlans(@Req() req: Request) {
+    const who = await requireCapability(req, "billing.read");
+    if (denied(who)) return who;
+    if (!stripeConfigured()) {
+      return { error: "no-stripe", message: "STRIPE_SECRET_KEY is not set on the API." };
+    }
+
+    const problems: string[] = [];
+    const cat = await planCatalog();
+
+    for (const plan of ["starter", "collector", "dealer"]) {
+      const def = findPlan(plan);
+      if (!def) continue;
+      /* The price we already know about, or the one the environment names. A
+         plan that has neither has never been configured, and is reported
+         rather than silently skipped. */
+      const priceId = cat.get(plan)?.priceId || priceIdFor(def);
+      if (!priceId) {
+        problems.push(`${def.name}: ${def.priceEnv} is not set and nothing is cached.`);
+        continue;
+      }
+      try {
+        const price = await getPrice(priceId);
+        const product = await getProduct(price.product);
+        await cachePlan({
+          planId: plan,
+          productId: product.id,
+          priceId: price.id,
+          amountCents: price.unit_amount,
+          currency: price.currency,
+          interval: price.recurring?.interval ?? "month",
+          name: product.name,
+          description: product.description,
+          updatedBy: who.name,
+        });
+      } catch (e) {
+        problems.push(`${def.name}: ${(e as Error).message}`);
+      }
+    }
+
+    return { plans: await adminPlans(), problems };
+  }
+
+  /**
+   * Edit a plan, at Stripe.
+   *
+   * The name and the description are a plain update — a Stripe product is
+   * mutable. The amount is not: a Stripe price is immutable, so changing what
+   * a plan costs means creating a NEW price on the same product, pointing the
+   * product at it, and archiving the old one. That is three calls and it is
+   * the only way; there is no update-in-place to write.
+   *
+   * What this deliberately does NOT do is re-price anybody already subscribed.
+   * Existing subscriptions keep the price they were created against until each
+   * one is migrated, which is Stripe's behaviour and not something to paper
+   * over — the console says it on the confirm step, because "changed the
+   * price" reads as "everybody now pays this" and it does not mean that.
+   *
+   * `settings.write` rather than `billing.read`: this is the only control in
+   * the console that changes what a member is charged.
+   */
+  @Post("plans/:id")
+  async editPlan(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "settings.write");
+    if (denied(who)) return who;
+    if (!planExists(id)) return { error: "invalid", message: `${id} is not a plan.` };
+    if (!stripeConfigured()) {
+      return { error: "no-stripe", message: "STRIPE_SECRET_KEY is not set on the API." };
+    }
+
+    const def = findPlan(id)!;
+    const cat = await planCatalog();
+    const known = cat.get(id);
+    const priceId = known?.priceId || priceIdFor(def);
+    if (!priceId) {
+      return {
+        error: "not-configured",
+        message: `${def.name} has no Stripe price yet. Set ${def.priceEnv} and sync first.`,
+      };
+    }
+
+    const name = typeof b?.name === "string" ? b.name.trim() : "";
+    const description = typeof b?.blurb === "string" ? b.blurb.trim() : "";
+    // Whole currency units in, smallest unit out. Exactly one place converts.
+    const dollars = b?.price === undefined || b?.price === null ? null : Number(b.price);
+    if (dollars !== null && (!Number.isFinite(dollars) || dollars < 0 || dollars > 100_000)) {
+      return { error: "invalid", message: "That is not a monthly price." };
+    }
+    if (name && name.length < 2) {
+      return { error: "invalid", message: "A plan needs a name." };
+    }
+
+    try {
+      let price = await getPrice(priceId);
+      const productId = price.product;
+
+      if (name || description) {
+        await updateProduct(productId, {
+          name: name || undefined,
+          description: description || undefined,
+        });
+      }
+
+      const wanted = dollars === null ? null : Math.round(dollars * 100);
+      if (wanted !== null && wanted !== price.unit_amount) {
+        const next = await createPrice({
+          product: productId,
+          unitAmount: wanted,
+          currency: price.currency,
+          interval: price.recurring?.interval ?? "month",
+        });
+        await setDefaultPrice(productId, next.id);
+        /* Archived, not deleted: the subscriptions created against it still
+           reference it, and their invoices have to keep resolving. */
+        await archivePrice(price.id).catch(() => null);
+        price = next;
+      }
+
+      const product = await getProduct(productId);
+      await cachePlan({
+        planId: id,
+        productId: product.id,
+        priceId: price.id,
+        amountCents: price.unit_amount,
+        currency: price.currency,
+        interval: price.recurring?.interval ?? "month",
+        name: product.name,
+        description: product.description,
+        updatedBy: who.name,
+      });
+
+      void writeAudit({
+        actorId: who.userId,
+        actor: who.name,
+        area: "billing",
+        action:
+          wanted !== null && wanted !== known?.amountCents
+            ? "Changed a plan price at Stripe"
+            : "Edited a plan at Stripe",
+        target: product.name,
+        detail:
+          wanted === null
+            ? "Name and description only."
+            : `${(wanted / 100).toFixed(2)} ${price.currency.toUpperCase()} a ${
+                price.recurring?.interval ?? "month"
+              }. A new price was created; existing subscribers keep the one they signed up on.`,
+        weight: "high",
+      });
+
+      return { plans: await adminPlans() };
+    } catch (e) {
+      /* Stripe's own wording, forwarded. "No such product" is actionable;
+         "the request failed" is not. */
+      return { error: "stripe", message: (e as Error).message };
+    }
   }
 
   /** Start a boost that was charged for and never ran, extended by the days
@@ -770,7 +1215,7 @@ export class AdminController {
       actor: who.name,
       area: "billing",
       action: "Applied a paid boost that never ran",
-      target: boost ? `${boost.handle} · ${boost.listingId}` : id,
+      target: boost ? `${boost.handle} · ${boost.card}` : id,
       detail: `Extended by ${r.daysAdded} day${r.daysAdded === 1 ? "" : "s"} for the delay.`,
       weight: "high",
     });
@@ -833,7 +1278,7 @@ export class AdminController {
       actor: who.name,
       area: "billing",
       action: `Comped ${months} month${months === 1 ? "" : "s"} of a plan`,
-      target: `${id} · ${memberId}`,
+      target: `${id} · ${(await adminMember(memberId))?.handle ?? memberId}`,
       detail: reason.slice(0, 1000),
       weight: "high",
     });
@@ -978,7 +1423,7 @@ export class AdminController {
       actor: who.name,
       area: "support",
       action: Boolean(b?.internal) ? "Added an internal note to a ticket" : "Replied to a ticket",
-      target: id,
+      target: (await adminTicket(id))?.subject ?? id,
       weight: "normal",
     });
     return { ticket: await adminTicket(id), thread: await ticketThread(id) };
@@ -1023,7 +1468,27 @@ export class AdminController {
 
     const ok = await setTicket(id, patch);
     if (!ok) return { error: "not-found" };
-    return { ticket: await adminTicket(id) };
+
+    const t = await adminTicket(id);
+    /* Assigning a ticket to yourself is not worth an audit entry — it is who
+       is holding it, not a decision about anybody. An escalation or a state
+       change is. */
+    const worth = patch.status || patch.priority || patch.tier;
+    if (worth) {
+      void writeAudit({
+        actorId: who.userId,
+        actor: who.name,
+        area: "support",
+        action: patch.tier
+          ? `Escalated a ticket to ${patch.tier}`
+          : patch.status
+            ? `Moved a ticket to ${patch.status}`
+            : `Set a ticket to ${patch.priority} priority`,
+        target: t?.subject ?? id,
+        weight: "normal",
+      });
+    }
+    return { ticket: t };
   }
 
   /** Raised by an agent on a member's behalf — the third intake route. */
@@ -1046,6 +1511,15 @@ export class AdminController {
       by: who.name,
     });
     if (!id) return { error: "no-store" };
+
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "support",
+      action: "Raised a ticket for a member",
+      target: subject.slice(0, 200),
+      weight: "normal",
+    });
     return { ticket: await adminTicket(id) };
   }
 }

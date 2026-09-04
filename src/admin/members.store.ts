@@ -326,7 +326,7 @@ function shapeMember(r: any): AdminMember {
        activity rather than as a login so nobody reads it as one. */
     lastSeen: iso(lastSeenAt),
     lastSeenDays,
-    country: "—",
+    country: "Unknown",
     sales,
     purchases,
     listed,

@@ -212,7 +212,9 @@ test("a raw card is not given a grader it does not have", () => {
   const raw = shape(row({ is_raw: true, grader: null, grade: null, cert_number: null }));
   assert.equal(raw.grader, "Raw");
   assert.equal(raw.grade, "None");
-  assert.equal(raw.cert, "—");
+  /* Words, not a symbol. The placeholder used to be an em dash, which is a
+     mark the reader has to interpret rather than a phrase they can read. */
+  assert.equal(raw.cert, "None on the label");
 });
 
 test("the set line is built from what is there, with no empty separators", () => {

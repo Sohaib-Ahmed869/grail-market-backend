@@ -108,7 +108,7 @@ const count = (n: number) => n.toLocaleString("en-AU");
 
 /** A duration in hours, as the console prints it. */
 export function hoursLabel(h: number | null): string {
-  if (h === null || !Number.isFinite(h)) return "—";
+  if (h === null || !Number.isFinite(h)) return "Not measured";
   if (h < 1) return `${Math.max(1, Math.round(h * 60))}m`;
   const whole = Math.floor(h);
   const mins = Math.round((h - whole) * 60);
@@ -601,7 +601,7 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
       format: "CSV",
       available: sold !== null,
       unavailable: sold === null ? "The listings table could not be read." : undefined,
-      headline: concentration === null ? "—" : `${concentration.toFixed(1)}%`,
+      headline: concentration === null ? "No sales" : `${concentration.toFixed(1)}%`,
       headlineLabel: "Largest seller share",
       labels,
       trend: concentrationSeries,
@@ -610,7 +610,7 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
       id: "RP-08",
       name: "Moderation actions",
       detail:
-        "Listing decisions and conduct decisions, counted per bucket. Not an audit log — there is no audit table yet, and this is the count of the actions that did leave a dated mark.",
+        "Listing decisions and conduct decisions, counted per bucket. Not an audit log, since there is no audit table yet, and this is the count of the actions that did leave a dated mark.",
       cadence: "Live",
       category: "Moderation",
       chart: "Table",
@@ -664,14 +664,14 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
       {
         key: "r3",
         label: "Rejection rate",
-        value: decidedTotal > 0 ? `${((rejected / decidedTotal) * 100).toFixed(1)}%` : "—",
+        value: decidedTotal > 0 ? `${((rejected / decidedTotal) * 100).toFixed(1)}%` : "Nothing decided",
         delta: null,
         foot: `${count(rejected)} of ${count(decidedTotal)}`,
       },
       {
         key: "r4",
         label: "Conflict rate",
-        value: conflictRate === null ? "—" : `${conflictRate.toFixed(1)}%`,
+        value: conflictRate === null ? "No sales" : `${conflictRate.toFixed(1)}%`,
         delta: null,
         foot: soldCount > 0 ? `${count(disputes)} of ${count(soldCount)} sales` : "No sales yet",
       },
@@ -717,7 +717,7 @@ function blank(
     gameSplit: [],
     decisionSplit: [],
     conflictOutcomes: [],
-    throughput: { onTime: null, medianLabel: "—", breached: 0, decided: 0 },
+    throughput: { onTime: null, medianLabel: "Not measured", breached: 0, decided: 0 },
     reports: [
       ["RP-01", "GMV and sales", "Marketplace", "Area chart"],
       ["RP-02", "Listing throughput", "Moderation", "Line chart"],
@@ -739,7 +739,7 @@ function blank(
       format: "CSV",
       available: false,
       unavailable: none,
-      headline: "—",
+      headline: "No figures",
       headlineLabel: "",
       labels,
       trend: [],

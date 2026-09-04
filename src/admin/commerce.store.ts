@@ -51,6 +51,32 @@ CREATE INDEX IF NOT EXISTS listing_boosts_stuck
   ON listing_boosts (applied_at, purchased_at DESC);
 CREATE INDEX IF NOT EXISTS listing_boosts_user ON listing_boosts (user_id, purchased_at DESC);
 
+-- What Stripe currently says each plan is, cached.
+--
+-- This is NOT a second copy of the price. It is only ever written from what a
+-- Stripe API call returned, and every write records when. The console reads it
+-- so that opening the page is not three round trips to Stripe, and refreshes
+-- it whenever an operator edits a plan or asks for a re-read.
+--
+-- price_id is the live price. Stripe prices are immutable, so editing an
+-- amount creates a new one and this row moves to point at it; the old id stays
+-- on the subscriptions that were created against it.
+CREATE TABLE IF NOT EXISTS plan_catalog (
+  plan_id     text PRIMARY KEY,
+  product_id  text,
+  price_id    text,
+  amount_cents integer,
+  currency    text,
+  interval    text,
+  name        text,
+  description text,
+  -- When Stripe last told us this. A figure with no timestamp cannot be known
+  -- to be stale, and a stale price is the one number on this page that costs
+  -- real money to get wrong.
+  synced_at   timestamptz,
+  updated_by  text
+);
+
 -- A month given away rather than charged for.
 --
 -- Not written into "subscriptions": that row is what Stripe says is true, and
@@ -293,15 +319,24 @@ export type AdminPlan = {
   id: PlanId;
   name: string;
   blurb: string;
-  /** AUD a month, as Stripe is configured to charge. Display only. */
+  /** A month, as Stripe is configured to charge. Read back from Stripe where
+   *  the plan has been synced; the code's own figure until it has. */
   price: number;
+  currency: string;
+  /** "month" or "year", from the Stripe price. */
+  interval: string;
   /** Live listings allowed at once. null = no ceiling. */
   quota: number | null;
   perks: string[];
+  /** The Stripe product this plan is. Editing a name or a price needs it. */
+  stripeProductId: string;
   /** The Stripe price this plan checks out against. Empty until configured. */
   stripePriceId: string;
   /** The env var holding it, which is what an operator has to go and set. */
   stripePriceEnv: string;
+  /** When Stripe last confirmed the figures above. Null means never: what is
+   *  on screen is the code's fallback, not what anybody is charged. */
+  syncedAt: string | null;
   subscribers: number;
   pastDue: number;
   cancelled: number;
@@ -321,6 +356,96 @@ export type AdminPlan = {
  * What the console answers is the question Stripe cannot: how many people are
  * on each plan and what that is worth.
  */
+/** One plan as Stripe last described it. */
+export type PlanCatalogRow = {
+  planId: string;
+  productId: string | null;
+  priceId: string | null;
+  amountCents: number | null;
+  currency: string | null;
+  interval: string | null;
+  name: string | null;
+  description: string | null;
+  syncedAt: string | null;
+};
+
+export async function planCatalog(): Promise<Map<string, PlanCatalogRow>> {
+  const out = new Map<string, PlanCatalogRow>();
+  const pool = storePool();
+  if (!pool) return out;
+  try {
+    const r = await pool.query("select * from plan_catalog");
+    for (const x of r.rows) {
+      out.set(x.plan_id, {
+        planId: x.plan_id,
+        productId: x.product_id ?? null,
+        priceId: x.price_id ?? null,
+        amountCents: x.amount_cents ?? null,
+        currency: x.currency ?? null,
+        interval: x.interval ?? null,
+        name: x.name ?? null,
+        description: x.description ?? null,
+        syncedAt: x.synced_at ? new Date(x.synced_at).toISOString() : null,
+      });
+    }
+  } catch {
+    /* the table is new; an older database simply has no cache yet */
+  }
+  return out;
+}
+
+/** Record what Stripe just said. Only ever called with a Stripe response. */
+export async function cachePlan(row: {
+  planId: string;
+  productId: string | null;
+  priceId: string | null;
+  amountCents: number | null;
+  currency: string | null;
+  interval: string | null;
+  name: string | null;
+  description: string | null;
+  updatedBy?: string | null;
+}): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  await pool.query(
+    `insert into plan_catalog
+       (plan_id, product_id, price_id, amount_cents, currency, interval,
+        name, description, synced_at, updated_by)
+     values ($1,$2,$3,$4,$5,$6,$7,$8, now(), $9)
+     on conflict (plan_id) do update set
+       product_id = excluded.product_id,
+       price_id = excluded.price_id,
+       amount_cents = excluded.amount_cents,
+       currency = excluded.currency,
+       interval = excluded.interval,
+       name = excluded.name,
+       description = excluded.description,
+       synced_at = now(),
+       updated_by = excluded.updated_by`,
+    [
+      row.planId, row.productId, row.priceId, row.amountCents, row.currency,
+      row.interval, row.name, row.description, row.updatedBy ?? null,
+    ],
+  );
+}
+
+/**
+ * The price id a checkout should use for this plan.
+ *
+ * Stripe's answer first, the environment variable second. The env var is how
+ * billing is configured on a fresh deployment; once an operator has edited a
+ * plan in the console, Stripe holds a newer price than the env var names and
+ * this is what keeps a new subscription from being sold at the old figure.
+ */
+export async function livePriceId(planId: string): Promise<string> {
+  const cat = await planCatalog();
+  const cached = cat.get(planId)?.priceId;
+  if (cached) return cached;
+  const plan = findPlan(planId);
+  return plan ? priceIdFor(plan) : "";
+}
+
 export async function adminPlans(): Promise<AdminPlan[]> {
   const pool = storePool();
   const counts = new Map<string, { active: number; pastDue: number; cancelled: number }>();
@@ -345,18 +470,29 @@ export async function adminPlans(): Promise<AdminPlan[]> {
     for (const row of c.rows) comps.set(String(row.plan_id), Number(row.n));
   }
 
+  const catalog = await planCatalog();
+
   return PLANS.map((p) => {
     const c = counts.get(p.id) ?? { active: 0, pastDue: 0, cancelled: 0 };
-    const price = p.amountCents / 100;
+    const live = catalog.get(p.id);
+    /* Stripe's figure wherever we have one. The catalogue's `amountCents` is
+       the fallback for a plan nobody has synced yet — it is what the code
+       shipped with, not what anybody is charged, and the console labels it
+       as unsynced so the difference is visible rather than assumed. */
+    const price = (live?.amountCents ?? p.amountCents) / 100;
     return {
       id: p.id,
-      name: p.name,
-      blurb: p.blurb,
+      name: live?.name ?? p.name,
+      blurb: live?.description ?? p.blurb,
       price,
+      currency: (live?.currency ?? "aud").toUpperCase(),
+      interval: live?.interval ?? "month",
       quota: p.listings,
       perks: p.perks,
-      stripePriceId: priceIdFor(p),
+      stripeProductId: live?.productId ?? "",
+      stripePriceId: live?.priceId ?? priceIdFor(p),
       stripePriceEnv: p.priceEnv,
+      syncedAt: live?.syncedAt ?? null,
       subscribers: c.active,
       pastDue: c.pastDue,
       cancelled: c.cancelled,
@@ -489,7 +625,7 @@ export async function billingLedger(limit = 60): Promise<AdminBillingEvent[]> {
     return {
       ...r,
       name,
-      handle: r.userId ? handleFor(name, r.userId) : "—",
+      handle: r.userId ? handleFor(name, r.userId) : "Unknown member",
     };
   });
 }

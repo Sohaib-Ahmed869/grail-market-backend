@@ -183,8 +183,9 @@ test("a duration is printed in the units it is worth reading in", () => {
 });
 
 /* No decision taken is not "0h to decide". A median over an empty set has no
-   answer and the panel has to be able to say so. */
-test("no median is an em dash, never a zero", () => {
-  assert.equal(hoursLabel(null), "—");
-  assert.equal(hoursLabel(NaN), "—");
+   answer and the panel has to be able to say so — in words, because a symbol
+   standing in for "nothing" is a thing the reader has to decode. */
+test("no median says so in words, never as a zero", () => {
+  assert.equal(hoursLabel(null), "Not measured");
+  assert.equal(hoursLabel(NaN), "Not measured");
 });

@@ -1,10 +1,17 @@
 /**
- * Two listings in the review queue, for working on the admin console.
+ * A review queue worth working, for the admin console.
  *
  *   npx tsx scripts/seed-queue.mts
  *
- * One lands in "needs a decision" and one in "waiting on seller". Both go in
- * through `createListing` and `moveListing` rather than as raw INSERTs, so
+ * Five land in "needs a decision" and one in "waiting on seller". They span
+ * the three price tiers and, deliberately, both sides of the 24-hour review
+ * target: one is well over it, so the overdue badge, the breach notice at the
+ * top of the queue and the bell all have something real to report. A queue
+ * where every row is comfortably inside its target does not show whether any
+ * of that works.
+ *
+ * All of them go in through `createListing` and `moveListing` rather than as
+ * raw INSERTs, so
  * they arrive the way a real submission does: created as a draft, submitted,
  * and — for the second — parked with a reason. A row hand-written straight
  * into `in_review` skips `submitted_at`, which is what the review clock reads,
@@ -163,6 +170,82 @@ await seed({
   submittedHoursAgo: 31,
   askedFor:
     "The certificate number on the slab label is not legible in any of the angles supplied. Send one straight-on photograph of the label, close enough to read the cert.",
+});
+
+// 3 — overdue. Past the 24-hour target, so the breach notice, the red badge
+//     on the row and the bell all have something to point at.
+await seed({
+  email: "azka@yopmail.com",
+  catalogId: "base1-4",
+  cardName: "Charizard",
+  setName: "Base Set",
+  cardNumber: "4",
+  variant: "holo",
+  grader: "PSA",
+  grade: "9",
+  cert: "72104488",
+  price: 18500,
+  marketValue: 17250,
+  suburb: "Carlton VIC",
+  photos: 10,
+  submittedHoursAgo: 39,
+});
+
+// 4 — high-value tier, everything in order. The queue needs a row that gives
+//     a moderator nothing to object to, or "approve" is never the obvious
+//     answer to anything.
+await seed({
+  email: "mia@grailmarket.test",
+  catalogId: "base1-2",
+  cardName: "Blastoise",
+  setName: "Base Set",
+  cardNumber: "2",
+  variant: "holo",
+  grader: "BGS",
+  grade: "9.5",
+  cert: "0014882301",
+  price: 4200,
+  marketValue: 4180,
+  suburb: "Bondi NSW",
+  photos: 10,
+  submittedHoursAgo: 6,
+});
+
+// 5 — standard tier and priced well over the market, which is the overpricing
+//     check the feature set asks the queue to surface.
+await seed({
+  email: "sohaib@grailmarket.test",
+  catalogId: "swsh7-215",
+  cardName: "Umbreon VMAX",
+  setName: "Evolving Skies",
+  cardNumber: "215",
+  variant: "alt",
+  grader: "CGC",
+  grade: "8.5",
+  cert: "4172885003",
+  price: 1650,
+  marketValue: 940,
+  suburb: "Parramatta NSW",
+  photos: 9,
+  submittedHoursAgo: 11,
+});
+
+// 6 — just arrived, and short of the required angles.
+await seed({
+  email: "jules@grailmarket.test",
+  catalogId: "base1-15",
+  cardName: "Venusaur",
+  setName: "Base Set",
+  cardNumber: "15",
+  variant: "holo",
+  grader: "SGC",
+  grade: "8",
+  cert: "3910447",
+  price: 880,
+  marketValue: 910,
+  suburb: "Fitzroy VIC",
+  photos: 4,
+  submittedHoursAgo: 2,
 });
 
 console.log("Done.");
