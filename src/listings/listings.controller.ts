@@ -6,7 +6,7 @@ import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle, putPhoto } from "../photos/s3.js";
+import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
@@ -85,7 +85,15 @@ export class ListingsController {
     // A listing in review is visible to its seller and nobody else.
     if (l.status !== "live" && l.seller_id !== me) return { error: "not-found" };
     if (l.status === "live" && me !== l.seller_id) void bumpView(id);
-    return { listing: l.seller_id === me ? sellerShape(l) : publicShape(l) };
+    const shaped = l.seller_id === me ? sellerShape(l) : publicShape(l);
+    // The bucket is not public, so the stored object URLs 403 for everyone.
+    // Signed only on the single-listing read: the market grid shows one
+    // thumbnail per card and signing every photo of every listing to render a
+    // grid is a signature nobody looks at.
+    if (Array.isArray((shaped as any).photos)) {
+      (shaped as any).photos = await signAll((shaped as any).photos);
+    }
+    return { listing: shaped };
   }
 
   /** Step 1-3 of the sell flow, in one call. The draft exists before any

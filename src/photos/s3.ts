@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { S3Client, DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client, DeleteObjectCommand, GetObjectCommand, PutObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 // Listing photographs.
@@ -98,6 +100,38 @@ export async function putPhoto(
   );
   return { key, uploadUrl: "", publicUrl: publicUrlFor(key) };
 }
+
+/** A short-lived read URL for something we stored.
+ *
+ *  The bucket blocks public access, which is right: it holds members' card
+ *  photographs and dispute evidence, and an object URL that anybody can guess
+ *  and fetch is a photograph of somebody's address on a shipping label. So
+ *  nothing is world-readable and reads are signed instead.
+ *
+ *  Takes the URL we wrote into the row rather than a key, because that is what
+ *  every caller already holds. Anything that is not one of ours comes back
+ *  untouched, so an external image in an old record still renders.
+ *
+ *  Fifteen minutes: long enough to open a record and look at ten angles,
+ *  short enough that a copied link is not a permanent one. */
+export async function signDownload(url: string, seconds = 900): Promise<string> {
+  if (!photosConfigured() || !url) return url;
+  const prefix = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/`;
+  if (!url.startsWith(prefix)) return url;
+  const key = decodeURIComponent(url.slice(prefix.length));
+  try {
+    return await getSignedUrl(
+      s3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }), { expiresIn: seconds },
+    );
+  } catch {
+    // A signature we could not produce must not blank the record.
+    return url;
+  }
+}
+
+/** The same, for a list. */
+export const signAll = async <T extends { url: string }>(rows: T[]): Promise<T[]> =>
+  Promise.all(rows.map(async (r) => ({ ...r, url: await signDownload(r.url) })));
 
 export async function signUpload(
   ownerId: string,

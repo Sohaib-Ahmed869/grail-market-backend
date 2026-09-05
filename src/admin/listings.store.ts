@@ -1,3 +1,4 @@
+import { signAll } from "../photos/s3.js";
 import { storePool } from "../cards.store.js";
 
 // The listing queue, as the admin console needs it.
@@ -242,7 +243,10 @@ export async function listingPhotos(
   if (!pool) return [];
   const r = await pool.query("select photos from listings where listing_id = $1", [id]);
   const raw = r.rows[0]?.photos;
-  return Array.isArray(raw) ? raw : [];
+  // Signed, because the bucket is not public. The rows hold the plain object
+  // URL; every one of them 403s to anybody, including the reviewer who has to
+  // look at ten angles before approving a card.
+  return Array.isArray(raw) ? await signAll(raw) : [];
 }
 
 /**
