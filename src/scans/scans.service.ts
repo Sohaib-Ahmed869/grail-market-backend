@@ -801,6 +801,9 @@ export class ScansService {
             low: pt.low ?? null,
             high: pt.high ?? null,
             median: pt.median ?? null,
+            // Same column the ingest fills. The scan path writes prices too,
+            // so leaving it out here would keep half the rows undated.
+            lastSaleAt: pt.lastSaleDate ?? null,
             source: scan.valuation?.graded?.source ?? "pokemonpricetracker",
           })),
         );

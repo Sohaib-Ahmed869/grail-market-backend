@@ -318,6 +318,12 @@ export class MarketController {
       grade: grade_,
       rawUsd: raw,
       byGrader: ppt.byGrader ?? null,
+      // Which printing this is and how often it trades. Both have been in the
+      // provider payload the whole time and neither ever reached a screen, so
+      // a holo and a reverse holo — different markets, sometimes by 3x — were
+      // shown as one card with one price.
+      printings: ppt.printings ?? null,
+      velocity: ppt.velocity ?? null,
       sold,
       slabPrice,
       liveAsk:

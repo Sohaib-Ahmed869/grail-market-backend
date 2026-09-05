@@ -42,9 +42,15 @@ export class SalesController {
       const p = await gradedPricesFor({
         catalogId: cardId, name: name ?? "", number: number ?? null, setName: setName ?? null,
       });
-      const point = g && gr ? p.byGrader?.[g]?.[gr] : null;
-      known = (point as any)?.sampleSize ?? null;
-      lastSaleAt = (point as any)?.lastSaleAt ?? null;
+      // Read the fields GradePoint actually has. These were `as any` casts on
+      // `sampleSize` and `lastSaleAt`, and GradePoint calls them `count` and
+      // `lastSaleDate` — so both were silently undefined and the panel said
+      // "no itemised sale on record" while the store held nine of them. A cast
+      // is how a rename stops being a compile error and starts being a blank
+      // screen.
+      const point = g && gr ? p.byGrader?.[g]?.[gr] ?? null : null;
+      known = point?.count ?? null;
+      lastSaleAt = point?.lastSaleDate ?? null;
     } catch {
       // a missing price is not a reason to withhold the sales we do hold
     }

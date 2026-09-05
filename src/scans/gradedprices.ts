@@ -36,7 +36,37 @@ export type GradePoint = {
   asOf?: string | null;
   /** the source does not separate label variants, so this figure blends them */
   blended?: boolean | null;
+  /** When a copy at THIS grade last changed hands, ISO-8601.
+   *
+   *  The provider has always sent it and we have always thrown it away, so a
+   *  median over nine sales looked identical whether the last one was
+   *  yesterday or two years ago. Those are not the same claim: a price with no
+   *  date is a number, and a price with a date is evidence. */
+  lastSaleDate?: string | null;
 };
+
+/** How often a copy of this card sells, at any grade.
+ *
+ *  Liquidity is half of what a price means. A card that trades weekly has a
+ *  price; a card that has sold once in a year has an anecdote, and the same
+ *  median should be read differently in the two cases. */
+export type SalesVelocity = {
+  dailyAverage?: number | null;
+  weeklyAverage?: number | null;
+  monthlyTotal?: number | null;
+} | null;
+
+/** The printings this card exists in, and what each is worth.
+ *
+ *  Holofoil and Reverse Holofoil are different cards with different markets —
+ *  on the Legendary Collection Charizard the reverse is worth three times the
+ *  holo — and pricing one as the other is the same error as pricing the wrong
+ *  set. The provider names them and says which is primary. */
+export type Printings = {
+  primary: string | null;
+  available: string[];
+  byPrinting: Record<string, { marketPrice: number | null; lowPrice: number | null }>;
+} | null;
 
 export type PptPrices = {
   graded: GradedPrices | null;
@@ -45,6 +75,10 @@ export type PptPrices = {
   byGrade?: Record<string, GradePoint> | null;
   /** every grading company the source tracks: grader -> grade -> evidence */
   byGrader?: Record<string, Record<string, GradePoint>> | null;
+  /** which printings exist and what each is worth — holo is not reverse holo */
+  printings?: Printings;
+  /** how often a copy trades, at any grade */
+  velocity?: SalesVelocity;
 };
 
 /** "bgs9_5" -> { grader: "BGS", grade: "9.5" }. Returns null for anything that
@@ -279,7 +313,46 @@ function pointFrom(g: any): GradePoint | null {
     low: num(g.minPrice),
     high: num(g.maxPrice),
     median: num(g.medianPrice),
+    lastSaleDate: typeof g.lastSaleDate === "string" ? g.lastSaleDate : null,
   };
+}
+
+/** Pull the printings out of a provider payload. */
+export function printingsFrom(payload: any): Printings {
+  const v = payload?.variants;
+  if (!v || typeof v !== "object") return null;
+  const byPrinting: Record<string, { marketPrice: number | null; lowPrice: number | null }> = {};
+  for (const [name, row] of Object.entries(v as Record<string, any>)) {
+    byPrinting[name] = {
+      marketPrice: num(row?.marketPrice),
+      lowPrice: num(row?.lowPrice),
+    };
+  }
+  if (Object.keys(byPrinting).length === 0) return null;
+  return {
+    primary:
+      typeof payload?.prices?.primaryPrinting === "string"
+        ? payload.prices.primaryPrinting
+        : null,
+    available: Array.isArray(payload?.printingsAvailable)
+      ? payload.printingsAvailable.filter((x: unknown) => typeof x === "string")
+      : Object.keys(byPrinting),
+    byPrinting,
+  };
+}
+
+/** Pull how often this card trades out of a provider payload. */
+export function velocityFrom(payload: any): SalesVelocity {
+  const v = payload?.ebay?.salesVelocity;
+  if (!v || typeof v !== "object") return null;
+  const out = {
+    dailyAverage: num(v.dailyAverage),
+    weeklyAverage: num(v.weeklyAverage),
+    monthlyTotal: num(v.monthlyTotal),
+  };
+  return out.dailyAverage == null && out.weeklyAverage == null && out.monthlyTotal == null
+    ? null
+    : out;
 }
 
 export async function fetchGradedPrices(
@@ -362,6 +435,11 @@ export async function fetchGradedPrices(
           rawUsd: stored.rawUsd,
           byGrade: Object.keys(byGradeCached).length ? byGradeCached : null,
           byGrader: Object.keys(byGraderCached).length ? byGraderCached : null,
+          // Read from the SAME stored payload as the grades. These were being
+          // thrown away on both paths, so a cached card and a live one were
+          // equally silent about which printing it is and how often it trades.
+          printings: printingsFrom(stored_.payload),
+          velocity: velocityFrom(stored_.payload),
         };
     cacheSet(localKey, v); // warm the local layer so the next scan skips the round trip
     console.log(`[store] hit for "${cardName}" — no credits spent`);
@@ -564,6 +642,8 @@ export async function fetchGradedPrices(
       rawUsd,
       byGrade: Object.keys(byGrade).length ? byGrade : null,
       byGrader: Object.keys(byGrader).length ? byGrader : null,
+      printings: printingsFrom(pick),
+      velocity: velocityFrom(pick),
     };
     cacheSet(localKey, result);
     // keep everything the provider returned, not just the three numbers we
@@ -614,6 +694,32 @@ export async function fetchGradedPrices(
  *  Every surviving figure carries the time WE fetched it, so its age is the
  *  reader's to judge rather than ours to hide.
  */
+/** Printings and velocity for a card we already hold, without buying anything.
+ *
+ *  The graded fast path in gradedPricesFor answers from `grade_prices`, which
+ *  has ladders and nothing else — so on a store hit, which is most requests,
+ *  the printing and the liquidity came back null even though the payload that
+ *  produced those ladders is sitting in `card_prices` under a key we can
+ *  rebuild from the same three fields. Costs one indexed read and no credits.
+ */
+export async function extrasFromStore(
+  cardName: string,
+  localId?: string | null,
+  setName?: string | null,
+): Promise<{ printings: Printings; velocity: SalesVelocity }> {
+  const none = { printings: null, velocity: null };
+  if (!cardName) return none;
+  try {
+    const cacheKey = `${cardName}|${localId ?? ""}|${setName ?? ""}`;
+    const stored = await readCard(cacheKey, HIT_TTL_MS, MISS_TTL_MS);
+    const payload = (stored as { payload?: unknown } | null)?.payload ?? null;
+    if (!payload) return none;
+    return { printings: printingsFrom(payload), velocity: velocityFrom(payload) };
+  } catch {
+    return none;
+  }
+}
+
 export function gradePointsFromStore(
   held: Record<string, Record<string, {
     price: number | null;
@@ -624,6 +730,8 @@ export function gradePointsFromStore(
     high?: number | null;
     median?: number | null;
     fetchedAt?: string | null;
+    /** grade_prices has carried this column all along; nothing read it. */
+    lastSaleAt?: string | null;
   }>>,
 ): Record<string, Record<string, GradePoint>> | null {
   const out: Record<string, Record<string, GradePoint>> = {};
@@ -640,6 +748,10 @@ export function gradePointsFromStore(
         high: r.high ?? null,
         median: r.median ?? null,
         asOf: r.fetchedAt ?? null,
+        // When a copy at this grade last changed hands, as opposed to when we
+        // last asked. A median with no date reads the same whether the last
+        // sale was yesterday or two years ago.
+        lastSaleDate: r.lastSaleAt ?? null,
       };
     }
     if (Object.keys(kept).length) out[grader] = kept;
