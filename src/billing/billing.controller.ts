@@ -5,6 +5,7 @@ import { livePrices } from "./liveprice.js";
 import { createCheckout, stripeConfigured, verifyStripe } from "./stripe.js";
 import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applySubscription, readSubscription, recordEvent } from "./store.js";
+import { livePriceId } from "../admin/commerce.store.js";
 
 /** Where Stripe sends the browser when Checkout ends. A deep link, so the app
  *  comes back to the front rather than leaving the member on a web page. */
@@ -60,7 +61,14 @@ export class BillingController {
     }
     try {
       const s = await createCheckout({
-        userId, planId: String(body!.planId), returnBase: RETURN,
+        userId,
+        planId: String(body!.planId),
+        returnBase: RETURN,
+        /* Stripe's current price for this plan, which is not the environment
+           variable once the console has edited one — a Stripe price is
+           immutable, so an edit makes a new id and leaves the env var naming
+           the old one. Falls back to the env var when nothing is cached. */
+        priceId: await livePriceId(String(body!.planId)),
       });
       return { url: s.url, id: s.id };
     } catch (e: any) {

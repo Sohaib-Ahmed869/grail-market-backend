@@ -32,6 +32,16 @@ function form(params: Record<string, string | number | undefined>): string {
  *  home but the back gesture. */
 export async function createCheckout(opts: {
   userId: string; planId: string; returnBase: string;
+  /**
+   * The price to sell at, when the caller knows a newer one than the
+   * environment names.
+   *
+   * The admin console can change a plan's price, and a Stripe price is
+   * immutable — so that creates a NEW price id and the env var still names the
+   * old one. Without this, every plan edit would appear to work and every new
+   * subscription would quietly be sold at the previous figure.
+   */
+  priceId?: string;
 }): Promise<{ url: string; id: string }> {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
@@ -111,3 +121,126 @@ export function verifyStripe(
   if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, why: "bad-signature" };
   return { ok: true };
 }
+
+/* ==========================================================================
+   Products and prices — what the admin console edits
+
+   Two rules of Stripe's data model shape everything below, and both are
+   surprising the first time:
+
+   1. A Price is IMMUTABLE. Its `unit_amount` cannot be edited, ever. Changing
+      what a plan costs means creating a NEW price on the same product and
+      pointing the product at it. There is no update-in-place to write.
+
+   2. Creating that new price does NOT re-price anybody already subscribed.
+      Existing subscriptions keep the price they were created with until each
+      one is migrated. The console has to say so out loud, because "changed the
+      price" reads as "everybody now pays this" and it does not mean that.
+
+   The product's name and description ARE mutable, so those are a plain update.
+   ========================================================================== */
+
+async function call<T>(
+  path: string,
+  init?: { method?: string; body?: Record<string, string | number | undefined> },
+): Promise<T> {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
+
+  const res = await fetch(`${API}/${path}`, {
+    method: init?.method ?? "GET",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      ...(init?.body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+    },
+    body: init?.body ? form(init.body) : undefined,
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    /* Stripe's own message is the useful half — "No such price: price_123" is
+       something an operator can act on, where "stripe failed (400)" is not. */
+    let detail = text.slice(0, 300);
+    try {
+      const j = JSON.parse(text);
+      if (j?.error?.message) detail = j.error.message;
+    } catch {
+      /* not JSON: the raw body is the best we have */
+    }
+    throw new Error(detail);
+  }
+  return JSON.parse(text) as T;
+}
+
+export type StripePrice = {
+  id: string;
+  product: string;
+  active: boolean;
+  currency: string;
+  unit_amount: number | null;
+  recurring: { interval: string; interval_count: number } | null;
+};
+
+export type StripeProduct = {
+  id: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  default_price?: string | { id: string } | null;
+};
+
+export const getPrice = (id: string) => call<StripePrice>(`prices/${encodeURIComponent(id)}`);
+
+export const getProduct = (id: string) =>
+  call<StripeProduct>(`products/${encodeURIComponent(id)}`);
+
+/** Name and description. Both are mutable, unlike everything about a price. */
+export const updateProduct = (id: string, patch: { name?: string; description?: string }) =>
+  call<StripeProduct>(`products/${encodeURIComponent(id)}`, {
+    method: "POST",
+    body: { name: patch.name, description: patch.description },
+  });
+
+/**
+ * A new price on an existing product.
+ *
+ * `unit_amount` is in the currency's smallest unit — cents for AUD — and the
+ * console works in whole dollars, so the conversion happens exactly once, at
+ * the caller. Passing dollars here would charge a hundredth of the intended
+ * amount and look plausible on the way through.
+ */
+export const createPrice = (opts: {
+  product: string;
+  unitAmount: number;
+  currency: string;
+  interval: string;
+}) =>
+  call<StripePrice>("prices", {
+    method: "POST",
+    body: {
+      product: opts.product,
+      unit_amount: opts.unitAmount,
+      currency: opts.currency.toLowerCase(),
+      "recurring[interval]": opts.interval,
+    },
+  });
+
+/** Point the product at a price, so new checkouts pick it up. */
+export const setDefaultPrice = (product: string, price: string) =>
+  call<StripeProduct>(`products/${encodeURIComponent(product)}`, {
+    method: "POST",
+    body: { default_price: price },
+  });
+
+/**
+ * Retire the old price.
+ *
+ * Archived, never deleted — a price with subscriptions on it cannot be deleted
+ * and should not be: the subscriptions still reference it, and the invoices
+ * already raised against it have to keep resolving.
+ */
+export const archivePrice = (id: string) =>
+  call<StripePrice>(`prices/${encodeURIComponent(id)}`, {
+    method: "POST",
+    body: { active: "false" },
+  });

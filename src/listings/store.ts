@@ -49,6 +49,40 @@ CREATE INDEX IF NOT EXISTS listings_card ON listings (catalog_id, status);
 -- every column added after the first deploy needs its own idempotent ALTER.
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS variant text;
 
+-- The review workflow, as the admin console works it.
+--
+-- "submitted_at" is when the listing entered the queue, which is not
+-- "created_at": a draft can sit for a week before its photographs are taken,
+-- and measuring the review target from the draft would report every listing as
+-- overdue on arrival.
+--
+-- "claimed_by" is the difference between a listing waiting on anyone and one
+-- being worked by someone. Two moderators deciding the same card is the
+-- failure this prevents; it is also what tells the queue which rows are free.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS claimed_by text;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS reviewed_by text;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+-- What our own read of the slab label says, where it disagrees with the grade
+-- the seller stated. Null means the two matched, or that nothing read it.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS label_grade text;
+-- A moderator's own findings and note. Rule-raised flags are derived from the
+-- listing every time they are needed; these are the ones a person typed, so
+-- they are the only ones worth storing.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS moderator_flags jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS moderator_note text;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS info_requested_at timestamptz;
+
+-- The queue is read in submission order on every load of the console.
+CREATE INDEX IF NOT EXISTS listings_review ON listings (status, submitted_at);
+
+-- Anything already in review before this column existed has no submission
+-- time. Its creation time is the closest true answer and beats a null that
+-- every SLA calculation then has to special-case.
+UPDATE listings SET submitted_at = created_at
+ WHERE submitted_at IS NULL AND status <> 'draft';
+
 CREATE TABLE IF NOT EXISTS offers (
   offer_id   text PRIMARY KEY,
   listing_id text NOT NULL,
@@ -96,8 +130,16 @@ export async function initListings(): Promise<void> {
  *  that matters and it must only ever be reachable from review. */
 export const TRANSITIONS: Record<string, string[]> = {
   draft: ["in_review", "withdrawn"],
-  in_review: ["live", "rejected", "withdrawn"],
-  live: ["sold", "withdrawn"],
+  // `info_requested` is the third decision the console offers: the listing is
+  // not wrong, it is incomplete, and the seller is the only one who can fix
+  // it. It parks the listing without spending a rejection on it.
+  in_review: ["live", "rejected", "info_requested", "withdrawn"],
+  info_requested: ["in_review", "withdrawn"],
+  // `paused` takes a live listing off the market without closing it. A
+  // withdrawal is final; this is not, and conflating the two meant every
+  // temporary hold destroyed the listing it was protecting.
+  live: ["sold", "paused", "withdrawn"],
+  paused: ["live", "withdrawn"],
   rejected: ["in_review", "withdrawn"],
   sold: [],
   withdrawn: [],
@@ -202,7 +244,8 @@ export async function setPhotos(
 
 /** Move a listing, refusing anything the state machine does not allow. */
 export async function moveListing(
-  id: string, to: string, opts: { sellerId?: string; reason?: string | null } = {},
+  id: string, to: string,
+  opts: { sellerId?: string; reason?: string | null; reviewedBy?: string | null } = {},
 ): Promise<{ ok: true } | { ok: false; why: string }> {
   const pool = storePool();
   if (!pool) return { ok: false, why: "no-store" };
@@ -214,9 +257,18 @@ export async function moveListing(
   await pool.query(
     `update listings set status = $1, reject_reason = $2,
         live_at = case when $1 = 'live' then now() else live_at end,
-        sold_at = case when $1 = 'sold' then now() else sold_at end
+        sold_at = case when $1 = 'sold' then now() else sold_at end,
+        -- the review clock starts when it enters the queue, and restarts when
+        -- a seller answers a request for more and puts it back in
+        submitted_at = case when $1 = 'in_review' then now() else submitted_at end,
+        info_requested_at = case when $1 = 'info_requested' then now() else info_requested_at end,
+        -- a decision releases the claim; the next state is not being worked
+        claimed_by = case when $1 = 'in_review' then claimed_by else null end,
+        claimed_at = case when $1 = 'in_review' then claimed_at else null end,
+        reviewed_by = coalesce($4, reviewed_by),
+        reviewed_at = case when $4 is null then reviewed_at else now() end
       where listing_id = $3`,
-    [to, opts.reason ?? null, id],
+    [to, opts.reason ?? null, id, opts.reviewedBy ?? null],
   );
   return { ok: true };
 }
@@ -302,7 +354,8 @@ export async function reviewQueue(): Promise<Listing[]> {
   const pool = storePool();
   if (!pool) return [];
   const r = await pool.query(
-    "select * from listings where status = 'in_review' order by created_at asc",
+    `select * from listings where status = 'in_review'
+      order by submitted_at asc nulls first, created_at asc`,
   );
   return r.rows;
 }
