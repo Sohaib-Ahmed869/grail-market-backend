@@ -100,10 +100,158 @@ export type TicketMessage = {
   internal: boolean;
 };
 
+/** Added after the table shipped, so they go on as ALTERs rather than edits.
+ *
+ *  The console invented tickets; nothing member-facing could raise one. A
+ *  ticket that comes from a member carries two things a staff-created one
+ *  never did: what it is ABOUT — a person, when somebody is reporting
+ *  somebody — and the photographs they attached, which for a scam report is
+ *  most of the evidence. */
+const SUPPORT_MIGRATIONS = [
+  "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS about_user_id text",
+  "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'support'",
+  "ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS photos jsonb",
+];
+
 export async function initSupport(): Promise<void> {
   const pool = storePool();
   if (!pool) return;
   await pool.query(SUPPORT_SCHEMA);
+  for (const m of SUPPORT_MIGRATIONS) {
+    await pool.query(m).catch((e) =>
+      console.warn(`[support] migration skipped: ${(e as Error).message}`),
+    );
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Writing — the member side
+   -------------------------------------------------------------------------- */
+
+/** What a member can file. `report` is about a person or a listing and lands
+ *  with trust & safety; `support` is a question and starts at tier 1. */
+export const KINDS = ["support", "report"] as const;
+export type TicketKind = (typeof KINDS)[number];
+
+export type NewTicket = {
+  memberId: string;
+  kind: TicketKind;
+  subject: string;
+  category: string;
+  body: string;
+  listingId?: string | null;
+  aboutUserId?: string | null;
+  photos?: string[];
+};
+
+/** Raise a ticket and write the member's first message onto it.
+ *
+ *  A report skips tier 1 entirely. Tier 1 is an outsourced desk with no member
+ *  records and no ID data — routing an accusation about a person through it
+ *  means the first human to read it cannot look up either party. */
+export async function raiseTicket(t: NewTicket): Promise<{ ticketId: string } | null> {
+  const pool = storePool();
+  if (!pool) return null;
+  const ticketId = `t_${randomUUID().slice(0, 12)}`;
+  const messageId = `sm_${randomUUID().slice(0, 12)}`;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `insert into support_tickets
+         (ticket_id, member_id, kind, subject, category, status, priority, tier,
+          listing_id, about_user_id)
+       values ($1,$2,$3,$4,$5,'new',$6,$7,$8,$9)`,
+      [
+        ticketId, t.memberId, t.kind, t.subject.slice(0, 200),
+        t.category.slice(0, 60),
+        t.kind === "report" ? "high" : "normal",
+        t.kind === "report" ? "trust-safety" : "tier-1",
+        t.listingId ?? null, t.aboutUserId ?? null,
+      ],
+    );
+    await client.query(
+      `insert into support_messages (message_id, ticket_id, author, author_id, body, photos)
+       values ($1,$2,'member',$3,$4,$5)`,
+      [messageId, ticketId, t.memberId, t.body, JSON.stringify(t.photos ?? [])],
+    );
+    await client.query("commit");
+    return { ticketId };
+  } catch (e) {
+    await client.query("rollback").catch(() => {});
+    console.error("[support] could not raise ticket:", (e as Error).message);
+    return null;
+  } finally {
+    client.release();
+  }
+}
+
+/** The member's own tickets, newest first. Never anybody else's. */
+export async function myTickets(memberId: string) {
+  const pool = storePool();
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `select t.ticket_id, t.kind, t.subject, t.category, t.status, t.created_at,
+            t.updated_at, t.listing_id,
+            last.body as last_body, last.author as last_author, last.created_at as last_at
+       from support_tickets t
+       left join lateral (
+         select body, author, created_at from support_messages
+          where ticket_id = t.ticket_id and internal = false
+          order by created_at desc limit 1
+       ) last on true
+      where t.member_id = $1
+      order by t.updated_at desc`,
+    [memberId],
+  );
+  return rows;
+}
+
+/** One ticket the member owns, with the conversation minus internal notes. */
+export async function myTicket(memberId: string, ticketId: string) {
+  const pool = storePool();
+  if (!pool) return null;
+  const { rows } = await pool.query(
+    "select * from support_tickets where ticket_id = $1 and member_id = $2",
+    [ticketId, memberId],
+  );
+  const ticket = rows[0];
+  if (!ticket) return null;
+  const { rows: messages } = await pool.query(
+    `select message_id, author, author_name, body, photos, created_at
+       from support_messages
+      where ticket_id = $1 and internal = false
+      order by created_at`,
+    [ticketId],
+  );
+  return { ticket, messages };
+}
+
+/** A member replying on their own ticket. Reopens it if it was waiting. */
+export async function replyAsMember(
+  memberId: string, ticketId: string, body: string, photos: string[] = [],
+): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+  const { rows } = await pool.query(
+    "select ticket_id from support_tickets where ticket_id = $1 and member_id = $2",
+    [ticketId, memberId],
+  );
+  if (!rows[0]) return false;
+  await pool.query(
+    `insert into support_messages (message_id, ticket_id, author, author_id, body, photos)
+     values ($1,$2,'member',$3,$4,$5)`,
+    [`sm_${randomUUID().slice(0, 12)}`, ticketId, memberId, body, JSON.stringify(photos)],
+  );
+  // A resolved ticket the member writes on again is not resolved.
+  await pool.query(
+    `update support_tickets
+        set status = case when status = 'resolved' then 'open' else status end,
+            updated_at = now()
+      where ticket_id = $1`,
+    [ticketId],
+  );
+  return true;
 }
 
 /* --------------------------------------------------------------------------

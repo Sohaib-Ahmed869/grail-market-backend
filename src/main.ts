@@ -26,6 +26,7 @@ import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
 import { initNotificationPrefs } from "./notifications/prefs.js";
+import { initSupport } from "./admin/support.store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 import { rateLimit } from "./limits/middleware.js";
 
@@ -68,6 +69,10 @@ async function bootstrap() {
     await initMessages();
     await initNotifications();
     await initNotificationPrefs();
+    // Never called at boot: the support tables existed only because a seed
+    // script had made them, so a fresh database had a console that read a
+    // queue nobody could file into.
+    await initSupport();
   }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 
