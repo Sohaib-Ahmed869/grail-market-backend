@@ -391,12 +391,39 @@ export function statesACardNumber(title: string): boolean {
 }
 
 export function numberInTitle(title: string, number: string): boolean {
-  const wanted = number
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .replace(/^0+(?=\d)/, "");
-  if (!wanted) return false;
   const U = title.toUpperCase();
+
+  // A COMPOUND id — OP13-119, EB02-028, BT1-001 — is a set code and a card
+  // number joined by a separator, and sellers write that separator three ways:
+  // "OP13-119", "OP13 119", "OP13119". This used to strip the punctuation from
+  // the target, making "OP13119", and then tokenise the TITLE with a pattern
+  // that breaks on a hyphen and can only ever produce "OP13" and "119". No
+  // token could equal the target, so the filter matched nothing on every One
+  // Piece and Digimon card, declined to apply itself, and priced a $150 secret
+  // rare from a $54.99 leader card that happened to share a set.
+  //
+  // Matching on the parts, with the separator optional, accepts all three
+  // spellings and still refuses OP13-002 and EB01-119 — because BOTH halves
+  // have to be right. Neither half is an identity on its own: the set code
+  // alone is every card in the set, and the tail alone is a different card in
+  // any other set.
+  const parts = number
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean)
+    .map((p) => p.replace(/^0+(?=\d)/, ""));
+  if (parts.length === 0) return false;
+
+  if (parts.length > 1) {
+    const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Leading zeros are not a different card, so each numeric part accepts
+    // them: "119" must also match a title writing "0119".
+    const loose = parts.map((p) => (/^\d+$/.test(p) ? `0*${esc(p)}` : esc(p)));
+    const re = new RegExp(`(?<![A-Z0-9])${loose.join("[-\\s]?")}(?![A-Z0-9])`);
+    return re.test(U);
+  }
+
+  const wanted = parts[0];
   const run = /[A-Z]*\d[A-Z0-9]*/g;
   let m: RegExpExecArray | null;
   while ((m = run.exec(U)) !== null) {
