@@ -38,6 +38,10 @@ export class SalesController {
     // this costs nothing and cannot be a surprise bill.
     let known: number | null = null;
     let lastSaleAt: string | null = null;
+    let aggregate: {
+      price: number | null; median: number | null; low: number | null;
+      high: number | null; confidence: string | null; asOf: string | null;
+    } | null = null;
     try {
       const p = await gradedPricesFor({
         catalogId: cardId, name: name ?? "", number: number ?? null, setName: setName ?? null,
@@ -51,6 +55,23 @@ export class SalesController {
       const point = g && gr ? p.byGrader?.[g]?.[gr] ?? null : null;
       known = point?.count ?? null;
       lastSaleAt = point?.lastSaleDate ?? null;
+      // The evidence BEHIND those sales, not just how many there were.
+      //
+      // Without it the screen could only say "no itemised sale on record" —
+      // while the block above it said "middle of 9 completed sales". Both were
+      // reading the same card and only one of them was telling the truth. We
+      // cannot list the nine rows, but we can say what they add up to, and
+      // that is a world away from claiming there are none.
+      if (point) {
+        aggregate = {
+          price: point.price ?? null,
+          median: point.median ?? null,
+          low: point.low ?? null,
+          high: point.high ?? null,
+          confidence: point.confidence ?? null,
+          asOf: point.asOf ?? null,
+        };
+      }
     } catch {
       // a missing price is not a reason to withhold the sales we do hold
     }
@@ -60,6 +81,7 @@ export class SalesController {
       itemised,
       known,
       lastSaleAt,
+      aggregate,
       // Said plainly rather than left for the client to infer from two numbers.
       note:
         known != null && known > itemised
