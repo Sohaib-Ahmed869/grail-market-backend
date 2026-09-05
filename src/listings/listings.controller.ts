@@ -1,9 +1,12 @@
-import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
+import {
+  Body, Controller, Get, Param, Post, Query, Req, UploadedFile, UseInterceptors,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
+import { ANGLES, MIN_PHOTOS, photosConfigured, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
@@ -145,6 +148,45 @@ export class ListingsController {
       })),
     );
     return { uploads: urls };
+  }
+
+  /** One photograph, posted straight to us as multipart.
+   *
+   *  The presigned PUT beside this still exists and the browser still uses it.
+   *  React Native cannot: the only way to build a body for a raw PUT there is
+   *  `fetch(fileUri).blob()`, and RN's Blob is partial enough that the request
+   *  goes up empty or throws — which is why ten photographs failed silently
+   *  and a listing sat in `draft`, never reaching the review queue.
+   *
+   *  Multipart is the shape the scan upload has always used from the phone, so
+   *  this is the path we already know works rather than a second guess. */
+  @Post(":id/photo")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 25 * 1024 * 1024 } }))
+  async photo(
+    @Param("id") id: string,
+    @Req() req: Request,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() b: any,
+  ) {
+    const me = need(req);
+    if (!me) return { error: "unauthenticated" };
+    if (!photosConfigured()) {
+      return { error: "photos-unconfigured", message: "Photo storage is not configured." };
+    }
+    if (!file?.buffer?.length) {
+      return { error: "no-file", message: "No photograph was received." };
+    }
+    const l = await getListing(id);
+    if (!l || l.seller_id !== me) return { error: "not-found" };
+
+    const angle = String(b?.angle ?? "front");
+    try {
+      const up = await putPhoto(id, angle, file.buffer, file.mimetype || "image/jpeg");
+      return { angle, url: up.publicUrl };
+    } catch (e: any) {
+      console.error("[listings] photo upload failed:", e?.message);
+      return { error: "upload-failed", message: "That photograph could not be stored." };
+    }
   }
 
   @Post(":id/photos")

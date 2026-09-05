@@ -54,6 +54,41 @@ export type Upload = { key: string; uploadUrl: string; publicUrl: string };
  *  The key is derived here, never taken from the client — otherwise a caller
  *  could name a path inside somebody else's listing and overwrite their
  *  photographs. */
+/** Put bytes we already hold into the bucket.
+ *
+ *  The presigned PUT above is still the right shape for a browser, and it is
+ *  what the console uses. React Native cannot use it: `fetch(fileUri).blob()`
+ *  is the only way to get a body for a raw PUT there, and RN's Blob is partial
+ *  enough that the request goes up empty or throws. Ten photographs failing
+ *  silently is how a $11,340 listing sat in `draft` and never reached the
+ *  review queue.
+ *
+ *  So the phone posts multipart to our API — the same shape the scan upload has
+ *  always used and the one RN genuinely supports — and this puts it away. The
+ *  header comment above still holds for the browser; it is simply no longer
+ *  true that there is only one path. */
+export async function putPhoto(
+  ownerId: string,
+  angle: Angle | "video" | string,
+  body: Buffer,
+  contentType: string,
+  prefix: "listings" | "disputes" = "listings",
+): Promise<Upload> {
+  if (!photosConfigured()) throw new Error("photo storage is not configured");
+  const ext = contentType.includes("png") ? "png" : contentType.startsWith("video") ? "mp4" : "jpg";
+  const key = `${prefix}/${ownerId}/${angle}-${randomUUID().slice(0, 8)}.${ext}`;
+  await s3().send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      ContentLength: body.length,
+    }),
+  );
+  return { key, uploadUrl: "", publicUrl: publicUrlFor(key) };
+}
+
 export async function signUpload(
   ownerId: string,
   angle: Angle | "video" | string,
