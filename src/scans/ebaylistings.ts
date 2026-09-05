@@ -175,7 +175,78 @@ export function mentionsCard(title: string, cardName: string): boolean {
   // the longest word carries the identity: "Charizard", not "delta"
   const words = n.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
   if (words.length === 0) return true;
-  return words.some((w) => t.includes(w));
+  if (!words.some((w) => t.includes(w))) return false;
+  return sameForm(cardName, title);
+}
+
+/** The words that make a card a DIFFERENT card rather than a variant of one.
+ *
+ *  "Meganium" and "Mega Meganium ex" share every letter this file was checking
+ *  and are two products a set apart. Asking eBay for the promo Meganium came
+ *  back as six Mega Meganium ex, one real Meganium from a different number,
+ *  and a median built mostly on the wrong card. */
+const FORM_WORDS = ["ex", "gx", "vmax", "vstar", "v", "break", "prime"] as const;
+
+/** The words that follow "EX" when the EX is a SET rather than a card.
+ *
+ *  Pokemon named every set of the 2003-2007 era "EX Something" — EX Dragon
+ *  Frontiers, EX Team Magma vs Team Aqua, EX Holon Phantoms — so "Charizard EX
+ *  Dragon Frontiers" is a plain Charizard from a set whose name starts with EX,
+ *  while "Charizard ex 125/197" is the ex card. Only `ex` has this collision;
+ *  no set was ever called "VMAX Something".
+ *
+ *  A list rather than a rule because that is what it is: a closed set of names
+ *  from a period that ended, and no amount of pattern matching separates them
+ *  from a card's own suffix. */
+const EX_ERA_SETS = new Set([
+  "ruby", "sapphire", "sandstorm", "dragon", "team", "magma", "aqua", "hidden",
+  "legends", "firered", "leafgreen", "deoxys", "emerald", "unseen", "forces",
+  "delta", "species", "holon", "phantoms", "crystal", "guardians", "legend",
+  "maker", "power", "keepers", "frontiers", "trainer", "kit",
+]);
+
+/** Does the listing describe the same FORM of the card?
+ *
+ *  Read off the words TOUCHING the card's name, never off the whole title. A
+ *  title routinely carries "EX Dragon Frontiers" as a set, "Gold Star" as a
+ *  rarity and "Excellent" as a condition, and a bare scan for the word "ex"
+ *  calls all three of them an ex card.
+ *
+ *  Permissive when the listing names no form at all — plenty of sellers write
+ *  "Charizard 4/102 Base Set" and nothing else, and rejecting silence would
+ *  empty most pools. It only rejects when the seller HAS said what form it is
+ *  and said a different one.
+ */
+export function sameForm(cardName: string, title: string): boolean {
+  const n = latinName(cardName);
+  if (!n) return true;
+  const idWords = n.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+  if (idWords.length === 0) return true;
+
+  const theirs = formNear(words(title), idWords);
+  if (theirs === null) return true;
+  return formNear(words(cardName), idWords) === theirs;
+}
+
+const words = (text: string): string[] =>
+  String(text ?? "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+
+/** The form marker sitting against the card's name, or null if there is none.
+ *
+ *  "Mega Meganium ex" is a different card from "Meganium" — a set apart and an
+ *  order of magnitude — and the two share every letter this file used to check.
+ *  The prefix and the suffix are both part of the answer, so they are read
+ *  together: mega, ex, megaex and null are four different cards. */
+function formNear(toks: string[], idWords: string[]): string | null {
+  const i = toks.findIndex((t) => idWords.some((w) => t === w || t.startsWith(w)));
+  if (i < 0) return null;
+  const after = toks[i + 1] ?? "";
+  const mega = toks[i - 1] === "mega";
+  let suffix = (FORM_WORDS as readonly string[]).includes(after) ? after : "";
+  // "Charizard EX Dragon Frontiers" names a set, not an ex card.
+  if (suffix === "ex" && EX_ERA_SETS.has(toks[i + 2] ?? "")) suffix = "";
+  if (!mega && !suffix) return null;
+  return `${mega ? "mega" : ""}${suffix}`;
 }
 
 /** Pull the grading company and grade out of a listing title.
@@ -304,6 +375,19 @@ export function setInTitle(title: string, setName: string): boolean {
   if (words.length === 0) return false; // nothing distinctive to require
   const U = title.toUpperCase();
   return words.every((w) => new RegExp(`\\b${w}`).test(U));
+}
+
+/** Does this title say WHICH card it is?
+ *
+ *  A collector number, in the form sellers actually write it: "010/132",
+ *  "3 / 122", "OP13-119". Deliberately not "any digits" — a title carries a
+ *  year, a grade, a "1st Edition" and a condition, and treating those as the
+ *  seller having identified the card would make the guard below fire on
+ *  listings that never said anything.
+ */
+export function statesACardNumber(title: string): boolean {
+  const U = title.toUpperCase();
+  return /\b\d{1,3}\s*\/\s*\d{1,3}\b/.test(U) || /\b[A-Z]{2,4}\d{0,2}-\d{1,3}\b/.test(U);
 }
 
 export function numberInTitle(title: string, number: string): boolean {
@@ -518,6 +602,32 @@ export async function fetchListings(opts: {
     if (number) {
       const sameCard = listings.filter((l) => numberInTitle(l.title, number));
       if (sameCard.length >= 2) filtered = sameCard;
+      else if (sameCard.length === 0) {
+        // EVERY listing that says which card it is says a DIFFERENT one.
+        //
+        // The filter above declines when it finds nothing, on the reasoning
+        // that plenty of sellers never write the number and a filter that
+        // empties the pool has told us nothing. That reasoning is right when
+        // the pool is silent and wrong when the pool is unanimous against us:
+        // asking eBay for card 001 of MEP Black Star Promos came back as
+        // twelve Meganiums that all name their number, and every one of them
+        // was 010/132 from the main Mega Evolution set, 3/122 from BREAKpoint
+        // or a Mega Meganium ex 010/217 from Ascended Heroes. The set filter
+        // then declined too — none of them says "MEP" either — so a set whose
+        // cards we cannot price was priced off three other sets.
+        //
+        // The distinction is whether the listings identified themselves. When
+        // most of them did and not one is ours, this is the wrong pool, not a
+        // thin one, and no median over it describes this card.
+        const named = filtered.filter((l) => statesACardNumber(l.title));
+        if (named.length >= 2 && named.length >= filtered.length * 0.6) {
+          console.warn(
+            `[listings] every numbered result names a different card than ${number} — ` +
+              `refusing to price "${opts.name}" from ${filtered.length} of them`,
+          );
+          filtered = [];
+        }
+      }
     }
 
     // A collector number is only unique WITHIN a set. Card 100 exists in XY
@@ -562,12 +672,20 @@ export async function fetchListings(opts: {
     // broken query and a five-figure Pokemon card priced from a $24 baseball
     // card that happened to share "#100" and "BGS 8.5".
     const relevant = filtered.filter((l) => mentionsCard(l.title, opts.name));
-    if (relevant.length >= 2) {
-      if (relevant.length < filtered.length) {
-        console.log(
-          `[listings] dropped ${filtered.length - relevant.length} listing(s) that never mention "${opts.name}"`,
-        );
-      }
+    // No sample-size gate on this one, unlike every other filter here. The
+    // others narrow to a better subset and decline when the subset is too
+    // small to be a median; this one REJECTS listings that are demonstrably a
+    // different card, and a different card is not a comparable at any sample
+    // size. Requiring two survivors meant that when exactly one genuine
+    // listing came back the filter declined and priced from the rest: the
+    // promo Meganium had one real ask at $0.94 among six Mega Meganium ex, and
+    // keeping all seven is not a better answer than keeping the one.
+    if (relevant.length > 0 && relevant.length < filtered.length) {
+      console.log(
+        `[listings] dropped ${filtered.length - relevant.length} listing(s) that are not "${opts.name}"`,
+      );
+      filtered = relevant;
+    } else if (relevant.length > 0) {
       filtered = relevant;
     } else if (filtered.length >= 2 && relevant.length === 0 && latinName(opts.name)) {
       // NOTHING returned mentions the card. That is not a thin market, it is
@@ -621,6 +739,40 @@ export async function fetchListings(opts: {
         console.warn(
           `[listings] no graded listings for ${opts.grader}${opts.grade != null ? " " + opts.grade : ""} ` +
             `— refusing to average ${filtered.length} ungraded copies against a slab`,
+        );
+        filtered = [];
+      }
+    } else {
+      // ...and the same rule in the other direction, which was missing.
+      //
+      // "A graded card is never averaged against ungraded copies" was only
+      // enforced when we KNEW the card was graded. Pricing a raw card left the
+      // slabs in: Alakazam MEP009 came back as raw copies at $12-$25 alongside
+      // two PSA 9s at $116 and $232, and the median was taken over all of them.
+      // A slab is a different product with a different market, and one in a
+      // twelve-listing pool moves the middle of it.
+      //
+      // No sample-size gate, for the same reason the graded branch above has
+      // none at the bottom: a slab is a different product, not a noisy reading
+      // of this one. MEP 001 Meganium came back as one loose copy at $71.97
+      // and three slabs at $116, $120 and $630 — a threshold of three loose
+      // listings left all four in and reported a range of $72 to $630 for a
+      // raw card. One true reading beats four mixed ones.
+      const looseOnly = filtered.filter(
+        (l) => l.grader == null && !/\b(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|GRADED|SLAB)\b/i.test(l.title),
+      );
+      if (looseOnly.length > 0 && looseOnly.length < filtered.length) {
+        console.log(
+          `[listings] dropped ${filtered.length - looseOnly.length} graded listing(s) ` +
+            `from a raw median for "${opts.name}"`,
+        );
+        filtered = looseOnly;
+      } else if (looseOnly.length === 0 && filtered.length > 0) {
+        // Every copy on sale is in a holder. That is a fact about the market
+        // and not a price for a loose card, so it is reported as no answer
+        // rather than as the slab price with the word "raw" over it.
+        console.warn(
+          `[listings] every listing for "${opts.name}" is graded — refusing to quote a raw card from slabs`,
         );
         filtered = [];
       }

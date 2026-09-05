@@ -4,10 +4,13 @@ import { scanBudget } from "./budget.js";
 import { fetchListings } from "./ebaylistings.js";
 import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
-import { cardNews, marketPulse } from "./market.js";
+import { cardNews, cardTrend, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { getSet, listSets } from "./sets.js";
+import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
+import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
+import { ebayShop, shopsFor, type ShopQuote } from "./shops.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
@@ -90,14 +93,30 @@ export class MarketController {
    *  The default view of search, because a search box only helps someone who
    *  already knows the name. Browsing to the set and finding the card in it is
    *  how someone holding an unfamiliar card gets to its page at all. */
+  /** The games we can browse, for the first level of the set picker. */
+  @Get("games")
+  async games() {
+    return { games: await gamesWithPreviews() };
+  }
+
+  /** Sets for one game. Without a game this stays what it always was —
+   *  Pokemon — so nothing that already calls it changes behaviour. */
   @Get("sets")
-  async sets() {
-    return { sets: await listSets() };
+  async sets(@Query("game") game?: string) {
+    // No game keeps the old behaviour — Pokemon — so anything already calling
+    // this is unaffected.
+    return { sets: game ? await setsForGame(game) : await listSets() };
   }
 
   /** One set and the cards in it. */
   @Get("sets/:setId")
   async set(@Param("setId") setId: string) {
+    // A prefixed id belongs to one of the catalogues TCGdex does not cover.
+    // `undefined` means "not one of mine", which is the Pokemon path.
+    const other = await setDetailForGame(setId);
+    if (other !== undefined) {
+      return other ?? { error: "not-found", message: "That set couldn't be loaded." };
+    }
     const s = await getSet(setId);
     return s ?? { error: "not-found", setId };
   }
@@ -177,6 +196,31 @@ export class MarketController {
   // Deliberately the same chain a scan uses — sold comps for the exact grader
   // and grade first, live asks for the exact printing second — because a scan
   // and a search that land on the same card must not quote two prices for it.
+  /** How many people here follow, hold or have looked at a card.
+   *
+   *  Counted, never estimated. A card nobody has touched says so. */
+  @Get("interest")
+  async interest(@Query("catalogId") catalogId?: string) {
+    if (!catalogId) return { following: 0, holding: 0, views: 0, faces: [] };
+    return interestIn(catalogId);
+  }
+
+  /** One card's price history and period returns, for its own page. */
+  @Get("trend")
+  async trend(
+    @Query("cardId") cardId?: string,
+    @Query("name") name?: string,
+    @Query("game") game?: string,
+    @Query("set") setName?: string,
+  ) {
+    if (!cardId || !name) return { trend: null };
+    return {
+      trend: await cardTrend({
+        catalogId: cardId, name, game: game ?? null, setName: setName ?? null,
+      }),
+    };
+  }
+
   @Get("price")
   async price(
     @Query("name") name?: string,
@@ -288,6 +332,13 @@ export class MarketController {
             }
           : null,
       listings: live?.listings ?? [],
+      // Where to actually buy one. The eBay row is built from the pool above
+      // rather than a second search, so this costs one tcgdex fetch and
+      // nothing else. Live rows first: a listing somebody can click beats a
+      // marketplace's summary of its own market, however good the summary.
+      shops: [ebayShop(live), ...(await shopsFor(cardId ?? null))]
+        .filter((s): s is ShopQuote => s != null)
+        .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "live" ? -1 : 1)),
       printingRead: printing ? readPrinting(printing) : null,
     };
   }

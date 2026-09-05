@@ -22,9 +22,10 @@ import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initDisputes } from "./disputes/store.js";
 import { initScanQuota } from "./scans/scanquota.store.js";
+import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
-import { initAdmin } from "./admin/store.js";
+import { initNotificationPrefs } from "./notifications/prefs.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 import { rateLimit } from "./limits/middleware.js";
 
@@ -63,9 +64,10 @@ async function bootstrap() {
     await initRatings();
     await initDisputes();
     await initScanQuota();
+    await initMaintenance();
     await initMessages();
     await initNotifications();
-    await initAdmin();
+    await initNotificationPrefs();
   }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 

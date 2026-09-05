@@ -70,6 +70,27 @@ export async function applySubscription(s: {
   );
 }
 
+/** The statuses under which a subscription is actually paying.
+ *
+ *  A cancelled or past_due row keeps its plan_id — Stripe does not blank it —
+ *  so reading plan_id without the status is how somebody keeps a paid
+ *  entitlement after they stop paying for it. This lived privately in
+ *  scanquota.store.ts and the listings path grew its own check without it,
+ *  which is exactly how two answers to one question appear.
+ */
+export const PAYING = new Set(["active", "trialing"]);
+
+/** The plan a member is actually entitled to right now, or null.
+ *
+ *  The single answer to "what are they paying for". Every entitlement gate
+ *  goes through it so a scan and a listing cannot disagree about the same
+ *  subscription. */
+export async function activePlanId(userId: string): Promise<string | null> {
+  const sub = await readSubscription(userId);
+  if (!sub) return null;
+  return PAYING.has(String(sub.status)) ? (sub.plan_id ?? null) : null;
+}
+
 export async function readSubscription(userId: string) {
   const pool = storePool();
   if (!pool) return null;
