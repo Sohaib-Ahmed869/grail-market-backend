@@ -885,12 +885,34 @@ export async function fetchListings(opts: {
           setName: null,
           labelSearchDone: true,
         });
-        if (narrowed && narrowed.matched >= 2) {
+        // ...and keep it ONLY if dropping the number actually found the
+        // labelled product.
+        //
+        // The number is the strongest signal there is, so giving it up has to
+        // buy something. It was given up whenever the re-search returned two
+        // of anything, which on a BGS 9.5 Portgas.D.Ace meant trading seven
+        // listings that all said OP13-119 for twelve that said nothing at all
+        // — every Ace at that grade, priced as one card. US$200 became US$21.
+        //
+        // The label token here was "MANGAARTSEC": OCR glues "MANGA ART SEC"
+        // and no seller types it that way, so it matches nothing whether the
+        // number is in the query or not. A token that cannot match is not
+        // evidence the identification was wrong; it is evidence the token is
+        // unusable. The prize-promo case this exists for is different — there
+        // the re-search genuinely surfaces the promo, and filteredToLabelText
+        // comes back true.
+        if (narrowed && narrowed.matched >= 2 && narrowed.filteredToLabelText) {
           console.log(
             `[listings] broad search found no "${opts.labelTokens[0]}" listings; ` +
               `re-searched with the label's own words and found ${narrowed.matched}`,
           );
           return narrowed;
+        }
+        if (narrowed && narrowed.matched >= 2) {
+          console.log(
+            `[listings] dropping the number found ${narrowed.matched} listings but none ` +
+              `carrying "${opts.labelTokens[0]}" either — keeping the numbered pool`,
+          );
         }
       }
     }
