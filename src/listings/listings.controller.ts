@@ -6,7 +6,7 @@ import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signUpload, type Angle, putPhoto } from "../photos/s3.js";
+import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
@@ -46,7 +46,7 @@ export class ListingsController {
       min: min ? Number(min) : null, max: max ? Number(max) : null,
       sort: sort ?? null,
     });
-    return { listings: rows.map(publicShape), sort: sort ?? "featured" };
+    return { listings: await signPreviews(rows.map(publicShape)), sort: sort ?? "featured" };
   }
 
   @Get("mine")
@@ -61,7 +61,7 @@ export class ListingsController {
     const plan = findPlan(planId ?? "");
     const live = rows.filter((r) => ["live", "in_review"].includes(r.status)).length;
     return {
-      listings: rows.map(sellerShape),
+      listings: await signPreviews(rows.map(sellerShape)),
       // The ceiling is reported with the listings rather than discovered at
       // the moment of publishing, so hitting it is never a surprise.
       quota: { plan: plan?.name ?? null, limit: plan?.listings ?? null, used: live },
@@ -74,7 +74,7 @@ export class ListingsController {
   async queue(@Req() req: Request) {
     if (!need(req)) return { error: "unauthenticated" };
     // TODO(admin): gate on an admin role once one exists.
-    return { listings: (await reviewQueue()).map(sellerShape) };
+    return { listings: await signPreviews((await reviewQueue()).map(sellerShape)) };
   }
 
   @Get(":id")
@@ -403,6 +403,24 @@ export class ListingsController {
 /** What a buyer sees. Deliberately omits the seller's own analytics — views
  *  and saves are for the person who listed it, never for the person deciding
  *  whether it has gone stale. */
+/** Sign the FIRST photo of each listing, and only the first.
+ *
+ *  A market card draws one thumbnail — `photos[0].url` — and the bucket is not
+ *  public, so every one of them 403'd and the grid rendered as empty frames.
+ *  The single-listing read signs all ten angles because somebody is about to
+ *  look at all ten; a grid of forty cards needs forty signatures, not four
+ *  hundred, so the rest are left alone and signed when the card is opened. */
+async function signPreviews<T extends { photos?: unknown }>(rows: T[]): Promise<T[]> {
+  return Promise.all(
+    rows.map(async (r) => {
+      const photos = (r as any).photos;
+      if (!Array.isArray(photos) || photos.length === 0 || !photos[0]?.url) return r;
+      const [first, ...rest] = photos;
+      return { ...r, photos: [{ ...first, url: await signDownload(first.url) }, ...rest] };
+    }),
+  );
+}
+
 function publicShape(l: any) {
   // seller_id stays: it is an opaque handle, and without it a buyer cannot
   // open the page of the person they are about to send money to. Views and
