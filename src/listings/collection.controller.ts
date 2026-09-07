@@ -6,6 +6,7 @@ import { callerId } from "../auth/auth.controller.js";
 import { gradedPricesFor } from "../scans/pricing.js";
 import { valueOfEntry, type Unpriced } from "./collectionvalue.js";
 import { marketStatusForOwner } from "./deals.js";
+import { fxRates } from "../scans/fx.js";
 
 @Controller("collection")
 export class CollectionController {
@@ -78,6 +79,10 @@ export class CollectionController {
           grader: e.grader, grade: e.grade, variant: e.variant ?? null,
           quantity: e.quantity ?? 1,
           paid: e.paid == null ? null : Number(e.paid),
+          // What that `paid` is DENOMINATED in. It was dropped on the way out,
+          // so a cost in Australian dollars was subtracted from a value in US
+          // dollars and the difference called a gain.
+          currency: e.currency ?? "AUD",
           // `unpriced` says WHY there is no figure. "grade" is the owner's to
           // fix and the screen offers the edit; the other two are ours.
           value, unpriced, addedAt: e.added_at,
@@ -101,14 +106,39 @@ export class CollectionController {
     // history is worth keeping; the money is not theirs to still be holding.
     const held = entries.filter((e) => !e.market?.settled);
     const value = held.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
-    const cost = held.reduce((a, e) => a + (e.paid ?? 0) * (e.quantity ?? 1), 0);
+
+    // `paid` is stored in whatever currency the buyer paid in; `value` comes
+    // from the price provider in US dollars. Subtracting one from the other
+    // gave a gain that was neither — a card bought for A$6,235 and worth
+    // US$4,250 reported a loss of 1,985 of nothing. Both sides are put in US
+    // dollars here, which is the currency `value` is already in and the one
+    // the clients convert from.
+    const fx = await fxRates().catch(() => null);
+    const toUsd = (n: number, currency: string) => {
+      if (!n) return 0;
+      const c = (currency || "USD").toUpperCase();
+      if (c === "USD") return n;
+      const rate = fx?.rates?.[c];
+      // No rate is not a reason to invent one. A cost we cannot express in the
+      // same currency as the value is left out of both, so the gain is
+      // computed from the rows it can actually compare.
+      return rate ? n / rate : NaN;
+    };
+    const costs = held.map((e) => toUsd((e.paid ?? 0), e.currency ?? "AUD") * (e.quantity ?? 1));
+    const comparable = costs.every((c) => Number.isFinite(c));
+    const cost = comparable ? costs.reduce((a, c) => a + c, 0) : 0;
     // What the sold ones went for, which is a different and also interesting
     // number rather than something to hide.
     const realised = entries
       .filter((e) => e.market?.settled)
-      .reduce((a, e) => a + (e.market?.price ?? 0), 0);
+      .reduce((a, e) => a + (toUsd(e.market?.price ?? 0, e.market?.currency ?? "AUD") || 0), 0);
     return {
-      entries, value, cost, gain: value - cost, realised,
+      entries, value, cost, realised,
+      // Only when both sides are in the same currency. A gain nobody can
+      // compute is reported as null, which the app draws as nothing — rather
+      // than as zero, which is a claim that the collection is exactly break
+      // even.
+      gain: comparable ? value - cost : null,
       held: held.length, sold: entries.length - held.length,
       // Said plainly: a total that silently skips unpriced cards reads as the
       // whole collection and is not.

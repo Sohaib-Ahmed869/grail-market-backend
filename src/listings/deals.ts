@@ -199,6 +199,42 @@ export async function markReceived(dealId: string, me: string): Promise<Moved> {
   await moveListing(d.listing_id, "sold", { sellerId: d.seller_id });
 
   const l = await getListing(d.listing_id);
+
+  // The buyer now OWNS this card, so it goes into their collection.
+  //
+  // This was missing entirely. The seller's side was handled — their entry
+  // marks sold and leaves the total — and the other half was simply never
+  // written, so somebody who had paid, received the card and confirmed it
+  // watched their collection stay empty. A trade moves a card from one person
+  // to another; recording only the leaving half is recording half a fact.
+  //
+  // `paid` is the agreed amount, which is what this card actually cost them —
+  // that is the number their gain is measured against from here on.
+  if (l) {
+    try {
+      await pool.query(
+        `insert into collection
+           (entry_id, user_id, catalog_id, card_name, set_name, card_number,
+            image_url, grader, grade, variant, quantity, paid, currency)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12)`,
+        [
+          `c_${randomUUID().slice(0, 12)}`, d.buyer_id, l.catalog_id ?? null,
+          l.card_name, l.set_name ?? null, l.card_number ?? null,
+          // The listing's own photograph, not the catalogue's: this is the
+          // card they bought, and the seller's picture is of that object.
+          (Array.isArray(l.photos) ? l.photos[0]?.url : null) ?? l.image_url ?? null,
+          l.grader ?? null, l.grade ?? null, l.variant ?? null,
+          Number(d.amount), d.currency,
+        ],
+      );
+    } catch (e) {
+      // A collection row that would not write must not cost the buyer the
+      // confirmation they just gave — the deal is closed either way, and this
+      // is recoverable by hand where the deal is not.
+      console.warn("[deals] could not add to the buyer's collection:", (e as Error).message);
+    }
+  }
+
   if (l?.catalog_id) {
     // The agreed amount, not anything either side can retype here. It is what
     // the offer was accepted at and both of them have now stood behind it.
