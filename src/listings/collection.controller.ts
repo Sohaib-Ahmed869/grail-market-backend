@@ -28,7 +28,28 @@ export class CollectionController {
     // What each of these cards is doing on the market. A collection that
     // cannot tell you a card is listed — or that it has already gone — is a
     // list of things you might still own, which is not what it says it is.
-    const market = await marketStatusForOwner(me);
+    //
+    // Handed out ONE TO AN ENTRY. A listing is one physical card, and a
+    // collector can own several of the same: matching purely on card identity
+    // meant selling one of two identical PSA 10s marked both of them sold and
+    // took both out of the value, which loses the owner a card they still
+    // hold. Each listing is claimed by the first entry it fits and then spent.
+    const unclaimed = await marketStatusForOwner(me);
+    const claim = (key: string) => {
+      const i = unclaimed.findIndex((m) => m.key === key);
+      return i === -1 ? undefined : unclaimed.splice(i, 1)[0];
+    };
+    // Claimed in one synchronous pass, BEFORE the pricing below. The rows are
+    // priced concurrently, so doing it inside that map would hand listings out
+    // in whatever order the price lookups happened to finish — the right
+    // number of them, to unpredictable rows.
+    const claimed = new Map<string, ReturnType<typeof claim>>();
+    for (const e of r.rows) {
+      claimed.set(
+        e.entry_id,
+        claim(`${e.catalog_id}|${e.grader ?? ""}|${e.grade ?? ""}`),
+      );
+    }
 
     const entries = await Promise.all(
       r.rows.map(async (e: any) => {
@@ -64,7 +85,7 @@ export class CollectionController {
           // own status word, because `in_review` and `reserved` mean nothing
           // to the person who owns the card — what they want to know is
           // whether it is still theirs and whether the money has happened.
-          market: describe(market.get(`${e.catalog_id}|${e.grader ?? ""}|${e.grade ?? ""}`)),
+          market: describe(claimed.get(e.entry_id)),
         };
       }),
     );

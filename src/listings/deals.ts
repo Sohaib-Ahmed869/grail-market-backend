@@ -256,23 +256,34 @@ export async function cancelDeal(
   return { ok: true, state: "cancelled" };
 }
 
-/** What a member's own cards are doing on the market, keyed the way a
- *  collection entry is.
+/** What a member's own cards are doing on the market.
  *
  *  A collection row and a listing are not joined by anything — there is no
  *  foreign key in this schema and a listing is not created FROM an entry. They
  *  are the same card when they are the same catalogue id at the same grade
  *  from the same grading company, which is the identity the whole pricing
- *  chain already uses. */
-export async function marketStatusForOwner(userId: string): Promise<
-  Map<string, {
-    status: string; price: number; currency: string; listingId: string;
-    dealId: string | null; dealState?: string | null; buyerName?: string | null;
-  }>
-> {
-  const out = new Map<string, any>();
+ *  chain already uses.
+ *
+ *  Returned as a LIST rather than one-per-card, because a listing is one
+ *  physical card and a collector can own several of the same. Keyed by card
+ *  identity, selling one of two identical PSA 10s marked BOTH of them sold and
+ *  took both out of the collection value — the owner loses a card they still
+ *  have. The caller hands these out one to an entry.
+ */
+export type OwnerMarket = {
+  key: string;
+  status: string;
+  price: number;
+  currency: string;
+  listingId: string;
+  dealId: string | null;
+  dealState: string | null;
+  buyerName: string | null;
+};
+
+export async function marketStatusForOwner(userId: string): Promise<OwnerMarket[]> {
   const pool = storePool();
-  if (!pool) return out;
+  if (!pool) return [];
   const r = await pool.query(
     `select l.listing_id, l.catalog_id, l.grader, l.grade, l.currency, l.status,
             d.deal_id, d.state as deal_state,
@@ -293,23 +304,19 @@ export async function marketStatusForOwner(userId: string): Promise<
       where l.seller_id = $1
         and l.catalog_id is not null
         and l.status in ('draft','in_review','info_requested','live','paused','reserved','sold')
-      order by l.created_at desc`,
+      -- Live business before history, so an owner holding two of a card sees
+      -- the one that is still going against the copy they still have.
+      order by (l.status = 'sold') asc, l.created_at desc`,
     [userId],
   );
-  for (const x of r.rows) {
-    const key = `${x.catalog_id}|${x.grader ?? ""}|${x.grade ?? ""}`;
-    // First wins: the query is newest-first, so the most recent thing this
-    // person did with the card is what the collection shows.
-    if (out.has(key)) continue;
-    out.set(key, {
-      status: x.status,
-      price: Number(x.price),
-      currency: x.currency,
-      listingId: x.listing_id,
-      dealId: x.deal_id ?? null,
-      dealState: x.deal_state ?? null,
-      buyerName: x.buyer_name ?? null,
-    });
-  }
-  return out;
+  return r.rows.map((x: any) => ({
+    key: `${x.catalog_id}|${x.grader ?? ""}|${x.grade ?? ""}`,
+    status: x.status,
+    price: Number(x.price),
+    currency: x.currency,
+    listingId: x.listing_id,
+    dealId: x.deal_id ?? null,
+    dealState: x.deal_state ?? null,
+    buyerName: x.buyer_name ?? null,
+  }));
 }
