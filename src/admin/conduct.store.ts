@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { viewableUrl } from "../photos/s3.js";
 import { storePool } from "../cards.store.js";
 
 // Reports & conduct.
@@ -216,15 +217,27 @@ export async function caseThread(id: string) {
       where e.dispute_id = $1 order by e.created_at`,
     [id],
   );
-  return r.rows.map((x: any) => ({
-    id: x.event_id,
-    by: x.name ?? x.author_id,
-    byId: x.author_id,
-    kind: x.kind,
-    body: x.body,
-    photos: Array.isArray(x.photos) ? x.photos : [],
-    at: iso(x.created_at),
-  }));
+  return Promise.all(
+    r.rows.map(async (x: any) => ({
+      id: x.event_id,
+      by: x.name ?? x.author_id,
+      byId: x.author_id,
+      kind: x.kind,
+      body: x.body,
+      /* Signed, for the same reason the listing's photo set is — the bucket
+         is private and what is stored is an address rather than a link.
+         Evidence on a conduct case is the last thing that should quietly fail
+         to load. These are bare strings here, not `{angle, url}` objects. */
+      photos: Array.isArray(x.photos)
+        ? await Promise.all(
+            x.photos
+              .filter((u: unknown): u is string => typeof u === "string")
+              .map((u: string) => viewableUrl(u)),
+          )
+        : [],
+      at: iso(x.created_at),
+    })),
+  );
 }
 
 export async function caseCounts(): Promise<Record<string, number>> {

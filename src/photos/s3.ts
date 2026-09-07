@@ -116,9 +116,8 @@ export async function putPhoto(
  *  short enough that a copied link is not a permanent one. */
 export async function signDownload(url: string, seconds = 900): Promise<string> {
   if (!photosConfigured() || !url) return url;
-  const prefix = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/`;
-  if (!url.startsWith(prefix)) return url;
-  const key = decodeURIComponent(url.slice(prefix.length));
+  const key = keyFromUrl(url);
+  if (key == null) return url;
   try {
     return await getSignedUrl(
       s3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }), { expiresIn: seconds },
@@ -129,9 +128,35 @@ export async function signDownload(url: string, seconds = 900): Promise<string> 
   }
 }
 
+/** Where our own objects live. */
+const origin = () => `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/`;
+
+/** The object key inside our bucket, or null for a URL that is not ours.
+ *
+ *  The seeded fixtures point at tcgdex and scryfall, which are public and must
+ *  not be mangled into a signature for a bucket they are not in. */
+export function keyFromUrl(url: string): string | null {
+  const o = origin();
+  if (!BUCKET() || !url.startsWith(o)) return null;
+  const key = decodeURIComponent(url.slice(o.length));
+  return key.length > 0 ? key : null;
+}
+
 /** The same, for a list. */
 export const signAll = async <T extends { url: string }>(rows: T[]): Promise<T[]> =>
   Promise.all(rows.map(async (r) => ({ ...r, url: await signDownload(r.url) })));
+
+/** The console's name for `signDownload`.
+ *
+ *  Both branches wrote this at the same time — the listings path called it
+ *  `signDownload`, the admin console called it `viewableUrl` — and merging
+ *  them left two functions signing GETs against the same bucket. Two
+ *  implementations of one rule is how they end up disagreeing about the
+ *  expiry, so this is an alias and not a second copy. Kept under its own name
+ *  because the console's call sites read better with it, and renaming forty
+ *  of them buys nothing. */
+export const viewableUrl = (url: string, expiresIn = 900): Promise<string> =>
+  signDownload(url, expiresIn);
 
 export async function signUpload(
   ownerId: string,

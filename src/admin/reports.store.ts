@@ -1,4 +1,5 @@
 import { storePool } from "../cards.store.js";
+import { adminPlans, billingLedger } from "./commerce.store.js";
 
 // The reporting surface.
 //
@@ -73,6 +74,34 @@ export type ReportSeries = {
 
 export type ReportsPayload = {
   period: { key: string; label: string; days: number; from: string; to: string };
+  /** What an owner opens this page for, as against a moderator: earnings,
+   *  subscribers, verified accounts, conflicts. Reads from the same places
+   *  `/admin/pricing` and `/admin/commerce` do, so this page cannot quote a
+   *  different MRR or subscriber count than either of them. */
+  owner: {
+    /** Recurring revenue right now, in whole dollars. NOT period-scoped. */
+    mrr: number;
+    /** Active subscriptions right now. NOT period-scoped. */
+    subscribers: number;
+    /** Per plan, largest subscriber count first. */
+    plans: { name: string; price: number; subscribers: number; mrr: number }[];
+    /** Money that actually arrived inside the selected period. */
+    collected: number;
+    /** Money that bounced inside the period, and how many distinct accounts. */
+    failed: number;
+    failedAccounts: number;
+    /** Subscriptions that STARTED inside the period. */
+    newSubscribers: number;
+    /** Marketplace members in total, and how many joined inside the period. */
+    members: number;
+    newMembers: number;
+    /** Accounts the identity provider has approved, in total and inside the period. */
+    verified: number;
+    newVerified: number;
+    /** Conduct cases raised inside the period, and closed inside it. */
+    casesOpened: number;
+    casesResolved: number;
+  };
   kpis: {
     key: string;
     label: string;
@@ -182,6 +211,40 @@ export function running(base: number, per: number[]): number[] {
   return per.map((v) => (n += v));
 }
 
+/**
+ * Money in, money that bounced, and subscriptions started — bounded by the
+ * report's own period rather than the calendar month `thisMonth()` uses on
+ * the dashboard, since a quarter or a year-to-date view would otherwise be
+ * scored against thirty days of evidence.
+ *
+ * `newSubscribers` is read off the ledger's "subscribed" events rather than
+ * the `subscriptions` table because that table carries no created_at column
+ * — the webhook history is the only place a start date is recorded at all,
+ * not a stylistic preference for one source over another. A quiet period can
+ * genuinely read 0 here.
+ */
+function ownerMoney(
+  events: { kind: string; amount: number | null; at: string; userId: string | null }[],
+  from: Date,
+  to: Date,
+): { collected: number; failed: number; failedAccounts: number; newSubscribers: number } {
+  let collected = 0;
+  let failed = 0;
+  let newSubscribers = 0;
+  const bounced = new Set<string>();
+
+  for (const e of events) {
+    const at = new Date(e.at);
+    if (at < from || at >= to) continue;
+    if (e.kind === "paid") collected += e.amount ?? 0;
+    else if (e.kind === "payment-failed") {
+      failed += e.amount ?? 0;
+      if (e.userId) bounced.add(e.userId);
+    } else if (e.kind === "subscribed") newSubscribers += 1;
+  }
+  return { collected, failed, failedAccounts: bounced.size, newSubscribers };
+}
+
 /* --------------------------------------------------------------------------
    The one read
 
@@ -233,6 +296,11 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
     sellerRows,
     actionRows,
     ticketRows,
+    ownerMembersRow,
+    ownerVerifiedRow,
+    ownerCasesResolvedRow,
+    ownerPlans,
+    ownerEvents,
   ] = await Promise.all([
     /* Every listing decided in the period, by what it was decided to. The
        decision is `reviewed_at` and not `live_at`: a listing can go live, be
@@ -304,12 +372,20 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
       `select count(*)::int n from disputes where created_at >= $1 and created_at < $2`,
       [from, to],
     ),
+    /* Marketplace members, not every row in `users`.
+    
+       Staff hold accounts in the same table — that is the whole design, a
+       console account is a member with a role — so an unfiltered count made
+       "Member growth" include the five people who work here. On a database
+       with three real members that read as eight, and the same card carried
+       the honest figure beside it, so the page disagreed with itself in the
+       space of two lines. */
     q(
       `select created_at at time zone 'utc' as at from users
-        where created_at >= $1 and created_at < $2`,
+        where role = 'member' and created_at >= $1 and created_at < $2`,
       [seriesFrom < from ? seriesFrom : from, to],
     ),
-    q(`select count(*)::int n from users where created_at < $1`, [
+    q(`select count(*)::int n from users where role = 'member' and created_at < $1`, [
       seriesFrom < from ? seriesFrom : from,
     ]),
     /* Listings that went live on a figure built from too few sales. The
@@ -360,6 +436,37 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
         where created_at >= $1 and created_at < $2`,
       [seriesFrom < from ? seriesFrom : from, to],
     ),
+    /* Total headcount and the slice of it that joined in the period, in one
+       row rather than two round trips for the same table. */
+    q(
+      `select count(*)::int total,
+              count(*) filter (where created_at >= $1 and created_at < $2)::int new
+         from users where role = 'member'`,
+      [from, to],
+    ),
+    /* Same shape, for accounts the identity provider has actually approved —
+       "verified" is the provider's word, read off identity_status, never
+       inferred from anything the console itself writes. */
+    q(
+      `select count(*)::int total,
+              count(*) filter (where verified_at >= $1 and verified_at < $2)::int new
+         from identity_status where status = 'Approved'`,
+      [from, to],
+    ),
+    /* Resolved on the conduct board, not on the dispute. As the note on
+       `open_reports` above explains: disputes.status is the app's column and
+       this console never writes it, so a case the board closed only shows as
+       closed by reading conduct_cases.state, and decided_at is when that
+       closure happened. */
+    q(
+      `select count(*)::int n from conduct_cases
+        where state = 'resolved' and decided_at >= $1 and decided_at < $2`,
+      [from, to],
+    ),
+    /* Same source `/admin/pricing` reads, so the two pages cannot quote two
+       different MRRs for the same subscriber base. */
+    adminPlans().catch(() => []),
+    billingLedger(300).catch(() => []),
   ]);
 
   /* ------------------------------------------------------------- the panels */
@@ -411,6 +518,16 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
 
   const largestSeller = sellerRows?.[0]?.total ?? 0;
   const concentration = gmv > 0 ? (largestSeller / gmv) * 100 : null;
+
+  /* The owner panel. Plans and their headcount come straight off adminPlans,
+     unsorted by name the way `/admin/pricing` returns them — resorted here by
+     subscriber count because that is the order an owner reads a plan list
+     in, largest first. */
+  const ownerPlanRows = ownerPlans ?? [];
+  const ownerFinance = ownerMoney(ownerEvents ?? [], from, to);
+  const ownerMembersR = ownerMembersRow?.[0] ?? {};
+  const ownerVerifiedR = ownerVerifiedRow?.[0] ?? {};
+  const ownerCasesResolved = ownerCasesResolvedRow?.[0]?.n ?? 0;
 
   /* ------------------------------------------------------------ the series */
 
@@ -644,6 +761,23 @@ export async function reportsFor(periodKey: string): Promise<ReportsPayload> {
 
   return {
     period: { key, label: period.label, days, from: from.toISOString(), to: to.toISOString() },
+    owner: {
+      mrr: ownerPlanRows.reduce((s, p) => s + p.mrr, 0),
+      subscribers: ownerPlanRows.reduce((s, p) => s + p.subscribers, 0),
+      plans: [...ownerPlanRows]
+        .sort((a, b) => b.subscribers - a.subscribers)
+        .map((p) => ({ name: p.name, price: p.price, subscribers: p.subscribers, mrr: p.mrr })),
+      collected: ownerFinance.collected,
+      failed: ownerFinance.failed,
+      failedAccounts: ownerFinance.failedAccounts,
+      newSubscribers: ownerFinance.newSubscribers,
+      members: ownerMembersR.total ?? 0,
+      newMembers: ownerMembersR.new ?? 0,
+      verified: ownerVerifiedR.total ?? 0,
+      newVerified: ownerVerifiedR.new ?? 0,
+      casesOpened: disputes,
+      casesResolved: ownerCasesResolved,
+    },
     kpis: [
       {
         key: "r1",
@@ -713,6 +847,21 @@ function blank(
   const none = "No store is configured, so nothing can be counted.";
   return {
     period: { key, label, days, from: from.toISOString(), to: to.toISOString() },
+    owner: {
+      mrr: 0,
+      subscribers: 0,
+      plans: [],
+      collected: 0,
+      failed: 0,
+      failedAccounts: 0,
+      newSubscribers: 0,
+      members: 0,
+      newMembers: 0,
+      verified: 0,
+      newVerified: 0,
+      casesOpened: 0,
+      casesResolved: 0,
+    },
     kpis: [],
     gameSplit: [],
     decisionSplit: [],
