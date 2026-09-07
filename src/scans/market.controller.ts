@@ -6,8 +6,9 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, cardTrend, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
+import { cardMeta } from "./demand.js";
 import { getSet, listSets } from "./sets.js";
-import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
+import { gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { ebayShop, shopsFor, type ShopQuote } from "./shops.js";
@@ -106,6 +107,60 @@ export class MarketController {
     // No game keeps the old behaviour — Pokemon — so anything already calling
     // this is unaffected.
     return { sets: game ? await setsForGame(game) : await listSets() };
+  }
+
+  /** One card's identity, by catalogue id.
+   *
+   *  The phone used to work this out itself, by cutting the id at its last
+   *  hyphen and asking for the front half as a set. That is correct for
+   *  Pokemon (`swsh7-215` -> `swsh7`) and for nothing else: One Piece ids look
+   *  like `optcg-OP13-119` and the cut gives `optcg-OP13`, while the set
+   *  endpoint wants `optcg:OP13` — so every One Piece card opened onto a page
+   *  with no name, which meant no price either. Magic ids are `mtg-<uuid>`,
+   *  where the set is not in the string at all.
+   *
+   *  So the answer comes from what we already store rather than from parsing.
+   *  A card the market can show has been listed, watched, held or scanned, and
+   *  all four of those tables carry its name.
+   *
+   *  Falls back to the set for a card we hold nothing about — a deep link into
+   *  a set nobody here has touched still resolves. */
+  @Get("card")
+  async card(@Query("catalogId") catalogId?: string) {
+    const id = (catalogId ?? "").trim();
+    if (!id) return { error: "no-id", message: "A catalogue id is required." };
+
+    const held = await cardMeta(id);
+    if (held) {
+      return {
+        cardId: held.catalogId,
+        name: held.name,
+        setName: held.setName,
+        number: held.number ?? null,
+        game: held.game,
+        imageUrl: held.imageUrl,
+        source: "store",
+      };
+    }
+
+    // Nothing stored. Read the set it belongs to — which needs the id turned
+    // into a set id correctly, prefix and all, in the one place that knows
+    // how rather than on a phone that has to guess.
+    const setId = setIdOfCard(id);
+    if (!setId) return { error: "not-found", cardId: id };
+    const other = await setDetailForGame(setId);
+    const set = other !== undefined ? other : await getSet(setId);
+    const c = set?.cards.find((x: any) => x.cardId === id);
+    if (!set || !c) return { error: "not-found", cardId: id };
+    return {
+      cardId: id,
+      name: c.name,
+      setName: set.name,
+      number: c.localId ?? null,
+      game: null,
+      imageUrl: c.imageUrl ?? null,
+      source: "set",
+    };
   }
 
   /** One set and the cards in it. */

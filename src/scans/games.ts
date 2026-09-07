@@ -367,3 +367,39 @@ export async function gamesWithPreviews(): Promise<Game[]> {
     }),
   );
 }
+
+/** The set a catalogue card id belongs to, or null when it cannot be known.
+ *
+ *  The two id shapes in this file do not agree, and that is what broke the
+ *  card page. A SET is `<prefix>:<code>` — `optcg:OP13` — while a CARD is
+ *  `<prefix>-<id>` — `optcg-OP13-119`. A phone cutting a card id at its last
+ *  hyphen produced `optcg-OP13`, which is neither, so the lookup missed and
+ *  every One Piece card opened blank.
+ *
+ *  Null is an honest answer here, not a failure. Magic, Yu-Gi-Oh and Lorcana
+ *  ids carry the provider's own opaque identifier and the set is genuinely not
+ *  in the string; the caller has to find those another way. Returning a
+ *  plausible-looking guess for them would put the bug back with the symptom
+ *  hidden. */
+export function setIdOfCard(cardId: string): string | null {
+  const cut = cardId.indexOf("-");
+  const prefix = cut > 0 ? cardId.slice(0, cut) : "";
+
+  // No prefix we mint means TCGdex, where a card id IS `<set>-<number>`.
+  if (!PREFIXED.has(prefix)) {
+    const last = cardId.lastIndexOf("-");
+    return last > 0 ? cardId.slice(0, last) : null;
+  }
+
+  const rest = cardId.slice(cut + 1);
+  if (prefix === "optcg") {
+    // `OP13-119` — the set code is everything before the card's own number.
+    const last = rest.lastIndexOf("-");
+    return last > 0 ? `${prefix}:${rest.slice(0, last)}` : null;
+  }
+  return null;
+}
+
+/** The prefixes this file mints. Kept beside `setIdOfCard` because the two
+ *  have to agree about what a prefixed id looks like. */
+const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo"]);
