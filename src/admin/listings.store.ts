@@ -1,4 +1,5 @@
 import { storePool } from "../cards.store.js";
+import { viewableUrl } from "../photos/s3.js";
 
 // The listing queue, as the admin console needs it.
 //
@@ -234,7 +235,12 @@ export async function queueCounts(): Promise<Record<string, number>> {
   return out;
 }
 
-/** The photo set, as angles rather than as a count. */
+/** The photo set, as angles rather than as a count.
+ *
+ *  Signed on the way out. The column holds the object's address, and the
+ *  bucket is private — see `viewableUrl` — so what is stored is not something
+ *  a browser can load. Every photograph on the listing record was rendering
+ *  as "would not load" because of it. */
 export async function listingPhotos(
   id: string,
 ): Promise<{ angle: string; url: string }[]> {
@@ -242,7 +248,13 @@ export async function listingPhotos(
   if (!pool) return [];
   const r = await pool.query("select photos from listings where listing_id = $1", [id]);
   const raw = r.rows[0]?.photos;
-  return Array.isArray(raw) ? raw : [];
+  if (!Array.isArray(raw)) return [];
+  return Promise.all(
+    raw.map(async (p: any) => ({
+      angle: String(p?.angle ?? ""),
+      url: typeof p?.url === "string" ? await viewableUrl(p.url) : "",
+    })),
+  );
 }
 
 /**

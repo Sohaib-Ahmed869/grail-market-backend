@@ -1,5 +1,7 @@
 import { storePool } from "../cards.store.js";
 import { adminPlans, billingLedger } from "./commerce.store.js";
+import { auditEntries, AuditEntry } from "./audit.store.js";
+import { adminTickets, AdminTicket } from "./support.store.js";
 
 // The dashboard, in one read.
 //
@@ -46,6 +48,22 @@ export type Dashboard = {
   gmv: { label: string; gmv: number; verified: number }[];
   /** What is in the queue, by tier. */
   queueMix: { label: string; value: number; color: string }[];
+  /** The last few things anybody did in the console, newest first. */
+  recent: AuditEntry[];
+  /** The support desk at a glance. */
+  support: {
+    /** Tickets nobody has answered yet. */
+    fresh: number;
+    /** Answered and now waiting on the member. */
+    waiting: number;
+    /** Everything not resolved, however it got there. */
+    live: number;
+    /** Unanswered AND past their first-reply target. */
+    breaching: number;
+    /** The unanswered ticket closest to (or furthest past) its target.
+     *  Null when every ticket has been answered. */
+    oldest: { id: string; subject: string; slaHours: number } | null;
+  };
 };
 
 /** Money in and money that bounced, this calendar month. */
@@ -76,6 +94,8 @@ export async function dashboard(): Promise<Dashboard> {
     funnel: [],
     gmv: [],
     queueMix: [],
+    recent: [],
+    support: { fresh: 0, waiting: 0, live: 0, breaching: 0, oldest: null },
   };
 
   const pool = storePool();
@@ -97,7 +117,12 @@ export async function dashboard(): Promise<Dashboard> {
     }
   };
 
-  const [counts, funnelRow, sold, verified, mix, events, plans] = await Promise.all([
+  // The dashboard's rail answers "what is waiting" and had nothing that answers
+  // "what has been done". The audit log is the one place that knows, so the
+  // dashboard reads six lines of it rather than the page growing a second idea
+  // of what happened. It rides in this same single read for the reason the
+  // file's header comment already gives about one endpoint rather than five.
+  const [counts, funnelRow, sold, verified, mix, events, plans, recent, tickets] = await Promise.all([
     one(
       `select
          count(*) filter (where status = 'live')::int live,
@@ -106,7 +131,7 @@ export async function dashboard(): Promise<Dashboard> {
            where status = 'in_review' and submitted_at < now() - interval '24 hours'
          )::int breached,
          /* The conduct board's own state, not the dispute's.
-         
+
             disputes.status is the app's column and the console never writes
             it — deciding a case writes conduct_cases.state, which is the
             whole reason that table exists beside this one. Counting the
@@ -121,7 +146,7 @@ export async function dashboard(): Promise<Dashboard> {
        from listings`,
     ),
     /* Two steps, not four.
-    
+
        The middle two were "mobile confirmed" and "ID submitted". The console
        does not handle ID verification — the provider decides and we hold the
        outcome — so a step for "started it" is a step nobody here can act on,
@@ -164,6 +189,16 @@ export async function dashboard(): Promise<Dashboard> {
        about what a webhook meant. */
     billingLedger(300).catch(() => []),
     adminPlans().catch(() => []),
+    auditEntries({ limit: 6 }).catch(() => []),
+    /* The console has a whole support section with a first-reply target, and
+       the dashboard had no idea it existed — a page that says what is
+       waiting everywhere else stayed silent about the one queue with a clock
+       on it. Read through `adminTickets` rather than a query of our own, so
+       a count here cannot disagree with the badge `/admin/support` shows for
+       the same tickets. It rides in this same single read for the reason the
+       file's header comment already gives about one endpoint rather than
+       five. */
+    adminTickets({}).catch(() => []),
   ]);
 
   /* Twelve weeks, zeros included. A week with no sales in it is a fact about
@@ -202,6 +237,30 @@ export async function dashboard(): Promise<Dashboard> {
     standard: "Standard",
   };
 
+  /* Fresh, waiting and live are the same three-way split the support page's
+     own filters use. Breaching and oldest only look at tickets nobody has
+     answered, because `slaHours` stops moving the moment a reply lands (see
+     the comment above it in support.store.ts) — an answered ticket cannot be
+     breaching and has nothing left to be "oldest" about. `slaHours` goes
+     negative once the first-reply target has passed, so both just compare it
+     against zero, and the oldest ticket is the one with the lowest value:
+     the most overdue, or if none are yet overdue, the one closest to being
+     so. */
+  let fresh = 0;
+  let waiting = 0;
+  let live = 0;
+  let breaching = 0;
+  let oldest: AdminTicket | null = null;
+  for (const t of tickets as AdminTicket[]) {
+    if (t.status === "new") fresh++;
+    if (t.status === "waiting") waiting++;
+    if (t.status !== "resolved") live++;
+    if (t.status !== "resolved" && !t.answered) {
+      if (t.slaHours < 0) breaching++;
+      if (!oldest || t.slaHours < oldest.slaHours) oldest = t;
+    }
+  }
+
   const f = funnelRow;
   return {
     stats: {
@@ -234,5 +293,13 @@ export async function dashboard(): Promise<Dashboard> {
       value: Number(m.n),
       color: TIER_COLOUR[m.tier] ?? "var(--ink-4)",
     })),
+    recent,
+    support: {
+      fresh,
+      waiting,
+      live,
+      breaching,
+      oldest: oldest ? { id: oldest.id, subject: oldest.subject, slaHours: oldest.slaHours } : null,
+    },
   };
 }
