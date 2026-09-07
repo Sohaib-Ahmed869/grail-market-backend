@@ -354,7 +354,19 @@ export class ListingsController {
     const me = need(req);
     if (!me) return { error: "unauthenticated", message: "Sign in to make an offer." };
     const l = await getListing(id);
-    if (!l || l.status !== "live") return { error: "not-found" };
+    if (!l) return { error: "not-found" };
+    // A card already promised to somebody is not missing, and saying so is not
+    // a leak — it is on the market page in front of them. "Not found" for a
+    // listing they are looking at reads as the app being broken.
+    if (l.status === "reserved") {
+      return {
+        error: "reserved",
+        message: "This one is under offer already. It comes back if the deal falls through.",
+      };
+    }
+    if (l.status !== "live") {
+      return { error: "not-available", message: "This listing is not taking offers." };
+    }
     if (l.seller_id === me) return { error: "own-listing", message: "That's your own listing." };
     const amount = Number(b?.amount);
     if (!(amount > 0)) return { error: "invalid", message: "Enter an amount." };
@@ -389,7 +401,10 @@ export class ListingsController {
     const action = String(b?.action) as "accepted" | "declined" | "countered";
     if (!["accepted", "declined", "countered"].includes(action)) return { error: "invalid" };
     const r = await settleOffer(offerId, me, action, b?.amount != null ? Number(b.amount) : undefined);
-    return r.ok ? { status: r.status } : { error: r.why };
+    // The deal id travels back so the app can go straight to it. Accepting an
+    // offer and then having to hunt for what happens next is the gap this
+    // whole flow exists to close.
+    return r.ok ? { status: r.status, dealId: r.dealId ?? null } : { error: r.why };
   }
 
   @Get("offers/mine")

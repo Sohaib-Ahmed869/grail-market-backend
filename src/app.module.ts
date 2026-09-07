@@ -6,6 +6,7 @@ import { CommunityController } from "./community/community.controller.js";
 import { WatchlistController } from "./watchlist/watchlist.controller.js";
 import { RatingsController } from "./ratings/ratings.controller.js";
 import { DisputesController } from "./disputes/disputes.controller.js";
+import { DealsController } from "./listings/deals.controller.js";
 import { HistoryController } from "./history/history.controller.js";
 import { MessagesController } from "./messages/messages.controller.js";
 import { SupportController } from "./support/support.controller.js";
@@ -21,7 +22,7 @@ import { ScansController } from "./scans/scans.controller.js";
 import { ScansService } from "./scans/scans.service.js";
 
 @Module({
-  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, CollectionController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController],
+  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, DealsController, CollectionController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController],
   providers: [ScansService],
 })
 export class AppModule {}

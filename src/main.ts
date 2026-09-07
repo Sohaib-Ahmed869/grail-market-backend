@@ -21,6 +21,7 @@ import { initWatchlist } from "./watchlist/store.js";
 import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initDisputes } from "./disputes/store.js";
+import { initDeals } from "./listings/deals.js";
 import { initScanQuota } from "./scans/scanquota.store.js";
 import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
@@ -64,6 +65,7 @@ async function bootstrap() {
     await initPush();
     await initRatings();
     await initDisputes();
+    await initDeals();
     await initScanQuota();
     await initMaintenance();
     await initMessages();

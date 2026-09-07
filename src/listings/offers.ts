@@ -53,7 +53,7 @@ export async function offersByBuyer(buyerId: string): Promise<Offer[]> {
 }
 
 export type SettleResult =
-  | { ok: true; status: string }
+  | { ok: true; status: string; dealId?: string | null }
   | { ok: false; why: "not-found" | "not-yours" | "already-settled" };
 
 /** Accept, counter or decline. Only the seller may.
@@ -107,6 +107,17 @@ export async function settleOffer(
         where listing_id = $1 and offer_id <> $2 and status = 'open'`,
       [o.listing_id, offerId],
     );
+    // And open the deal. Accepting used to end here — one word changed on a
+    // row, the listing left live and still collecting offers, and the two of
+    // them sent to a message thread to work the rest out between themselves.
+    // Imported here rather than at the top because deals.ts imports this
+    // module's neighbours and a cycle at load time takes the server down.
+    const { startDeal } = await import("./deals.js");
+    const dealId = await startDeal({
+      offerId, listingId: o.listing_id, buyerId: o.buyer_id,
+      sellerId: o.seller_id, amount: Number(o.amount), currency: o.currency,
+    });
+    return { ok: true, status: action, dealId };
   }
   return { ok: true, status: action };
 }

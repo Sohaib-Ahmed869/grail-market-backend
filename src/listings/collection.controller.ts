@@ -5,6 +5,7 @@ import { storePool } from "../cards.store.js";
 import { callerId } from "../auth/auth.controller.js";
 import { gradedPricesFor } from "../scans/pricing.js";
 import { valueOfEntry, type Unpriced } from "./collectionvalue.js";
+import { marketStatusForOwner } from "./deals.js";
 
 @Controller("collection")
 export class CollectionController {
@@ -23,6 +24,11 @@ export class CollectionController {
     const r = await pool.query(
       "select * from collection where user_id = $1 order by added_at desc", [me],
     );
+
+    // What each of these cards is doing on the market. A collection that
+    // cannot tell you a card is listed — or that it has already gone — is a
+    // list of things you might still own, which is not what it says it is.
+    const market = await marketStatusForOwner(me);
 
     const entries = await Promise.all(
       r.rows.map(async (e: any) => {
@@ -54,6 +60,11 @@ export class CollectionController {
           // `unpriced` says WHY there is no figure. "grade" is the owner's to
           // fix and the screen offers the edit; the other two are ours.
           value, unpriced, addedAt: e.added_at,
+          // Listed, agreed, or gone. Named rather than left as the listing's
+          // own status word, because `in_review` and `reserved` mean nothing
+          // to the person who owns the card — what they want to know is
+          // whether it is still theirs and whether the money has happened.
+          market: describe(market.get(`${e.catalog_id}|${e.grader ?? ""}|${e.grade ?? ""}`)),
         };
       }),
     );
@@ -61,13 +72,26 @@ export class CollectionController {
     // Quantity multiplies both sides. Four of the same card is four cards in
     // the total, and a paid price is per card — the earlier version counted
     // one of each and quietly under-reported anyone holding playsets.
-    const value = entries.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
-    const cost = entries.reduce((a, e) => a + (e.paid ?? 0) * (e.quantity ?? 1), 0);
+    //
+    // A card that has SOLD is not in the total. It is not owned any more, and
+    // counting it means a collection value that goes up when you sell and
+    // never comes down — the one number in this product people check daily,
+    // wrong in their own favour. The row stays, marked sold, because the
+    // history is worth keeping; the money is not theirs to still be holding.
+    const held = entries.filter((e) => !e.market?.settled);
+    const value = held.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
+    const cost = held.reduce((a, e) => a + (e.paid ?? 0) * (e.quantity ?? 1), 0);
+    // What the sold ones went for, which is a different and also interesting
+    // number rather than something to hide.
+    const realised = entries
+      .filter((e) => e.market?.settled)
+      .reduce((a, e) => a + (e.market?.price ?? 0), 0);
     return {
-      entries, value, cost, gain: value - cost,
+      entries, value, cost, gain: value - cost, realised,
+      held: held.length, sold: entries.length - held.length,
       // Said plainly: a total that silently skips unpriced cards reads as the
       // whole collection and is not.
-      priced: entries.filter((e) => e.value != null).length,
+      priced: held.filter((e) => e.value != null).length,
     };
   }
 
@@ -118,4 +142,49 @@ export class CollectionController {
     }
     return { ok: true };
   }
+}
+
+/** How a card's market state reads to the person who owns it. */
+function describe(
+  m: { status: string; price: number; currency: string; listingId: string;
+       dealId?: string | null; dealState?: string | null } | undefined,
+) {
+  if (!m) return null;
+  const base = {
+    listingId: m.listingId, dealId: m.dealId ?? null,
+    price: m.price, currency: m.currency,
+  };
+  // A completed deal is the only thing that means SOLD. A listing marked sold
+  // whose deal is still open is a card the seller has sent and the buyer has
+  // not confirmed — which is not the same fact, and telling an owner their
+  // card is sold before the other side has said so is how a collection total
+  // ends up wrong in the owner's favour.
+  if (m.dealState === "complete") {
+    return { ...base, state: "sold", label: "Sold", settled: true };
+  }
+  if (m.dealState === "handed_over") {
+    // Still reserved, not sold — the listing only sells when the buyer
+    // confirms. The owner is told it is in transit, which is the true thing.
+    return { ...base, state: "sent", label: "Sent · awaiting confirmation", settled: false };
+  }
+  if (m.dealState === "agreed" || m.status === "reserved") {
+    return { ...base, state: "agreed", label: "Offer accepted · not sold yet", settled: false };
+  }
+  if (m.status === "live" || m.status === "paused") {
+    return {
+      ...base,
+      state: "listed",
+      label: m.status === "paused" ? "Listed · paused" : "Listed · not sold yet",
+      settled: false,
+    };
+  }
+  if (m.status === "draft" || m.status === "in_review" || m.status === "info_requested") {
+    return { ...base, state: "pending", label: "Awaiting review", settled: false };
+  }
+  // A listing marked sold with no completed deal behind it — the old
+  // seller-only path. Honest about which of the two facts we actually have.
+  if (m.status === "sold") {
+    return { ...base, state: "sent", label: "Marked sold", settled: false };
+  }
+  return null;
 }

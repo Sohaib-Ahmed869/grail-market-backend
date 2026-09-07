@@ -40,7 +40,7 @@ export async function initNotifications(): Promise<void> {
 }
 
 export type Kind =
-  | "offer" | "offer-settled" | "message" | "listing" | "rating" | "price";
+  | "offer" | "offer-settled" | "deal" | "message" | "listing" | "rating" | "price";
 
 /** Kinds worth interrupting someone for.
  *
@@ -52,6 +52,10 @@ export type Kind =
 const PUSHES: Record<Kind, boolean> = {
   offer: true,
   "offer-settled": true,
+  // A deal moving is the most time-sensitive thing on the platform: the other
+  // person is waiting on you to send a card or to confirm one arrived, and
+  // neither of them can act until you do.
+  deal: true,
   message: true,
   listing: true,
   price: true,
