@@ -147,7 +147,8 @@ export class CollectionController {
 /** How a card's market state reads to the person who owns it. */
 function describe(
   m: { status: string; price: number; currency: string; listingId: string;
-       dealId?: string | null; dealState?: string | null } | undefined,
+       dealId?: string | null; dealState?: string | null;
+       buyerName?: string | null } | undefined,
 ) {
   if (!m) return null;
   const base = {
@@ -160,15 +161,31 @@ function describe(
   // card is sold before the other side has said so is how a collection total
   // ends up wrong in the owner's favour.
   if (m.dealState === "complete") {
-    return { ...base, state: "sold", label: "Sold", settled: true };
+    // Named, because "Sold" is a state and "Sold to Sohaib" is the record of
+    // what happened — which is what somebody looking at a card that has left
+    // their collection actually wants to see.
+    return {
+      ...base,
+      state: "sold",
+      label: m.buyerName ? `Sold to ${m.buyerName}` : "Sold",
+      settled: true,
+    };
   }
   if (m.dealState === "handed_over") {
     // Still reserved, not sold — the listing only sells when the buyer
     // confirms. The owner is told it is in transit, which is the true thing.
-    return { ...base, state: "sent", label: "Sent · awaiting confirmation", settled: false };
+    return {
+      ...base, state: "sent", settled: false,
+      label: m.buyerName ? `Sent to ${m.buyerName} · awaiting confirmation`
+                         : "Sent · awaiting confirmation",
+    };
   }
   if (m.dealState === "agreed" || m.status === "reserved") {
-    return { ...base, state: "agreed", label: "Offer accepted · not sold yet", settled: false };
+    return {
+      ...base, state: "agreed", settled: false,
+      label: m.buyerName ? `Agreed with ${m.buyerName} · not sold yet`
+                         : "Offer accepted · not sold yet",
+    };
   }
   if (m.status === "live" || m.status === "paused") {
     return {

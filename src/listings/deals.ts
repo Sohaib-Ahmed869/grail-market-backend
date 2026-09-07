@@ -265,7 +265,10 @@ export async function cancelDeal(
  *  from the same grading company, which is the identity the whole pricing
  *  chain already uses. */
 export async function marketStatusForOwner(userId: string): Promise<
-  Map<string, { status: string; price: number; currency: string; listingId: string; dealId: string | null }>
+  Map<string, {
+    status: string; price: number; currency: string; listingId: string;
+    dealId: string | null; dealState?: string | null; buyerName?: string | null;
+  }>
 > {
   const out = new Map<string, any>();
   const pool = storePool();
@@ -273,6 +276,10 @@ export async function marketStatusForOwner(userId: string): Promise<
   const r = await pool.query(
     `select l.listing_id, l.catalog_id, l.grader, l.grade, l.currency, l.status,
             d.deal_id, d.state as deal_state,
+            -- Who it went to. "Sold" on its own is a state; "Sold to Sohaib"
+            -- is the record of what happened, and it is the thing the owner
+            -- actually wants to see against a card that has left.
+            b.name as buyer_name,
             -- What it actually went for once there is a deal, and only the ASK
             -- until then. These are different numbers — the listing said
             -- 25,000 and the accepted offer was 24,500 — and reporting the ask
@@ -282,6 +289,7 @@ export async function marketStatusForOwner(userId: string): Promise<
        from listings l
        left join deals d
          on d.listing_id = l.listing_id and d.state in ('agreed','handed_over','complete')
+       left join users b on b.user_id = d.buyer_id
       where l.seller_id = $1
         and l.catalog_id is not null
         and l.status in ('draft','in_review','info_requested','live','paused','reserved','sold')
@@ -300,6 +308,7 @@ export async function marketStatusForOwner(userId: string): Promise<
       listingId: x.listing_id,
       dealId: x.deal_id ?? null,
       dealState: x.deal_state ?? null,
+      buyerName: x.buyer_name ?? null,
     });
   }
   return out;
