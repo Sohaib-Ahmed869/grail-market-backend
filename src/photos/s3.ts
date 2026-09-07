@@ -113,14 +113,34 @@ export async function putPhoto(
  *  untouched, so an external image in an old record still renders.
  *
  *  Fifteen minutes: long enough to open a record and look at ten angles,
- *  short enough that a copied link is not a permanent one. */
+ *  short enough that a copied link is not a permanent one.
+ *
+ *  SIGNED AT A CLOCK BOUNDARY, not at the instant of the request. A signature
+ *  carries the moment it was made, so signing on demand produced a different
+ *  URL every single time the same photograph was returned — and a URL that
+ *  changes is a URL nothing can cache. On the phone the market tiles visibly
+ *  reloaded: an image whose address had changed was, to the list, a different
+ *  image, so it was thrown away and fetched again while the user watched.
+ *
+ *  Rounding the signing time down to a five-minute mark makes every request
+ *  inside that window produce a byte-identical URL, which the client cache
+ *  can then actually hold. The cost is that a link is valid for between ten
+ *  and fifteen minutes rather than exactly fifteen — bounded, and the reason
+ *  the window is padded below. */
+const SIGN_BUCKET_MS = 5 * 60_000;
+
 export async function signDownload(url: string, seconds = 900): Promise<string> {
   if (!photosConfigured() || !url) return url;
   const key = keyFromUrl(url);
   if (key == null) return url;
   try {
+    // Anchored to the boundary, and the lifetime extended by one bucket so a
+    // URL handed out at the very END of a window is still good for the full
+    // `seconds` the caller asked for rather than expiring early.
+    const signingDate = new Date(Math.floor(Date.now() / SIGN_BUCKET_MS) * SIGN_BUCKET_MS);
     return await getSignedUrl(
-      s3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }), { expiresIn: seconds },
+      s3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
+      { expiresIn: seconds + SIGN_BUCKET_MS / 1000, signingDate },
     );
   } catch {
     // A signature we could not produce must not blank the record.
