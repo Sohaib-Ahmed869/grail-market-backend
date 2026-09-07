@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { send } from "../push/expo.js";
 import { tokensFor } from "../push/store.js";
+import { mutedFor } from "./prefs.js";
 
 // What happened while you were away.
 //
@@ -57,6 +58,17 @@ const PUSHES: Record<Kind, boolean> = {
   rating: false,
 };
 
+/** What the preferences screen may offer a switch for.
+ *
+ *  Derived from PUSHES rather than written out again: a kind that never pushes
+ *  must not appear as something you can turn off, or the switch is a control
+ *  that does nothing, and a second hand-maintained list is a list that goes
+ *  stale the first time a kind is added.
+ *
+ *  The order is the order the screen shows, which is roughly how urgent each
+ *  one is — Object.keys follows the literal above. */
+export const KINDS = (Object.keys(PUSHES) as Kind[]).filter((k) => PUSHES[k]);
+
 export async function notify(n: {
   userId: string; kind: Kind; title: string;
   body?: string | null; href?: string | null; actorId?: string | null;
@@ -81,6 +93,10 @@ export async function notify(n: {
   // rather than a decision repeated at each call site.
   if (!PUSHES[n.kind]) return;
   try {
+    // Muting silences the interruption, never the record. The row above is
+    // already written: someone who turns off push for offers still has to be
+    // able to find the offer.
+    if ((await mutedFor(n.userId)).includes(n.kind)) return;
     const tokens = await tokensFor(n.userId);
     if (tokens.length === 0) return;
     await send(tokens.map((to) => ({

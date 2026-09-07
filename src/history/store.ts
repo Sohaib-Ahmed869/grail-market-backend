@@ -170,3 +170,48 @@ export async function collectionHistory(userId: string, days = 90): Promise<{
     total,
   };
 }
+
+
+// ---- candles ---------------------------------------------------------------
+
+/** Daily closes for a card, whatever they were recorded under.
+ *
+ *  The feed writes raw market prices under grader 'MARKET'; the refresh job
+ *  writes graded figures under a real grader. A chart of "what this card is
+ *  doing" wants one series, and mixing a PSA 10 comp with an ungraded market
+ *  price would be averaging two different products — so a grader is picked
+ *  and the series is that grader's, with MARKET as the fallback because it is
+ *  the one that exists for every card.
+ */
+export async function closesFor(
+  catalogId: string, days: number,
+): Promise<{ closes: { day: string; price: number }[]; grader: string | null }> {
+  const pool = storePool();
+  if (!pool) return { closes: [], grader: null };
+
+  const pick = await pool.query(
+    `select grader, count(distinct day) n
+       from price_points
+      where catalog_id = $1 and day >= current_date - ($2::int)
+      group by grader
+      -- most days wins; MARKET breaks a tie because it is the series that
+      -- exists for every card rather than only for graded ones
+      order by n desc, (grader = 'MARKET') desc
+      limit 1`,
+    [catalogId, days],
+  );
+  const grader = pick.rows[0]?.grader ?? null;
+  if (!grader) return { closes: [], grader: null };
+
+  const r = await pool.query(
+    `select to_char(day, 'YYYY-MM-DD') as day, price
+       from price_points
+      where catalog_id = $1 and grader = $2 and day >= current_date - ($3::int)
+      order by day`,
+    [catalogId, grader, days],
+  );
+  return {
+    closes: r.rows.map((x) => ({ day: x.day, price: Number(x.price) })),
+    grader,
+  };
+}

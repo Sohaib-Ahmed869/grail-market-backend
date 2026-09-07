@@ -1,6 +1,6 @@
 import { storePool } from "../cards.store.js";
 import { periodOf, quotaFor, type Quota } from "./quota.js";
-import { readSubscription } from "../billing/store.js";
+import { activePlanId } from "../billing/store.js";
 
 // Where the scan count lives.
 //
@@ -26,15 +26,10 @@ export async function initScanQuota(): Promise<void> {
 
 /** The plan id, but only while the subscription is actually paying.
  *
- *  A cancelled or past-due row still holds `plan_id = 'dealer'`, and reading
- *  it without the status is how somebody keeps an unlimited allowance after
- *  they stop paying for it. */
-async function activePlan(userId: string): Promise<string | null> {
-  const sub = await readSubscription(userId);
-  if (!sub) return null;
-  const live = sub.status === "active" || sub.status === "trialing";
-  return live ? (sub.plan_id ?? null) : null;
-}
+ *  This was a private copy of the rule; the listings path then grew its own
+ *  version WITHOUT the status check, which is precisely the drift a second
+ *  copy invites. One implementation now, in billing/store.ts. */
+const activePlan = activePlanId;
 
 async function usedThisPeriod(userId: string): Promise<number> {
   const pool = storePool();

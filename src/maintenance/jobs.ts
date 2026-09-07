@@ -1,0 +1,220 @@
+import { storePool } from "../cards.store.js";
+import { canClaim, isDue, worthChecking, DAILY, type Job } from "./schedule.js";
+import { demandedCards } from "../scans/demand.js";
+import { cardTrend } from "../scans/market.js";
+import { sweep } from "../watchlist/sweep.js";
+
+// The background work, and the machinery that decides when it runs.
+//
+// The constraint is that a job must not be able to run up a bill nobody asked
+// for: a scheduled task that spends money spends it whether or not anybody
+// opened the app. Most of what is here is a rearrangement of data already
+// bought, and costs nothing.
+//
+// The alert sweep is the one that can reach a provider, and only on a card
+// somebody follows whose price is not already in the store. It is bounded by
+// how many distinct cards are being watched, deduplicated before pricing, and
+// runs once a day — which is also the shortest useful period for a rule
+// written as "tell me if it moves 10%".
+
+export const MAINTENANCE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS maintenance (
+  job         text PRIMARY KEY,
+  last_run_at timestamptz,
+  claimed_at  timestamptz,
+  last_note   text
+);
+`;
+
+export async function initMaintenance(): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  await pool.query(MAINTENANCE_SCHEMA);
+}
+
+/** Today's prices, written into the history table.
+ *
+ *  grade_prices is a CURRENT-value table — the refresh upserts it, so it only
+ *  ever holds one figure per card and yesterday's is gone. price_points is the
+ *  series. Copying one into the other costs a single statement and no network
+ *  call at all: the prices have already been paid for, and the only thing that
+ *  was missing was writing down the date we saw them.
+ *
+ *  Dated by `fetched_at` rather than by today, so a row we bought on Tuesday
+ *  lands on Tuesday. That also makes the first run a backfill of every price
+ *  already in the table, which is where the history comes from at all.
+ */
+async function snapshotPrices(): Promise<string> {
+  const pool = storePool();
+  if (!pool) return "no store";
+  const r = await pool.query(`
+    insert into price_points
+      (catalog_id, grader, grade, qualifier, label_variant,
+       price, low, high, sample_size, confidence, source, day)
+    select catalog_id, grader, grade,
+           coalesce(qualifier, ''), coalesce(label_variant, ''),
+           price, low, high, sample_size, confidence, source,
+           fetched_at::date
+      from grade_prices
+     where price is not null and fetched_at is not null
+    on conflict (catalog_id, grader, grade, qualifier, label_variant, day)
+    do update set
+      price = excluded.price, low = excluded.low, high = excluded.high,
+      sample_size = excluded.sample_size, confidence = excluded.confidence,
+      source = excluded.source
+  `);
+  return `${r.rowCount ?? 0} points`;
+}
+
+/** Points older than two years, removed.
+ *
+ *  A series nobody can draw is a table that only grows. The charts offer at
+ *  most a year, so anything past two is storage being paid for to hold data
+ *  no screen can ask for.
+ */
+async function prunePoints(): Promise<string> {
+  const pool = storePool();
+  if (!pool) return "no store";
+  const r = await pool.query(
+    "delete from price_points where day < current_date - interval '2 years'",
+  );
+  return `${r.rowCount ?? 0} pruned`;
+}
+
+/** The feed's own daily closes, kept.
+ *
+ *  JustTCG returns six dated readings per card and we were drawing them and
+ *  throwing them away. Written into price_points they become history that
+ *  accumulates: six days on the first run, and a day more every day after,
+ *  until there is enough of it to draw a real candle and mean a real year.
+ *
+ *  Twelve cards a day — the same list the pulse already asks about, so this
+ *  is not new spend on new cards. It runs once a day, not per visitor.
+ *
+ *  Raw prices, marked as such. These are ungraded market figures from a
+ *  price feed, not sold comps at a grade, and writing them under a grader
+ *  would be claiming a graded sale that never happened.
+ */
+async function ingestFeedHistory(): Promise<string> {
+  const pool = storePool();
+  if (!pool) return "no store";
+
+  const wanted = await demandedCards(12).catch(() => []);
+  if (!wanted.length) return "nothing demanded";
+
+  let rows = 0;
+  for (const w of wanted) {
+    const t = await cardTrend({
+      catalogId: w.catalogId, name: w.name, game: w.game, setName: w.setName,
+    }).catch(() => null);
+    if (!t?.history?.length) continue;
+
+    const values = t.history
+      .map((_, i) => `($1, 'MARKET', 0, '', '', $${i * 2 + 2}, $${i * 2 + 3}, 'feed')`)
+      .join(",");
+    const args: any[] = [w.catalogId];
+    for (const h of t.history) args.push(h.price, h.day);
+
+    await pool.query(
+      `insert into price_points
+         (catalog_id, grader, grade, qualifier, label_variant, price, day, source)
+       values ${values}
+       on conflict (catalog_id, grader, grade, qualifier, label_variant, day)
+       do update set price = excluded.price, source = excluded.source`,
+      args,
+    );
+    rows += t.history.length;
+  }
+  return `${rows} readings from ${wanted.length} cards`;
+}
+
+/** Price everything anyone follows and tell whoever asked to be told.
+ *
+ *  This is the other half of the Follow button. Without it the app says "we
+ *  will tell you if it moves 10%" and then nothing ever checks — the sweep
+ *  existed but only behind POST /watchlist/sweep, which needs a cron calling
+ *  in, which is the machine we are deliberately not paying for.
+ *
+ *  Once a day is the right cadence for a 10% rule, and it is cheap for the
+ *  same reason the rest of this file is: the sweep prices through the store
+ *  first, deduplicates cards before pricing, and a hundred people watching one
+ *  card cost one lookup. */
+async function runAlertSweep(): Promise<string> {
+  const r = await sweep();
+  return `${r.cards} cards, ${r.fired} alerts`;
+}
+
+const JOBS: (Job & { run: () => Promise<string> })[] = [
+  { name: "alert-sweep", everyMs: DAILY, run: runAlertSweep },
+  { name: "ingest-feed-history", everyMs: DAILY, run: ingestFeedHistory },
+  { name: "snapshot-prices", everyMs: DAILY, run: snapshotPrices },
+  { name: "prune-points", everyMs: 7 * DAILY, run: prunePoints },
+];
+
+/** When this process last bothered to ask the database. */
+const lastLocalCheck = new Map<string, number>();
+
+/** Take the job if it is due and unclaimed. One statement, and the WHERE is
+ *  what makes it safe: two instances issuing this at the same moment, only one
+ *  updates a row. */
+async function claim(job: Job): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+  const now = Date.now();
+
+  const seen = await pool.query(
+    "select last_run_at, claimed_at from maintenance where job = $1",
+    [job.name],
+  );
+  const row = seen.rows[0];
+  if (row && !isDue(row.last_run_at, job.everyMs, now)) return false;
+  if (row && !canClaim(row.claimed_at, now)) return false;
+
+  const taken = await pool.query(
+    `insert into maintenance (job, claimed_at) values ($1, now())
+     on conflict (job) do update set claimed_at = now()
+     where maintenance.claimed_at is null
+        or maintenance.claimed_at < now() - interval '1 hour'
+     returning job`,
+    [job.name],
+  );
+  return (taken.rowCount ?? 0) > 0;
+}
+
+async function finish(name: string, note: string): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  await pool.query(
+    `update maintenance set last_run_at = now(), claimed_at = null, last_note = $2
+      where job = $1`,
+    [name, note.slice(0, 200)],
+  );
+}
+
+/** Called from the request path. Returns immediately; anything due runs after.
+ *
+ *  Never awaited by a caller and never able to fail one: a maintenance job
+ *  that breaks a page is worse than a maintenance job that does not run. */
+export function tickMaintenance(): void {
+  if (!storePool()) return;
+
+  for (const job of JOBS) {
+    if (!worthChecking(lastLocalCheck.get(job.name) ?? null, job.everyMs)) continue;
+    lastLocalCheck.set(job.name, Date.now());
+
+    void (async () => {
+      try {
+        if (!(await claim(job))) return;
+        const note = await job.run();
+        await finish(job.name, note);
+        console.log(`[maintenance] ${job.name}: ${note}`);
+      } catch (err) {
+        // Release the claim so the next instance can try, and say what
+        // happened — a job that fails silently every night is indistinguishable
+        // from one that is not scheduled.
+        console.warn(`[maintenance] ${job.name} failed: ${(err as Error).message}`);
+        await finish(job.name, `failed: ${(err as Error).message}`).catch(() => {});
+      }
+    })();
+  }
+}
