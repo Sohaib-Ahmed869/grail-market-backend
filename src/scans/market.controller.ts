@@ -7,6 +7,7 @@ import { scanCounts } from "./ledger.js";
 import { cardNews, cardTrend, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
 import { cardMeta } from "./demand.js";
+import { cardHedgerStatus } from "./cardhedger.js";
 import { getSet, listSets } from "./sets.js";
 import { gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
@@ -43,7 +44,14 @@ export class MarketController {
       scanCounts(),
       scanBudget(),
     ]);
-    return { ...status, scans: counts, budget };
+    return {
+      ...status, scans: counts, budget,
+      // Whether the bought catalogue is on, and how much of today it has
+      // spent. Reported as two separate facts on purpose: a key present with
+      // the cap left at zero looks exactly like no key at all from outside,
+      // and that costs an afternoon every time.
+      providers: { cardhedger: cardHedgerStatus() },
+    };
   }
 
   // Live listings for one card. Kept off the scan response deliberately: a

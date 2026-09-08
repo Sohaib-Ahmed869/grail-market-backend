@@ -1,4 +1,5 @@
 import { TtlCache } from "./ttlcache.js";
+import { cardSearch, categories as chCategories, setSearch } from "./cardhedger.js";
 import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
 
 // Browsing, one level up.
@@ -29,6 +30,24 @@ export const GAMES: Game[] = [
   { id: "lorcana", name: "Lorcana" },
   { id: "mtg", name: "Magic: The Gathering" },
 ];
+
+/** The five above are the ones with a free catalogue behind them, and they
+ *  are the whole of what this platform could find.
+ *
+ *  Sports has no free catalogue anywhere — every reference database for it is
+ *  commercial — so a marketplace whose own scope document promises TCGs
+ *  "alongside sports cards" could not list a single one. Nor could it list
+ *  Dragon Ball, Digimon, or anything else without a community API.
+ *
+ *  Card Hedge fills that in as one more source rather than as a special case:
+ *  its categories arrive as games, its sets as sets, and everything below
+ *  treats them the same way it treats Scryfall's. Whatever it returns is
+ *  ADDED to the five, never substituted for them — the free feeds are better
+ *  and more complete for their own games, and they cost nothing.
+ *
+ *  Prefixed `ch:` so a Card Hedge set can never collide with a set id from a
+ *  catalogue we already had. */
+export const CH_PREFIX = "ch";
 
 const DAY = 24 * 3600 * 1000;
 const cache = new TtlCache<SetSummary[]>(DAY, 8);
@@ -182,6 +201,10 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
     : gameId === "yugioh" ? await ygoSets()
     : gameId === "lorcana" ? await lorcanaSets()
     : gameId === "mtg" ? await mtgSets()
+    // Everything bought. One branch for every category they hold, because the
+    // shape is theirs rather than one API per game — which is the whole
+    // difference between paying for a catalogue and wiring five of them.
+    : gameId.startsWith(`${CH_PREFIX}:`) ? await boughtSets(gameId.slice(CH_PREFIX.length + 1))
     : [];
 
   // Never cache an empty answer. An upstream having a bad minute would
@@ -279,6 +302,14 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
     releasedAt: summary?.releasedAt ?? null,
   };
 
+  // Bought sets are answered whole by their own function — theirs is one
+  // endpoint for every category, so there is nothing to branch on below.
+  if (prefix === CH_PREFIX) {
+    const detail = await boughtSetDetail(code);
+    detailCache.set(setId, detail);
+    return detail;
+  }
+
   let cards: SetDetail["cards"] = [];
   try {
     if (prefix === "mtg") {
@@ -349,11 +380,36 @@ const gameOfPrefix = (p: string) =>
  *  A game whose catalogue is having a bad minute still appears — with no
  *  count and no picture — because the sets may well load when it is tapped,
  *  and hiding a whole game is a worse answer than a plain tile. */
+/** The games Card Hedge adds on top of the five free ones.
+ *
+ *  Read from their categories rather than written down here, so a sport they
+ *  add appears without a deploy — the entire reason to buy a catalogue is not
+ *  to maintain a list of what is in it. Their names come through as they are
+ *  ("Baseball", "Basketball"), and the id is prefixed so it can never collide
+ *  with one of ours.
+ *
+ *  Empty when the provider is off, which is the default. Nothing below has to
+ *  know that: an unconfigured provider is a provider with no categories. */
+async function boughtGames(): Promise<Game[]> {
+  try {
+    const cats = await chCategories();
+    return cats
+      // Anything they call by a name we already serve is dropped rather than
+      // shown twice. Our own feed for that game is the better one.
+      .filter((c) => !GAMES.some((g) => g.name.toLowerCase() === c.name.toLowerCase()))
+      .map((c) => ({ id: `${CH_PREFIX}:${c.name}`, name: c.name }));
+  } catch {
+    return [];
+  }
+}
+
 export async function gamesWithPreviews(): Promise<Game[]> {
-  await Promise.all(GAMES.map((g) => setsForGame(g.id).catch(() => [])));
+  const bought = await boughtGames();
+  const all = [...GAMES, ...bought];
+  await Promise.all(all.map((g) => setsForGame(g.id).catch(() => [])));
 
   return Promise.all(
-    GAMES.map(async (g) => {
+    all.map(async (g) => {
       const sets = cache.get(g.id) ?? [];
       // The newest set that actually has artwork. Newest first is already the
       // sort order, and a set with no logo is common in every catalogue but
@@ -392,6 +448,11 @@ export function setIdOfCard(cardId: string): string | null {
   }
 
   const rest = cardId.slice(cut + 1);
+  // A bought card id carries the provider's own identifier and nothing about
+  // its set, exactly like Magic's. Saying so is the honest answer — the card
+  // page falls back to asking the server who the card is, which works because
+  // anything on the market is in our own tables by then.
+  if (prefix === CH_PREFIX) return null;
   if (prefix === "optcg") {
     // `OP13-119` — the set code is everything before the card's own number.
     const last = rest.lastIndexOf("-");
@@ -402,4 +463,83 @@ export function setIdOfCard(cardId: string): string | null {
 
 /** The prefixes this file mints. Kept beside `setIdOfCard` because the two
  *  have to agree about what a prefixed id looks like. */
-const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo"]);
+const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo", CH_PREFIX]);
+
+/** Every set inside one bought category.
+ *
+ *  Their set-search caps at 100 results and has no page parameter, so a big
+ *  category is walked by initial rather than by page. Twenty-seven calls
+ *  sounds like a lot until you notice this is cached for a day and that the
+ *  alternative is a category that silently stops at its hundredth set —
+ *  which, on a marketplace whose promise is "every set", is the failure that
+ *  matters most.
+ *
+ *  A blank search first: for a small category that is the whole of it in one
+ *  call, and there is no point spending twenty-seven on Formula 1. */
+async function boughtSets(category: string): Promise<SetSummary[]> {
+  const seen = new Map<string, SetSummary>();
+  const take = (rows: { name: string; category: string | null; year?: string | null }[]) => {
+    for (const r of rows) {
+      const setId = `${CH_PREFIX}:${r.name}`;
+      if (seen.has(setId)) continue;
+      seen.set(setId, {
+        setId,
+        name: r.name,
+        logo: null,
+        symbol: null,
+        total: 0,
+        official: 0,
+        releasedAt: r.year ? `${r.year}-01-01` : null,
+      });
+    }
+  };
+
+  take(await setSearch({ category, count: 100 }));
+  // Under the cap on the first call means we have all of it.
+  if (seen.size < 100) return [...seen.values()];
+
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789".split("");
+  for (const letter of alphabet) {
+    take(await setSearch({ category, search: letter, count: 100 }));
+  }
+  return [...seen.values()];
+}
+
+/** The cards inside a bought set.
+ *
+ *  Paged, unlike the sets: this endpoint does take a page number, and a
+ *  modern sports product runs to several hundred cards once the parallels are
+ *  counted. Capped at ten pages so one enormous set cannot spend a whole
+ *  day's call budget on its own.
+ *
+ *  Card ids come through as `ch-<their id>` to match the CARD id shape the
+ *  rest of this file uses — `<prefix>-<id>` — while the SET id above is
+ *  `ch:<name>`. Those two shapes disagreeing is what broke every One Piece
+ *  card page, so `setIdOfCard` below is taught this one explicitly. */
+export async function boughtSetDetail(setName: string): Promise<SetDetail | null> {
+  const cards: SetDetail["cards"] = [];
+  for (let page = 1; page <= 10; page++) {
+    const rows = await cardSearch({ set: setName, page, pageSize: 100 });
+    if (!rows.length) break;
+    for (const c of rows) {
+      cards.push({
+        cardId: `${CH_PREFIX}-${c.cardId}`,
+        name: c.player && !c.name.includes(c.player) ? `${c.player} — ${c.name}` : c.name,
+        localId: String(c.number ?? ""),
+        imageUrl: c.imageUrl,
+      });
+    }
+    if (rows.length < 100) break;
+  }
+  if (!cards.length) return null;
+  return {
+    setId: `${CH_PREFIX}:${setName}`,
+    name: setName,
+    logo: null,
+    symbol: null,
+    total: cards.length,
+    official: cards.length,
+    releasedAt: null,
+    cards,
+  };
+}
