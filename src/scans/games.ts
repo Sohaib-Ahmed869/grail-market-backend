@@ -1,5 +1,9 @@
 import { TtlCache } from "./ttlcache.js";
 import { cardSearch, categories as chCategories, setSearch } from "./cardhedger.js";
+import {
+  digimonSetDetail, digimonSets, gatcgSetDetail, gatcgSets,
+  sorcerySetDetail, sorcerySets, swuSetDetail, swuSets,
+} from "./opensources.js";
 import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
 
 // Browsing, one level up.
@@ -29,6 +33,13 @@ export const GAMES: Game[] = [
   { id: "yugioh", name: "Yu-Gi-Oh!" },
   { id: "lorcana", name: "Lorcana" },
   { id: "mtg", name: "Magic: The Gathering" },
+  // Four more free catalogues, each called and read before being wired. They
+  // were absent for no better reason than that this list was hardcoded at five
+  // and nobody came back to it.
+  { id: "swu", name: "Star Wars Unlimited" },
+  { id: "sorcery", name: "Sorcery: Contested Realm" },
+  { id: "digimon", name: "Digimon" },
+  { id: "gatcg", name: "Grand Archive" },
 ];
 
 /** The five above are the ones with a free catalogue behind them, and they
@@ -50,10 +61,33 @@ export const GAMES: Game[] = [
 export const CH_PREFIX = "ch";
 
 const DAY = 24 * 3600 * 1000;
-const cache = new TtlCache<SetSummary[]>(DAY, 8);
+/** One entry per game, and it must hold ALL of them.
+ *
+ *  This was 8, sized to the five games plus headroom. At nine it evicted on
+ *  every pass: `gamesWithPreviews` warms each game and then reads them all
+ *  back, so the first one warmed was gone by the time it was read — Pokemon
+ *  reported 0 of its 218 sets, having just been fetched successfully. Sized
+ *  well past the list so adding a game cannot silently blank another. */
+const cache = new TtlCache<SetSummary[]>(DAY, 64);
 /** Games whose artwork is being fetched right now, so a second request while
  *  the first is still running does not start it again. */
 const enriching = new Set<string>();
+
+/** The first of several spellings that actually answers.
+ *
+ *  For a source whose own ids are not spelled consistently, asking twice is
+ *  cheaper than choosing wrongly and returning nothing. */
+async function firstOf(codes: string[], url: (c: string) => string): Promise<any> {
+  const tried = new Set<string>();
+  for (const c of codes) {
+    if (!c || tried.has(c)) continue;
+    tried.add(c);
+    const r = await json<any>(url(c));
+    const list = Array.isArray(r) ? r : (r?.data ?? []);
+    if (Array.isArray(list) && list.length) return r;
+  }
+  return null;
+}
 
 async function json<T>(url: string): Promise<T | null> {
   try {
@@ -211,6 +245,10 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
     : gameId === "yugioh" ? await ygoSets()
     : gameId === "lorcana" ? await lorcanaSets()
     : gameId === "mtg" ? await mtgSets()
+    : gameId === "swu" ? await swuSets()
+    : gameId === "sorcery" ? await sorcerySets()
+    : gameId === "digimon" ? await digimonSets()
+    : gameId === "gatcg" ? await gatcgSets()
     // Everything bought. One branch for every category they hold, because the
     // shape is theirs rather than one API per game — which is the whole
     // difference between paying for a catalogue and wiring five of them.
@@ -301,7 +339,15 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
   const game = gameOfPrefix(prefix);
   let known = cache.get(game);
   if (!known) known = await setsForGame(game).catch(() => []);
-  const summary = (known ?? []).find((x) => x.setId === setId);
+  // Matched against the same spellings the fetch below tries, or a One Piece
+  // set opened from a card id finds no summary and falls back to naming
+  // itself "OP17" instead of "The World's Strongest Warriors".
+  const spellings = new Set([
+    setId,
+    `${prefix}:${code.replace(/^([A-Z]+)(\d)/i, "$1-$2")}`,
+    `${prefix}:${code.replace(/-/g, "")}`,
+  ]);
+  const summary = (known ?? []).find((x) => spellings.has(x.setId));
   const base = {
     setId,
     name: summary?.name ?? code,
@@ -311,6 +357,28 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
     official: summary?.official ?? 0,
     releasedAt: summary?.releasedAt ?? null,
   };
+
+  // The four free catalogues added later each answer a whole set at once.
+  if (prefix === "swu" || prefix === "sorcery" || prefix === "digimon" || prefix === "gatcg") {
+    const known = cache.get(prefix) ?? (await setsForGame(prefix).catch(() => []));
+    const summary = (known ?? []).find((x) => x.setId === setId);
+    const shell = {
+      setId,
+      name: summary?.name ?? code,
+      logo: null,
+      symbol: null,
+      total: summary?.total ?? 0,
+      official: summary?.official ?? 0,
+      releasedAt: summary?.releasedAt ?? null,
+    };
+    const detail =
+      prefix === "swu" ? await swuSetDetail(code, shell)
+      : prefix === "sorcery" ? await sorcerySetDetail(code, shell)
+      : prefix === "digimon" ? await digimonSetDetail(code, shell)
+      : await gatcgSetDetail(code, shell);
+    if (detail) detailCache.set(setId, detail);
+    return detail;
+  }
 
   // Bought sets are answered whole by their own function — theirs is one
   // endpoint for every category, so there is nothing to branch on below.
@@ -342,7 +410,18 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
         imageUrl: c.image_uris?.digital?.normal ?? c.image_uris?.digital?.small ?? null,
       }));
     } else if (prefix === "optcg") {
-      const r = await json<any>(`https://optcgapi.com/api/sets/${encodeURIComponent(code)}/`);
+      // Their set index and their card ids disagree about a hyphen: the set
+      // list says "OP-17" and a card id says "OP17-109". `setIdOfCard` can
+      // only see the card, so it derives "OP17" — which 404s, and every card
+      // opened from a One Piece set said "Card Not Found".
+      //
+      // Both forms are tried rather than one being declared canonical,
+      // because their own index is not consistent either: alongside "OP-17"
+      // it carries "OP15-EB04".
+      const r = await firstOf(
+        [code, code.replace(/^([A-Z]+)(\d)/i, "$1-$2"), code.replace(/-/g, "")],
+        (c) => `https://optcgapi.com/api/sets/${encodeURIComponent(c)}/`,
+      );
       const list = Array.isArray(r) ? r : (r?.data ?? []);
       cards = list.map((c: any) => ({
         cardId: `optcg-${c.card_set_id}`,
@@ -426,7 +505,15 @@ async function boughtGames(): Promise<Game[]> {
 export async function gamesWithPreviews(): Promise<Game[]> {
   const bought = await boughtGames();
   const all = [...GAMES, ...bought];
-  await Promise.all(all.map((g) => setsForGame(g.id).catch(() => [])));
+  // Warmed one at a time, not all at once.
+  //
+  // This was a Promise.all, which was fine at five sources. Grand Archive has
+  // no set index and has to be crawled out of a search per letter — 26
+  // requests — and firing that alongside eight others made ygoprodeck lose
+  // the race and answer nothing, so Yu-Gi-Oh reported 0 of its 1,035 sets on
+  // a list where it had always been right. One slow source must not be able
+  // to blank another.
+  for (const g of all) await setsForGame(g.id).catch(() => []);
 
   return Promise.all(
     all.map(async (g) => {
@@ -483,7 +570,7 @@ export function setIdOfCard(cardId: string): string | null {
 
 /** The prefixes this file mints. Kept beside `setIdOfCard` because the two
  *  have to agree about what a prefixed id looks like. */
-const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo", CH_PREFIX]);
+const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo", "swu", "sorcery", "digimon", "gatcg", CH_PREFIX]);
 
 /** Every set inside one bought category.
  *
