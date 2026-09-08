@@ -197,14 +197,18 @@ export async function adminListings(q: {
       limit $${args.length}`,
     args,
   );
-  return r.rows.map(shape);
+  // `shape` signs a photo URL per row, which is a network round trip each —
+  // fine one at a time, ruinous in a loop across a few hundred rows. Firing
+  // them together and waiting once keeps the list endpoint at the cost of
+  // its slowest signature rather than the sum of all of them.
+  return Promise.all(r.rows.map(shape));
 }
 
 export async function adminListing(id: string): Promise<AdminListing | null> {
   const pool = storePool();
   if (!pool) return null;
   const r = await pool.query(`${ROW_SQL} where l.listing_id = $1`, [id]);
-  return r.rows[0] ? shape(r.rows[0]) : null;
+  return r.rows[0] ? await shape(r.rows[0]) : null;
 }
 
 /**
@@ -419,7 +423,22 @@ export async function annotate(
    Row → console
    -------------------------------------------------------------------------- */
 
-export function shape(r: any): AdminListing {
+/** The address of the row's own front photograph, unsigned.
+ *
+ *  `image_url` is never written by the real listing-creation path, so it is
+ *  null on every row; every row has `photos` instead. "Front" is the entry
+ *  angled that way, or the first entry when nothing claims the angle — the
+ *  console has to show something rather than a name for a photo that is not
+ *  there. Returns undefined, not "", so the caller's `??` chain keeps going
+ *  when there is genuinely no photo to fall back to. */
+function frontPhotoUrl(photos: unknown): string | undefined {
+  if (!Array.isArray(photos)) return undefined;
+  const usable = photos.filter((p: any) => typeof p?.url === "string");
+  const front = usable.find((p: any) => p.angle === "front") ?? usable[0];
+  return front?.url;
+}
+
+export async function shape(r: any): Promise<AdminListing> {
   const ask = Number(r.price ?? 0);
   const photos = Array.isArray(r.photos) ? r.photos.length : 0;
 
@@ -440,10 +459,20 @@ export function shape(r: any): AdminListing {
 
   const name: string = r.seller_name ?? "Unknown seller";
 
+  // `image_url` is never written by the real listing-creation path, so it is
+  // null on every row here — the console was drawing the hand-drawn slab
+  // placeholder beside a row whose actual photograph was one column away in
+  // the same table. Every listing does have `photos`, so the front of the
+  // card stands in when there is no dedicated `image_url`. Either way the
+  // address is signed before it reaches the console: the bucket is private,
+  // and an unsigned address is just as unloadable as none at all.
+  const rawArt: string | undefined = r.image_url ?? frontPhotoUrl(r.photos);
+  const art = rawArt ? await viewableUrl(rawArt) : undefined;
+
   return {
     id: r.listing_id,
     card: r.card_name,
-    art: r.image_url ?? undefined,
+    art,
     setLine: [r.set_name, r.variant, r.card_number ? `#${String(r.card_number).replace(/^#/, "")}` : null]
       .filter(Boolean)
       .join(" · "),
