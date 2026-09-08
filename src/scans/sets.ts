@@ -1,4 +1,5 @@
 import { TtlCache } from "./ttlcache.js";
+import { storePool } from "../cards.store.js";
 
 // Browsing by set, which is how collectors actually think about cards.
 //
@@ -22,9 +23,44 @@ export type SetSummary = {
   total: number; official: number; releasedAt: string | null;
 };
 
-export type SetDetail = SetSummary & {
-  cards: { cardId: string; name: string; localId: string; imageUrl: string | null }[];
+export type SetCard = {
+  cardId: string; name: string; localId: string; imageUrl: string | null;
+  /** The ungraded price, in US dollars, or null where nobody has one.
+   *
+   *  Three catalogues hand it to us in their set listing (Magic, Lorcana,
+   *  One Piece). For the rest it comes from our own store, where a card has
+   *  been priced before. Null is the honest answer everywhere else — a set
+   *  page that printed 0 would be claiming every unpriced card is worthless. */
+  rawUsd: number | null;
+  rarity: string | null;
 };
+
+export type SetDetail = SetSummary & { cards: SetCard[] };
+
+/** Fill in raw prices from what we already hold.
+ *
+ *  A set page shows every card at once, and most sources say nothing about
+ *  price in their set listing — TCGdex, which is Pokemon, says nothing at all.
+ *  But every card that has ever been scanned or listed here has a row in
+ *  catalog_cards, and many of those carry raw_usd. One query for the whole
+ *  set, applied only where the source left a gap, so a source's own figure is
+ *  never overwritten by an older one of ours. */
+export async function overlayStorePrices(cards: SetCard[]): Promise<SetCard[]> {
+  const pool = storePool();
+  if (!pool || !cards.length) return cards;
+  const missing = cards.filter((c) => c.rawUsd == null).map((c) => c.cardId);
+  if (!missing.length) return cards;
+  try {
+    const r = await pool.query(
+      "select catalog_id, raw_usd from catalog_cards where catalog_id = any($1) and raw_usd is not null",
+      [missing],
+    );
+    const held = new Map<string, number>(r.rows.map((x: any) => [String(x.catalog_id), Number(x.raw_usd)]));
+    return cards.map((c) => c.rawUsd == null && held.has(c.cardId) ? { ...c, rawUsd: held.get(c.cardId)! } : c);
+  } catch {
+    return cards;
+  }
+}
 
 /** TCGdex asset URLs come back without an extension, and the two kinds want
  *  different suffixes:
@@ -86,12 +122,17 @@ export async function getSet(setId: string): Promise<SetDetail | null> {
     total: s.cardCount?.total ?? 0,
     official: s.cardCount?.official ?? 0,
     releasedAt: s.releaseDate ?? null,
-    cards: (s.cards ?? []).map((c: any) => ({
+    cards: await overlayStorePrices((s.cards ?? []).map((c: any) => ({
       cardId: c.id,
       name: c.name,
       localId: String(c.localId ?? ""),
       imageUrl: cardUrl(c.image, "low"),
-    })),
+      // TCGdex's set listing carries no price and no rarity — id, image,
+      // number and name, nothing else. The store overlay is the only route
+      // to a Pokemon price on this page.
+      rawUsd: null,
+      rarity: null,
+    }))),
   };
   setCache.set(setId, detail);
   return detail;

@@ -75,6 +75,8 @@ export async function swuSetDetail(code: string, base: Omit<SetDetail, "cards">)
       // Their card rows carry no image field; the tile falls back to the
       // placeholder rather than to a URL guessed from an id.
       imageUrl: null,
+      rawUsd: null,
+      rarity: null,
     })),
   };
 }
@@ -128,6 +130,8 @@ export async function sorcerySetDetail(code: string, base: Omit<SetDetail, "card
         // Their slug leads with the collector number — "004-13_treasures…".
         localId: String(p?.slug ?? "").split("-")[0] ?? "",
         imageUrl: null,
+      rawUsd: null,
+      rarity: null,
       });
     }
   }
@@ -183,6 +187,8 @@ export async function digimonSetDetail(code: string, base: Omit<SetDetail, "card
       name: String(c?.name ?? ""),
       localId: String(c?.cardnumber ?? "").split("-")[1] ?? "",
       imageUrl: null,
+      rawUsd: null,
+      rarity: null,
     }));
   return cards.length ? { ...base, total: cards.length, cards } : null;
 }
@@ -249,6 +255,8 @@ export async function gatcgSetDetail(prefix: string, base: Omit<SetDetail, "card
         name: String(c?.name ?? ""),
         localId: String(e?.collector_number ?? ""),
         imageUrl: e?.image ? `https://api.gatcg.com${e.image}` : null,
+        rawUsd: null,
+        rarity: e?.rarity != null ? String(e.rarity) : null,
       });
     }
   }

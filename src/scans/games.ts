@@ -1,4 +1,5 @@
 import { TtlCache } from "./ttlcache.js";
+import { overlayStorePrices } from "./sets.js";
 import { cardSearch, categories as chCategories, setSearch } from "./cardhedger.js";
 import {
   digimonSetDetail, digimonSets, gatcgSetDetail, gatcgSets,
@@ -72,6 +73,14 @@ const cache = new TtlCache<SetSummary[]>(DAY, 64);
 /** Games whose artwork is being fetched right now, so a second request while
  *  the first is still running does not start it again. */
 const enriching = new Set<string>();
+
+/** A price a source hands us, or null. Their fields are strings ("105.93"),
+ *  sometimes empty, sometimes absent; anything that is not a positive number
+ *  is not a price. */
+const usd = (v: unknown): number | null => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
 
 /** The first of several spellings that actually answers.
  *
@@ -399,6 +408,8 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
         name: c.name,
         localId: String(c.collector_number ?? ""),
         imageUrl: c.image_uris?.normal ?? c.card_faces?.[0]?.image_uris?.normal ?? null,
+        rawUsd: usd(c.prices?.usd),
+        rarity: c.rarity ?? null,
       }));
     } else if (prefix === "lorcana") {
       const r = await json<any>(`https://api.lorcast.com/v0/sets/${encodeURIComponent(code)}/cards`);
@@ -408,6 +419,8 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
         name: [c.name, c.version].filter(Boolean).join(" — "),
         localId: String(c.collector_number ?? ""),
         imageUrl: c.image_uris?.digital?.normal ?? c.image_uris?.digital?.small ?? null,
+        rawUsd: usd(c.prices?.usd),
+        rarity: c.rarity ?? null,
       }));
     } else if (prefix === "optcg") {
       // Their set index and their card ids disagree about a hyphen: the set
@@ -442,6 +455,8 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
         name: c.card_name,
         localId: String(c.card_set_id ?? ""),
         imageUrl: c.card_image ?? null,
+        rawUsd: usd(c.market_price),
+        rarity: c.rarity ?? null,
       }));
     } else if (prefix === "ygo") {
       // ygoprodeck queries by set NAME, not by code, so the name has to come
@@ -455,6 +470,8 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
         name: c.name,
         localId: String(c.card_sets?.[0]?.set_code ?? ""),
         imageUrl: c.card_images?.[0]?.image_url_small ?? null,
+        rawUsd: usd(c.card_prices?.[0]?.tcgplayer_price),
+        rarity: c.card_sets?.[0]?.set_rarity ?? null,
       }));
     } else {
       return undefined;
@@ -463,7 +480,7 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
     return null;
   }
 
-  const detail: SetDetail = { ...base, total: cards.length || base.total, cards };
+  const detail: SetDetail = { ...base, total: cards.length || base.total, cards: await overlayStorePrices(cards) };
   // Only a set with cards is worth remembering. Caching an empty one turns a
   // bad minute upstream into an empty set for a day.
   if (cards.length) {
@@ -681,6 +698,8 @@ export async function boughtSetDetail(setName: string): Promise<SetDetail | null
         name: c.player && !c.name.includes(c.player) ? `${c.player} — ${c.name}` : c.name,
         localId: String(c.number ?? ""),
         imageUrl: c.imageUrl,
+        rawUsd: null,
+        rarity: null,
       });
     }
     if (rows.length < 100) break;
