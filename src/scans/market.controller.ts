@@ -134,7 +134,7 @@ export class MarketController {
    *  Falls back to the set for a card we hold nothing about — a deep link into
    *  a set nobody here has touched still resolves. */
   @Get("card")
-  async card(@Query("catalogId") catalogId?: string) {
+  async card(@Query("catalogId") catalogId?: string, @Query("setId") setId?: string) {
     const id = (catalogId ?? "").trim();
     if (!id) return { error: "no-id", message: "A catalogue id is required." };
 
@@ -151,13 +151,19 @@ export class MarketController {
       };
     }
 
-    // Nothing stored. Read the set it belongs to — which needs the id turned
-    // into a set id correctly, prefix and all, in the one place that knows
-    // how rather than on a phone that has to guess.
-    const setId = setIdOfCard(id);
-    if (!setId) return { error: "not-found", cardId: id };
-    const other = await setDetailForGame(setId);
-    const set = other !== undefined ? other : await getSet(setId);
+    // Nothing stored. Read the set it belongs to.
+    //
+    // The set is TOLD to us when the caller knows it, which the card page
+    // always does — it was opened from a set. Deriving it from the card id
+    // only ever worked for two catalogues: Pokemon, where a card id really is
+    // `<set>-<number>`, and One Piece once its hyphen was handled. Every other
+    // source keys cards on an opaque provider id with no set inside it, so
+    // seven of the nine games answered "Card Not Found" on every card in
+    // every set. Asking the caller is the fix; deriving is the fallback.
+    const from = (setId ?? "").trim() || setIdOfCard(id);
+    if (!from) return { error: "not-found", cardId: id };
+    const other = await setDetailForGame(from);
+    const set = other !== undefined ? other : await getSet(from);
     const c = set?.cards.find((x: any) => x.cardId === id);
     if (!set || !c) return { error: "not-found", cardId: id };
     return {

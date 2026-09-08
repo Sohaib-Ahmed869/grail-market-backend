@@ -19,7 +19,8 @@
     "ingest": "tsx src/ingest/main.ts",
     "keys": "tsx src/ingest/keys.ts",
     "backtest": "tsx src/ingest/backtest.ts",
-    "stripe:setup": "tsx src/billing/setup.ts"
+    "stripe:setup": "tsx src/billing/setup.ts",
+    "walk": "node scripts/walk-catalogue.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1123.0",
