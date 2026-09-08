@@ -113,11 +113,21 @@ async function lorcanaSets(): Promise<SetSummary[]> {
  *  Scryfall lists over a thousand "sets", most of which are tokens, promos,
  *  minigames and art series. A collector browsing for a card wants the ~150
  *  that are actual releases. */
+/** Magic, and the filter that was hiding six sevenths of it.
+ *
+ *  This kept `core` and `expansion` only. Scryfall lists 1,049 sets and that
+ *  whitelist passed 144 — it dropped 298 promo sets, all 45 Commander decks,
+ *  32 Masters sets, and every one of the 19 Masterpiece sets, which are among
+ *  the most valuable cards Magic has ever printed. Innistrad Remastered is
+ *  495 cards and none of them were findable.
+ *
+ *  The right question is not what TYPE a set is, it is whether the card
+ *  physically exists — a marketplace sells objects, and an Alchemy card
+ *  cannot be posted to anybody. Scryfall answers that directly with `digital`.
+ *  61 sets are digital-only; the other 988 are real cards somebody can hold. */
 async function mtgSets(): Promise<SetSummary[]> {
   const raw = await json<{ data?: any[] }>("https://api.scryfall.com/sets");
-  const list = (raw?.data ?? []).filter(
-    (s) => s.set_type === "core" || s.set_type === "expansion",
-  );
+  const list = (raw?.data ?? []).filter((s) => !s.digital);
   return list.map((s) => ({
     setId: `mtg:${s.code}`,
     name: s.name,
