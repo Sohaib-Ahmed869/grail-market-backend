@@ -373,7 +373,17 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
   const detail: SetDetail = { ...base, total: cards.length || base.total, cards };
   // Only a set with cards is worth remembering. Caching an empty one turns a
   // bad minute upstream into an empty set for a day.
-  if (cards.length) detailCache.set(setId, detail);
+  if (cards.length) {
+    detailCache.set(setId, detail);
+    // And teach the LIST what we just learned. optcgapi's set index carries a
+    // name and an id and nothing else — no card count — so every One Piece
+    // tile said "0 cards" about a set that opens to a hundred and fifty. The
+    // count is free once the detail has been fetched, so opening a set fixes
+    // its own tile from then on, and nothing extra is bought to do it.
+    const known = cache.get(gameOfPrefix(prefix));
+    const row = known?.find((x) => x.setId === setId);
+    if (row && !row.total) row.total = cards.length;
+  }
   return cards.length ? detail : null;
 }
 
