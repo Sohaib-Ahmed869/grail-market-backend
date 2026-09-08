@@ -213,7 +213,14 @@ export async function identifyOnePiece(
     // The printing has to be part of the id. Both printings of OP11-119 carry
     // the same card_set_id, so keying on that alone made them one card to every
     // cache and every price lookup downstream.
-    cardId: `optcg-${c.card_set_id}${c.card_image && /_p\d+\./.test(String(c.card_image)) ? "-p" : ""}`,
+    // card_image_id distinguishes every printing; card_set_id does not.
+    //
+    // This used to append a bare "-p" when the image looked like a parallel,
+    // which separated parallels from base prints and then lumped all FOUR
+    // parallels of a card together — a $433 Wanted Poster and a $4,420 Red
+    // Super Alternate Art under one id. Their own image id already says which
+    // is which: OP13-119, _p1, _p2, _p3, _p4.
+    cardId: `optcg-${c.card_image_id ?? c.card_set_id}`,
     name: String(c.card_name).replace(/\s*\((\d+)\)\s*/g, " ").replace(/\s{2,}/g, " ").trim(),
     setId: c.set_id ?? "",
     setName: c.set_name ?? "",

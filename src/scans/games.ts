@@ -424,7 +424,21 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
       );
       const list = Array.isArray(r) ? r : (r?.data ?? []);
       cards = list.map((c: any) => ({
-        cardId: `optcg-${c.card_set_id}`,
+        // `card_image_id`, not `card_set_id`.
+        //
+        // One Piece prints a card and then reprints it as a parallel, an
+        // alternate art, a Wanted Poster — and gives every one of them the SAME
+        // card_set_id. OP13-119 is five cards: a $1.77 base, an $18 parallel, a
+        // $433 Wanted Poster, a $1,085 Super Alternate Art and a $4,420 Red
+        // Super Alternate Art. Keyed on card_set_id they were one catalogue
+        // entry, so `grade_prices` — which keys on catalog_id — could not tell
+        // the cheapest from the dearest. 33 of the 154 cards in OP-02 collide
+        // this way; card_image_id is unique across all 154.
+        //
+        // A base print's image id IS its set id, so every existing id is
+        // unchanged and nothing already stored is orphaned. Only the parallels,
+        // which were wrong anyway, gain their `_p1` suffix.
+        cardId: `optcg-${c.card_image_id ?? c.card_set_id}`,
         name: c.card_name,
         localId: String(c.card_set_id ?? ""),
         imageUrl: c.card_image ?? null,
@@ -502,18 +516,51 @@ async function boughtGames(): Promise<Game[]> {
   }
 }
 
+/** Warms still in flight, so a second request while the first is running
+ *  does not start the crawl again. */
+const warming = new Map<string, Promise<unknown>>();
+
+function warm(gameId: string): Promise<unknown> {
+  const inflight = warming.get(gameId);
+  if (inflight) return inflight;
+  const p = setsForGame(gameId)
+    .catch(() => [])
+    .finally(() => warming.delete(gameId));
+  warming.set(gameId, p);
+  return p;
+}
+
+/** How long the games list will wait for catalogues before answering with
+ *  what it has. The five original sources answer in about two seconds; the
+ *  Grand Archive crawl is 26 requests and can take a minute cold. */
+const GAMES_BUDGET_MS = 8_000;
+
 export async function gamesWithPreviews(): Promise<Game[]> {
   const bought = await boughtGames();
   const all = [...GAMES, ...bought];
-  // Warmed one at a time, not all at once.
+
+  // Warm everything, but do not WAIT for everything.
   //
-  // This was a Promise.all, which was fine at five sources. Grand Archive has
-  // no set index and has to be crawled out of a search per letter — 26
-  // requests — and firing that alongside eight others made ygoprodeck lose
-  // the race and answer nothing, so Yu-Gi-Oh reported 0 of its 1,035 sets on
-  // a list where it had always been right. One slow source must not be able
-  // to blank another.
-  for (const g of all) await setsForGame(g.id).catch(() => []);
+  // This blocked until every catalogue was loaded, one after another, and
+  // that was fine at five sources. Then two things happened at once: Grand
+  // Archive joined, which has no set index and is crawled out of 26 searches
+  // and can take a minute cold; and the app gained a 20-second timeout on
+  // every request, because a request that never settles was leaving buttons
+  // spinning forever. Together they meant the first games call after a
+  // restart took longer than the app would wait, and "Browse by game" was
+  // empty — the list had been fine a moment earlier with a warm cache, which
+  // is exactly why it was not caught.
+  //
+  // So the warm-up runs in the background, deduped, and this answers within
+  // a budget with whatever is cached by then. A slow catalogue shows without
+  // a set count for a few seconds and fills in on the next open; a fast one
+  // is there the first time. Nothing waits on the slowest source, and nothing
+  // can be blanked by it.
+  const warms = all.map((g) => warm(g.id));
+  await Promise.race([
+    Promise.allSettled(warms),
+    new Promise((r) => setTimeout(r, GAMES_BUDGET_MS)),
+  ]);
 
   return Promise.all(
     all.map(async (g) => {
