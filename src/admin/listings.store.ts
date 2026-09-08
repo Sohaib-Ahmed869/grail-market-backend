@@ -28,6 +28,7 @@ export type AdminStatus =
   | "info-requested"
   | "live"
   | "sold"
+  | "reserved"
   | "paused"
   | "withdrawn"
   | "rejected";
@@ -36,9 +37,9 @@ export type AdminStatus =
 export const VIEWS: Record<string, string[]> = {
   queue: ["in_review"],
   seller: ["info_requested"],
-  market: ["live", "sold", "paused"],
+  market: ["live", "sold", "reserved", "paused"],
   closed: ["withdrawn", "rejected"],
-  all: ["in_review", "info_requested", "live", "sold", "paused", "withdrawn", "rejected"],
+  all: ["in_review", "info_requested", "live", "sold", "reserved", "paused", "withdrawn", "rejected"],
 };
 
 /** The review target, in hours. The dashboard states it, so it lives once. */
@@ -228,13 +229,26 @@ export async function queueCounts(): Promise<Record<string, number>> {
     `select status, count(*)::int n
        from listings where status <> 'draft' group by status`,
   );
+  /* Counted off the same VIEWS map the rows are filtered by, rather than by a
+     second list written out here.
+
+     This was an if/else chain ending in `else out.closed += n`, and the
+     catch-all is what broke it: `reserved` — a listing a buyer has spoken for
+     — is a status the console had never been told about, so it fell past
+     every branch and was counted as "Off the market". The tab then said 1 and
+     opened on nothing, because the ROW query filtered by VIEWS.closed, which
+     has only withdrawn and rejected in it. Two definitions of one word.
+
+     Now there is one. A status in no view is counted in `all` and nowhere
+     else, so the next status somebody adds shows up as a total that does not
+     add up — which is findable — rather than silently inflating a tab it is
+     not in. */
   for (const row of r.rows) {
     const n = Number(row.n);
     out.all += n;
-    if (row.status === "in_review") out.queue += n;
-    else if (row.status === "info_requested") out.seller += n;
-    else if (["live", "sold", "paused"].includes(row.status)) out.market += n;
-    else out.closed += n;
+    for (const [view, statuses] of Object.entries(VIEWS)) {
+      if (view !== "all" && statuses.includes(row.status)) out[view] += n;
+    }
   }
   return out;
 }
@@ -525,6 +539,8 @@ export function adminStatus(r: any): AdminStatus {
       return "live";
     case "sold":
       return "sold";
+    case "reserved":
+      return "reserved";
     case "rejected":
       return "rejected";
     default:
