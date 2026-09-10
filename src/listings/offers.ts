@@ -67,7 +67,10 @@ export async function offersToSeller(sellerId: string): Promise<Offer[]> {
             l.grader, l.grade, l.set_name, l.status as listing_status
        from offers o join listings l using (listing_id)
       where l.seller_id = $1
-      order by (o.status = 'pending') desc, o.created_at desc`,
+      -- Unanswered first. The status is 'open' — there is no 'pending' in
+      -- this schema, and sorting on one silently degraded this to
+      -- newest-first, burying live offers under settled ones.
+      order by (o.status = 'open') desc, o.created_at desc`,
     [sellerId],
   );
   return r.rows;
