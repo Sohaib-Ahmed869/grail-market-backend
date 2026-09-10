@@ -613,7 +613,40 @@ export class ScansService {
     //
     // Cheaper too, which is the smaller point: a rejected scan now spends
     // nothing at any provider.
-    if (frontRes.rejection) {
+    // GLARE IS NOT FATAL WHEN THE CARD WAS STILL READ.
+    //
+    // The glare gate counts blown-out pixels: HSV value at or above 250 with
+    // almost no saturation, clustered over 4% of the card. That is a good
+    // description of light bouncing off a slab — and an equally good
+    // description of a manga alternate art, which is large flat panels of
+    // printed white. The detector cannot tell the two apart, so it refuses
+    // the card because of its own artwork.
+    //
+    // It refused OP17-079, a Super Leader Alternate Art worth about US$1,930,
+    // from a clean product scan with no glare anywhere in it. Every card this
+    // misfires on is a manga or alternate art, which is to say the expensive
+    // ones.
+    //
+    // The rest of the gate stands. A blurry photo or one too small to read
+    // has genuinely hidden something, and pricing a grade we could not see is
+    // how a $94,000 Championship Finalist came back as a raw card. But glare
+    // is only a problem because it HIDES the card, and a card we have just
+    // identified at full confidence is not hidden. Refusing to answer when we
+    // can answer has a cost too.
+    const readItAnyway =
+      frontRes.rejection?.reason === "too_much_glare" &&
+      (scan.identification?.matchScore ?? 0) >= 0.93;
+    if (readItAnyway) {
+      console.warn(
+        `[scan] too_much_glare overridden — identified ` +
+          `"${scan.identification?.name}" at ${scan.identification?.matchScore}; ` +
+          `pricing it`,
+      );
+      scan.rejection = null;
+      scan.status = "analyzed";
+    }
+
+    if (frontRes.rejection && !readItAnyway) {
       console.warn(
         `[scan] ${frontRes.rejection.reason} — not pricing; ` +
           `identification kept for context only`,
