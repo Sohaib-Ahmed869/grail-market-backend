@@ -1,4 +1,5 @@
 import { AdminController } from "./admin/admin.controller.js";
+import { SharePageController } from "./sharing/page.controller.js";
 import { CollectionController } from "./listings/collection.controller.js";
 import { ListingsController } from "./listings/listings.controller.js";
 import { SellersController } from "./listings/sellers.controller.js";
@@ -22,7 +23,7 @@ import { ScansController } from "./scans/scans.controller.js";
 import { ScansService } from "./scans/scans.service.js";
 
 @Module({
-  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, DealsController, CollectionController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController],
+  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, DealsController, CollectionController, SharePageController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController],
   providers: [ScansService],
 })
 export class AppModule {}

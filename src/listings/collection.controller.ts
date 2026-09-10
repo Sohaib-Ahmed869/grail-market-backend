@@ -7,6 +7,8 @@ import { gradedPricesFor } from "../scans/pricing.js";
 import { valueOfEntry, type Unpriced } from "./collectionvalue.js";
 import { marketStatusForOwner } from "./deals.js";
 import { fxRates } from "../scans/fx.js";
+import { currentShare, revokeShare, shareToken } from "../sharing/store.js";
+import { sharedView } from "../sharing/view.js";
 
 @Controller("collection")
 export class CollectionController {
@@ -144,6 +146,43 @@ export class CollectionController {
       // whole collection and is not.
       priced: held.filter((e) => e.value != null).length,
     };
+  }
+
+  /** My share link — minted on first ask, the same one thereafter. */
+  @Post("share")
+  async share(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated", message: "Sign in to share your collection." };
+    const token = await shareToken(me);
+    return token ? { token } : { error: "no-store" };
+  }
+
+  @Get("share")
+  async myShare(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    return { token: await currentShare(me) };
+  }
+
+  /** Turn the link off. Every copy of it stops working at once. */
+  @Delete("share")
+  async unshare(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    return { revoked: await revokeShare(me) };
+  }
+
+  /** Somebody else's collection, by link. No sign-in.
+   *
+   *  The payload is built in `sharing/view`, which the public HTML page reads
+   *  too, so the app and the browser can never disagree about what a link
+   *  shows. It carries the cards and what they are worth and nothing else —
+   *  what a person paid, and so whether they are up or down, is theirs. */
+  @Get("shared/:token")
+  async shared(@Param("token") token: string) {
+    const view = await sharedView(String(token));
+    if (!view) return { error: "not-found", message: "That link has been turned off." };
+    return view;
   }
 
   @Post()
