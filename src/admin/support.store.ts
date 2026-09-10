@@ -87,6 +87,11 @@ export type AdminTicket = {
   slaHours: number;
   answered: boolean;
   assignee?: string;
+  /** "report" is an accusation about a member or a listing; "support" is a
+   *  question. Same queue, different errand, and the console needs to say so. */
+  kind?: string;
+  /** Who the report is about, when it is a report. */
+  aboutUserId?: string;
   listingId?: string;
   disputeId?: string;
 };
@@ -508,6 +513,13 @@ function shape(r: any): AdminTicket {
     assignee: r.assignee ?? undefined,
     listingId: r.listing_id ?? undefined,
     disputeId: r.dispute_id ?? undefined,
+    // A report is an accusation about a person; a support ticket is a
+    // question. They arrive in the same queue and the console could not tell
+    // them apart, because this shape dropped both fields on the floor — so a
+    // member reporting a fake listing looked exactly like somebody asking how
+    // to change their password, and the person it was about was invisible.
+    kind: r.kind ?? "support",
+    aboutUserId: r.about_user_id ?? undefined,
   };
 }
 
