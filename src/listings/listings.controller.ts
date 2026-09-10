@@ -11,7 +11,10 @@ import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
 } from "./store.js";
-import { makeOffer, offersByBuyer, offersFor, settleOffer, offersToSeller, hasStakeIn } from "./offers.js";
+import {
+  makeOffer, offersByBuyer, offersFor, settleOffer, offersToSeller, hasStakeIn,
+  replyToCounter,
+} from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
@@ -415,6 +418,28 @@ export class ListingsController {
     // offer and then having to hunt for what happens next is the gap this
     // whole flow exists to close.
     return r.ok ? { status: r.status, dealId: r.dealId ?? null } : { error: r.why };
+  }
+
+  /** The buyer answering a counter: take it, walk away, or come back with a
+   *  number of their own.
+   *
+   *  Without this the negotiation had one move in it. The seller countered and
+   *  the buyer was left looking at a figure with no way to act on it — the
+   *  offer sat "countered" forever and the deal died of having no next step. */
+  @Post("offers/:offerId/reply")
+  async replyOffer(@Param("offerId") offerId: string, @Req() req: Request, @Body() b: any) {
+    const me = need(req);
+    if (!me) return { error: "unauthenticated" };
+    const action = String(b?.action) as "accepted" | "declined" | "countered";
+    if (!["accepted", "declined", "countered"].includes(action)) return { error: "invalid" };
+    const amount = b?.amount != null ? Number(b.amount) : undefined;
+    if (action === "countered" && !(Number(amount) > 0)) {
+      return { error: "invalid", message: "Enter an amount." };
+    }
+    const r = await replyToCounter(offerId, me, action, amount);
+    return r.ok
+      ? { status: r.status, dealId: r.dealId ?? null, offerId: r.offerId ?? null }
+      : { error: r.why };
   }
 
   @Get("offers/mine")

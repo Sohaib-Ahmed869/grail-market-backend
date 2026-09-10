@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS offers (
   created_at timestamptz NOT NULL DEFAULT now(),
   settled_at timestamptz
 );
+-- The seller's counter, kept BESIDE the buyer's offer rather than on top of it.
+-- Countering used to overwrite the amount column, which erased the only record
+-- of what the buyer had offered: an A$11,800 offer countered at A$120,000 read
+-- back as an A$120,000 offer from the buyer. Both numbers matter — the screen
+-- has to say "you offered X, they want Y" — and only one of them was survived.
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS counter_amount numeric;
+-- Which offer this one replaces, when a buyer counters a counter. The chain is
+-- worth keeping: it is the negotiation.
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS replaces text;
+
 CREATE INDEX IF NOT EXISTS offers_listing ON offers (listing_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS offers_buyer ON offers (buyer_id, created_at DESC);
 
