@@ -52,6 +52,51 @@ export async function offersByBuyer(buyerId: string): Promise<Offer[]> {
   return r.rows;
 }
 
+/** Every offer on anything I am selling.
+ *
+ *  The mirror of `offersByBuyer`, and it did not exist. A seller could only
+ *  see offers by opening one listing at a time, so there was nowhere to
+ *  answer "has anybody offered on anything of mine" — and the app's only
+ *  offers screen shows the ones you MADE, which for a seller is empty and
+ *  reads as "nobody has offered". */
+export async function offersToSeller(sellerId: string): Promise<Offer[]> {
+  const pool = storePool();
+  if (!pool) return [];
+  const r = await pool.query(
+    `select o.*, l.card_name, l.image_url, l.price as asking,
+            l.grader, l.grade, l.set_name, l.status as listing_status
+       from offers o join listings l using (listing_id)
+      where l.seller_id = $1
+      order by (o.status = 'pending') desc, o.created_at desc`,
+    [sellerId],
+  );
+  return r.rows;
+}
+
+/** Does this person have a claim on this listing?
+ *
+ *  True for the buyer whose offer was accepted, and for either party to a
+ *  deal on it. That is the set of people a listing must stay visible to after
+ *  it stops being live — they bought it, or they are in the middle of handing
+ *  it over, and a page that answers "not available" to them is the app
+ *  losing track of a sale in progress. */
+export async function hasStakeIn(listingId: string, userId: string): Promise<boolean> {
+  const pool = storePool();
+  if (!pool) return false;
+  const r = await pool.query(
+    `select 1
+       from offers
+      where listing_id = $1 and buyer_id = $2 and status = 'accepted'
+      union all
+     select 1
+       from deals
+      where listing_id = $1 and (buyer_id = $2 or seller_id = $2)
+      limit 1`,
+    [listingId, userId],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
 export type SettleResult =
   | { ok: true; status: string; dealId?: string | null }
   | { ok: false; why: "not-found" | "not-yours" | "already-settled" };

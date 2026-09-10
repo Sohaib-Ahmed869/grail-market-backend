@@ -11,7 +11,7 @@ import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
 } from "./store.js";
-import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
+import { makeOffer, offersByBuyer, offersFor, settleOffer, offersToSeller, hasStakeIn } from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
@@ -82,8 +82,18 @@ export class ListingsController {
     const l = await getListing(id);
     if (!l) return { error: "not-found" };
     const me = need(req);
-    // A listing in review is visible to its seller and nobody else.
-    if (l.status !== "live" && l.seller_id !== me) return { error: "not-found" };
+    // A listing in review is visible to its seller and nobody else — but a
+    // listing that has STOPPED being live because somebody bought it has to
+    // stay visible to the person who bought it.
+    //
+    // Accepting an offer moves a listing to `reserved`, and this test then hid
+    // it from the buyer: their own offers list, the message thread and the
+    // notification all linked to a page that answered "Listing Not Available".
+    // It also meant the dispute entry point, which only renders on a sold
+    // listing, was reachable by the seller and never by the buyer — who is the
+    // one who would raise a dispute.
+    const partyToIt = Boolean(me) && (l.seller_id === me || (await hasStakeIn(id, me!)));
+    if (l.status !== "live" && !partyToIt) return { error: "not-found" };
     if (l.status === "live" && me !== l.seller_id) void bumpView(id);
     const shaped = l.seller_id === me ? sellerShape(l) : publicShape(l);
     // The bucket is not public, so the stored object URLs 403 for everyone.
@@ -411,7 +421,11 @@ export class ListingsController {
   async myOffers(@Req() req: Request) {
     const me = need(req);
     if (!me) return { error: "unauthenticated" };
-    return { offers: await offersByBuyer(me) };
+    // Both directions. A person is a buyer on some listings and a seller on
+    // others, and one screen that only ever showed one of those told half of
+    // them they had no offers.
+    const [made, received] = await Promise.all([offersByBuyer(me), offersToSeller(me)]);
+    return { offers: made, received };
   }
 }
 
