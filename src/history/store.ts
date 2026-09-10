@@ -102,8 +102,18 @@ export async function marketIndex(days = 90, basketSize = 40): Promise<{
   }
 
   const points = indexOf([...byCard.values()], from, to);
-  return points.length ? { points: downsample(points), basket: byCard.size, from, to } : null;
+  // Two cards over nine days came back as a basket, and the app drew a flat
+  // line at 100 with "+0.0%" over it. That is not a market index, it is two
+  // prices that did not move. No answer is the honest answer until the
+  // basket and the window are both wide enough to average anything.
+  if (byCard.size < INDEX_MIN_BASKET || points.length < INDEX_MIN_DAYS) return null;
+  return { points: downsample(points), basket: byCard.size, from, to };
 }
+
+/** Below these the "index" is a handful of cards, and a mean of a handful
+ *  says whatever the loudest one says. */
+const INDEX_MIN_BASKET = 10;
+const INDEX_MIN_DAYS = 14;
 
 /** What a collection has been worth, day by day.
  *

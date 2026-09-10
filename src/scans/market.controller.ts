@@ -9,12 +9,13 @@ import { searchCards } from "./search.js";
 import { cardMeta } from "./demand.js";
 import { cardHedgerStatus } from "./cardhedger.js";
 import { getSet, listSets } from "./sets.js";
-import { gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
+import { gameOfCard, gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { ebayShop, shopsFor, type ShopQuote } from "./shops.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
+import { printingsFor, priceIsAmbiguous } from "../printings/store.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
 import { identifyBySetCode } from "./setcode.js";
 
@@ -290,6 +291,27 @@ export class MarketController {
     };
   }
 
+  /** Every printing of one collector number, and whether they disagree.
+   *
+   *  Split out from `/market/price` because the scan result needs the same
+   *  answer without paying for the whole price chain — and because a scan
+   *  already knows which printing it saw, so it can name one rather than ask.
+   *  Both screens reading one source is what stops them disagreeing. */
+  @Get("printings")
+  async printings(
+    @Query("cardId") cardId?: string,
+    @Query("number") number?: string,
+    @Query("set") setName?: string,
+    @Query("game") game?: string,
+  ) {
+    const variants = await printingsFor({
+      game: game ?? gameOfCard(cardId ?? null),
+      number: number ?? null,
+      setName: setName ?? null,
+    });
+    return { variants, ambiguous: priceIsAmbiguous(variants) };
+  }
+
   @Get("price")
   async price(
     @Query("name") name?: string,
@@ -379,13 +401,34 @@ export class MarketController {
         : null,
     );
 
+    // Every printing this collector number has, from TCGplayer's own
+    // catalogue — see src/printings. This is the answer to the defect that
+    // priced a Red Super Alternate Art Luffy at A$197: five printings share
+    // one catalogue id here, so the expensive one had no address and the
+    // figure came from a text search of eBay instead.
+    const variants = await printingsFor({
+      // Told, or read off the id. The card page has never sent a game and
+      // adding it there would only fix the card page — a lookup that silently
+      // returns nothing when a caller omits an argument is the shape of a bug
+      // that comes back.
+      game: game ?? gameOfCard(cardId ?? null),
+      number: number ?? null,
+      setName: setName ?? null,
+    });
+    // When the printings disagree beyond a ratio, ONE number for all of them
+    // is a claim we cannot stand behind. Say so rather than pick one: the
+    // client is told which versions exist and asked which they hold.
+    const ambiguous = priceIsAmbiguous(variants);
+
     return {
       name,
       setName: setName ?? null,
       number: number ?? null,
       grader: grader ?? null,
       grade: grade_,
-      rawUsd: raw,
+      rawUsd: ambiguous ? null : raw,
+      variants,
+      variantsAmbiguous: ambiguous,
       byGrader: ppt.byGrader ?? null,
       // Which printing this is and how often it trades. Both have been in the
       // provider payload the whole time and neither ever reached a screen, so

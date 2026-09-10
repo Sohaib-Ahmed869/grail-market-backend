@@ -608,6 +608,22 @@ export async function gamesWithPreviews(): Promise<Game[]> {
  *  in the string; the caller has to find those another way. Returning a
  *  plausible-looking guess for them would put the bug back with the symptom
  *  hidden. */
+/** Which game a catalogue id belongs to, when the id says.
+ *
+ *  Callers that already know the game pass it; the card page does not, and
+ *  asking every screen to start doing so is a change in ten places that one
+ *  here covers. Only the prefixed catalogues can be read this way — a TCGdex
+ *  id is `<set>-<number>` with no game in it — so null is a real answer and
+ *  the caller must treat it as "unknown", never as a default. */
+export function gameOfCard(cardId: string | null | undefined): string | null {
+  const id = (cardId ?? "").trim();
+  if (!id) return null;
+  const cut = id.indexOf("-");
+  const prefix = cut > 0 ? id.slice(0, cut) : "";
+  if (!prefix || !PREFIXED.has(prefix)) return null;
+  return gameOfPrefix(prefix);
+}
+
 export function setIdOfCard(cardId: string): string | null {
   const cut = cardId.indexOf("-");
   const prefix = cut > 0 ? cardId.slice(0, cut) : "";
