@@ -126,21 +126,45 @@ export class CollectionController {
       // computed from the rows it can actually compare.
       return rate ? n / rate : NaN;
     };
-    const costs = held.map((e) => toUsd((e.paid ?? 0), e.currency ?? "AUD") * (e.quantity ?? 1));
-    const comparable = costs.every((c) => Number.isFinite(c));
-    const cost = comparable ? costs.reduce((a, c) => a + c, 0) : 0;
+    const paidUsd = (e: any) => toUsd((e.paid ?? 0), e.currency ?? "AUD") * (e.quantity ?? 1);
+
+    // What has been spent on everything still held. A true figure, and NOT the
+    // one the gain is measured against.
+    const spentAll = held.map(paidUsd);
+    const spent = spentAll.every((c) => Number.isFinite(c))
+      ? spentAll.reduce((a, c) => a + c, 0) : 0;
+
+    // The gain is computed over the rows that appear on BOTH sides of it.
+    //
+    // It used to subtract the cost of every held card from a value that only
+    // the priced ones contributed to, so a collection of five cards with one
+    // price and A$11,092 paid reported a loss of A$11,092 — it read as having
+    // lost everything, when the truth is that four of the cards have no price
+    // yet. A card with no market price cannot be up or down; it is unknown,
+    // and unknown is not zero.
+    const basis = held.filter((e) =>
+      e.value != null && e.paid != null && Number.isFinite(paidUsd(e)));
+    const cost = basis.reduce((a, e) => a + paidUsd(e), 0);
+    const basisValue = basis.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
+
     // What the sold ones went for, which is a different and also interesting
     // number rather than something to hide.
     const realised = entries
       .filter((e) => e.market?.settled)
       .reduce((a, e) => a + (toUsd(e.market?.price ?? 0, e.market?.currency ?? "AUD") || 0), 0);
     return {
-      entries, value, cost, realised,
-      // Only when both sides are in the same currency. A gain nobody can
-      // compute is reported as null, which the app draws as nothing — rather
-      // than as zero, which is a claim that the collection is exactly break
-      // even.
-      gain: comparable ? value - cost : null,
+      entries, value, realised,
+      // US dollars. `cost` is what was paid for the cards the gain covers, so
+      // "up X against Y paid" compares like with like; `spent` is what was
+      // paid for everything still held.
+      cost, spent,
+      // Nothing comparable is reported as null, which the app draws as
+      // nothing — rather than as zero, which is a claim that the collection is
+      // exactly break even.
+      gain: basis.length > 0 ? basisValue - cost : null,
+      // How much of the collection that comparison actually covers. The app
+      // says so out loud when it is not all of it.
+      gainCards: basis.length,
       held: held.length, sold: entries.length - held.length,
       // Said plainly: a total that silently skips unpriced cards reads as the
       // whole collection and is not.
