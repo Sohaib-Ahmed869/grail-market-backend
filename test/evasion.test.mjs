@@ -161,3 +161,31 @@ test("an explained number contributes nothing to the score", () => {
     assert.equal(loosePieces(m).digits, 0, m);
   }
 });
+
+test("one digit per message, spelled out, ten messages long", () => {
+  // The slowest way to do it, and the one that worked: a lone digit is a
+  // quantity in a sentence, so every one of these was skipped.
+  const said = [];
+  const send = (m) => {
+    const v = weigh(m, [...said].reverse());
+    said.push(m);
+    return v;
+  };
+  const words = ["Zero", "Four", "One", "Two", "Three", "Four", "Five", "Six", "Seven"];
+  const results = words.map(send);
+  assert.ok(results.some((r) => r.masked), "ten one-word digits went through");
+});
+
+test("answering a question with a number is not a phone number", () => {
+  const said = [];
+  const send = (m) => {
+    const v = weigh(m, [...said].reverse());
+    said.push(m);
+    return v;
+  };
+  // Short numeric answers in a real conversation. Nobody is reading out a
+  // number here and nothing should be masked.
+  for (const m of ["yes", "2 of them", "no", "just 1", "ok", "3 left"]) {
+    assert.equal(send(m).masked, false, `masked: ${m}`);
+  }
+});

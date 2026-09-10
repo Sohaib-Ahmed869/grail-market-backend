@@ -91,13 +91,23 @@ export function loosePieces(input: string): Pieces {
   const spans: { from: number; to: number }[] = [];
   let digits = 0;
 
+  /* A message that is one digit and nothing else.
+   *
+   * "One", then "Two", then "One", then "Six" — four messages, one digit each,
+   * and the rule below skipped every one of them because a lone digit is a
+   * quantity. In a sentence it is. On its own it is somebody reading a number
+   * out one character at a time, which is the slowest and most obvious way to
+   * do this and was, until now, the only one that worked. So a bare message
+   * counts its digits however few they are; a digit inside a sentence still
+   * has to come in twos. */
+  const alone = isBare(f.text);
+  const floor = alone ? 1 : 2;
+
   for (const m of f.text.matchAll(/\d(?:[\s.\-()]*\d)*/g)) {
     const run = m[0];
     const at = m.index ?? 0;
     const only = run.replace(/\D/g, "");
-    // A single digit is a quantity. Two is the smallest piece anybody bothers
-    // to split a number into.
-    if (only.length < 2) continue;
+    if (only.length < floor) continue;
     if (isYear(only)) continue;
 
     const before = f.text.slice(Math.max(0, at - 20), at);
@@ -115,7 +125,7 @@ export function loosePieces(input: string): Pieces {
   return {
     digits, spans, pieces: spans.length,
     intent: INTENT.test(f.text),
-    bare: digits > 0 && isBare(f.text),
+    bare: digits > 0 && alone,
   };
 }
 
