@@ -1,5 +1,6 @@
 import { storePool } from "../cards.store.js";
 import { groupsFor, setContents, variantOf, CATEGORY, type TcgProduct } from "./tcgcsv.js";
+import { asksByProduct } from "./asks.js";
 
 /** Printings: one row per physically distinct card, which our catalogue does
  *  not have and cannot get to.
@@ -36,7 +37,13 @@ CREATE TABLE IF NOT EXISTS printings (
   image_url    text,
   url          text,
   sub_type     text,
+  -- sale-derived, from TCGplayer. Absent on the scarcest cards, which are
+  -- exactly the ones worth getting right.
   market_usd   numeric,
+  -- the lowest Near Mint copy someone is LISTING, from JustTCG, joined on
+  -- the TCGplayer product id. An ask, never merged into the market price.
+  listed_usd   numeric,
+  listed_cond  text,
   low_usd      numeric,
   high_usd     numeric,
   fetched_at   timestamptz NOT NULL DEFAULT now()
@@ -48,6 +55,8 @@ CREATE TABLE IF NOT EXISTS printings (
  *  because a table that already exists never re-runs its column list. */
 const PRINTINGS_MIGRATE = `
 ALTER TABLE printings ADD COLUMN IF NOT EXISTS number_key text;
+ALTER TABLE printings ADD COLUMN IF NOT EXISTS listed_usd numeric;
+ALTER TABLE printings ADD COLUMN IF NOT EXISTS listed_cond text;
 CREATE INDEX IF NOT EXISTS printings_lookup ON printings (game, group_id, number_key);
 CREATE INDEX IF NOT EXISTS printings_group  ON printings (game, group_id);
 `;
@@ -67,9 +76,13 @@ export type Printing = {
   imageUrl: string | null;
   url: string | null;
   subType: string | null;
+  /** From completed sales. Null on a card with none — say so, never guess. */
   marketUsd: number | null;
   lowUsd: number | null;
   highUsd: number | null;
+  /** The cheapest Near Mint copy currently listed. An ASK. */
+  listedUsd: number | null;
+  listedCondition: string | null;
 };
 
 /** Which of their sets is ours.
@@ -137,23 +150,26 @@ async function ingest(game: string, groupId: number, setName: string): Promise<n
   }
 
   const code = (await groupsFor(game)).find((g) => g.groupId === groupId)?.abbreviation ?? null;
+
   const rows = products.map((x: TcgProduct) => {
     const pr = best.get(x.productId);
     return [
       x.productId, game, groupId, code, setName, x.number, numberKey(x.number),
       x.name, variantOf(x.name), x.rarity, x.imageUrl, x.url,
       pr?.subTypeName ?? null, pr?.marketPrice ?? null, pr?.lowPrice ?? null, pr?.highPrice ?? null,
+      null, null,   // asks are fetched per card viewed — see printingsFor
     ];
   });
 
   const values = rows
-    .map((_, i) => `(${Array.from({ length: 16 }, (_, k) => `$${i * 16 + k + 1}`).join(",")})`)
+    .map((_, i) => `(${Array.from({ length: 18 }, (_, k) => `$${i * 18 + k + 1}`).join(",")})`)
     .join(",");
 
   await pool.query(
     `insert into printings
        (product_id, game, group_id, set_code, set_name, number, number_key, name,
-        variant, rarity, image_url, url, sub_type, market_usd, low_usd, high_usd)
+        variant, rarity, image_url, url, sub_type, market_usd, low_usd, high_usd,
+        listed_usd, listed_cond)
      values ${values}
      on conflict (product_id) do update set
        -- Everything derived, not just the prices. A row written before a
@@ -167,6 +183,10 @@ async function ingest(game: string, groupId: number, setName: string): Promise<n
        set_code   = excluded.set_code,
        set_name   = excluded.set_name,
        market_usd = excluded.market_usd,
+       -- coalesce, because a set ingest does not fetch asks and must not
+       -- erase the one this card already has.
+       listed_usd = coalesce(excluded.listed_usd, printings.listed_usd),
+       listed_cond = coalesce(excluded.listed_cond, printings.listed_cond),
        low_usd    = excluded.low_usd,
        high_usd   = excluded.high_usd,
        image_url  = excluded.image_url,
@@ -211,10 +231,10 @@ export async function printingsFor(a: {
   const read = async () => {
     const r = await pool.query(
       `select product_id, name, variant, rarity, image_url, url, sub_type,
-              market_usd, low_usd, high_usd, fetched_at
+              market_usd, low_usd, high_usd, listed_usd, listed_cond, fetched_at
          from printings
         where game = $1 and group_id = $2 and number_key = $3
-        order by coalesce(market_usd, 0) desc`,
+        order by coalesce(listed_usd, market_usd, 0) desc`,
       [game, group.groupId, key],
     );
     return r.rows;
@@ -236,6 +256,27 @@ export async function printingsFor(a: {
     try { await job; rows = await read(); } catch { /* stale beats nothing */ }
   }
 
+  // The asking market for this one card, fetched on the way past.
+  //
+  // An ask is what a card is going for TODAY; a sale is what one went for at
+  // some point in the past, and on a card that trades a few times a year that
+  // past can be months old. So the ask leads, and it is fetched per card
+  // viewed rather than per set — a set ingest would spend one feed request
+  // per card number in it, which for a 173-card set is 173 requests to
+  // answer a question nobody asked.
+  const asks = await asksByProduct(game, number);
+  if (asks.size) {
+    // Written back so the next reader has it without another request.
+    await Promise.all(
+      [...asks].map(([pid, a]) =>
+        pool.query(
+          `update printings set listed_usd = $2, listed_cond = $3 where product_id = $1`,
+          [pid, a.usd, a.condition],
+        ).catch(() => {}),
+      ),
+    );
+  }
+
   return rows.map((r: any) => ({
     productId: Number(r.product_id),
     name: r.name,
@@ -247,6 +288,8 @@ export async function printingsFor(a: {
     marketUsd: r.market_usd == null ? null : Number(r.market_usd),
     lowUsd: r.low_usd == null ? null : Number(r.low_usd),
     highUsd: r.high_usd == null ? null : Number(r.high_usd),
+    listedUsd: asks.get(Number(r.product_id))?.usd ?? (r.listed_usd == null ? null : Number(r.listed_usd)),
+    listedCondition: asks.get(Number(r.product_id))?.condition ?? r.listed_cond ?? null,
   }));
 }
 
@@ -257,7 +300,7 @@ export async function printingsFor(a: {
 export const SPREAD_LIMIT = 3;
 
 export function priceIsAmbiguous(list: Printing[]): boolean {
-  const priced = list.map((p) => p.marketUsd).filter((n): n is number => n != null && n > 0);
+  const priced = list.map((p) => p.listedUsd ?? p.marketUsd).filter((n): n is number => n != null && n > 0);
   if (priced.length < 2) return false;
   return Math.max(...priced) / Math.min(...priced) > SPREAD_LIMIT;
 }
