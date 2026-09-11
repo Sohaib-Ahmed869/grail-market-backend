@@ -7,7 +7,10 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from .pipeline import run_pipeline
-from .pipeline.match import dhash, fetch_image, similarity
+from .pipeline.match import (
+    combined_similarity, dhash, fetch_image, hue_signature, hue_similarity,
+    similarity,
+)
 
 app = FastAPI(title="grailcard-vision", version="0.1.0")
 
@@ -98,17 +101,27 @@ async def visual_similarity(
     if img is None:
         raise HTTPException(status_code=422, detail="could not decode image")
     img = _fit_input(img, "similarity")
-    reference = dhash(img)
+    ref_struct = dhash(img)
+    ref_colour = hue_signature(img)
 
     scores = []
     for url in json.loads(urls)[:6]:
         candidate = fetch_image(url)
+        if candidate is None:
+            scores.append({"url": url, "similarity": None})
+            continue
+        # Both halves travel, not just the number the caller acts on. When a
+        # printing choice later turns out wrong, the two scores say WHICH
+        # measure was fooled, and that is the difference between fixing it and
+        # guessing at it.
+        struct = similarity(ref_struct, dhash(candidate))
+        colour = hue_similarity(ref_colour, hue_signature(candidate))
         scores.append(
             {
                 "url": url,
-                "similarity": similarity(reference, dhash(candidate))
-                if candidate is not None
-                else None,
+                "similarity": combined_similarity(struct, colour),
+                "structure": struct,
+                "colour": colour,
             }
         )
     return {"scores": scores}

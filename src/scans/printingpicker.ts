@@ -16,18 +16,34 @@ import { normaliseVisionUrl } from "./visionurl.js";
 // catalogue returned the base art and the Alternate Art, we took the first, and
 // priced a $10 card at $2.
 //
-// dHash rather than embeddings: it is already here, it needs no model, and the
-// question is narrow — not "which of 20,000 cards is this" but "which of these
-// two or three pictures of the same card". Measured on that Koby pair, two
-// printings of one number score 0.64 against each other, so a photograph of one
-// of them has plenty of room to prefer its own.
+// Two measures, not one, and the second is the one that pays.
+//
+// dHash alone was here first: a 64-bit gradient signature over an 8x9
+// greyscale thumbnail. It is right about 98% of the time, and it is colour
+// blind by construction — which is fatal on exactly the cards that matter,
+// because the difference between a Super Alternate Art and a Red Super
+// Alternate Art is that one of them is red. Measured over 264 simulated phone
+// photos of the demo-cards set, dHash's winning margin on the US$19,999 Red
+// Super Alternate Art averaged 0.031, under the threshold below. So it
+// declined, the caller fell back to catalogue order, and the base card was
+// priced. That IS the A$197 defect.
+//
+// The vision service now scores colour alongside structure, normalised for
+// light and stripped of glare (see vision/app/pipeline/match.py for why the
+// naive version is worse than nothing). On the same 264 trials the pair was
+// right every time and never had to decline, and the margin on that card went
+// from 0.031 to 0.220.
 
 const VISION_URL = normaliseVisionUrl(process.env.VISION_URL);
 
 /** How far ahead the best match must be before the picture is allowed to
- *  decide. Set from measurement, not taste: two printings of one number score
- *  about 0.64 against each other, so a real match should clear the runner-up by
- *  a good deal more than the 0.016 seen when dHash is simply guessing. */
+ *  decide.
+ *
+ *  Set from measurement, not taste. Under realistic photography the combined
+ *  measure's margin on a correct pick averaged 0.279 and never fell below this
+ *  line; when the two measures genuinely disagree it collapses, which is the
+ *  case this threshold exists to catch. Raising it does not buy accuracy — it
+ *  buys questions the app has to ask the member. */
 const MIN_MARGIN = 0.05;
 
 export type PrintingCandidate = {
@@ -51,6 +67,7 @@ export type PrintingChoice<T> = {
 async function visualScores(
   warpedImageB64: string,
   urls: string[],
+  parts: Map<string, { structure: number; colour: number }>,
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (urls.length === 0) return out;
@@ -71,9 +88,21 @@ async function visualScores(
       return out;
     }
     const data = (await res.json()) as {
-      scores: { url: string; similarity: number | null }[];
+      scores: {
+        url: string;
+        similarity: number | null;
+        /** the two halves, for the log line when a pick turns out wrong */
+        structure?: number;
+        colour?: number;
+      }[];
     };
-    for (const s of data.scores) if (s.similarity != null) out.set(s.url, s.similarity);
+    for (const s of data.scores) {
+      if (s.similarity == null) continue;
+      out.set(s.url, s.similarity);
+      if (s.structure != null && s.colour != null) {
+        parts.set(s.url, { structure: s.structure, colour: s.colour });
+      }
+    }
   } catch (err) {
     console.warn(`[printing] visual match unavailable: ${(err as Error).message}`);
   }
@@ -101,7 +130,10 @@ export async function pickPrinting<T extends PrintingCandidate>(
   }
 
   const urls = candidates.map((c) => c.imageUrl).filter((u): u is string => Boolean(u));
-  const scores = warpedImageB64 ? await visualScores(warpedImageB64, urls) : new Map();
+  const parts = new Map<string, { structure: number; colour: number }>();
+  const scores = warpedImageB64
+    ? await visualScores(warpedImageB64, urls, parts)
+    : new Map<string, number>();
 
   const ranked = candidates
     .map((candidate) => ({
@@ -139,10 +171,13 @@ export async function pickPrinting<T extends PrintingCandidate>(
     return { pick: candidates[0], ranked, method: "fallback", margin };
   }
 
+  const half = scored[0].imageUrl ? parts.get(scored[0].imageUrl) : undefined;
   console.log(
     `[printing] ${scored.length} printings compared -> "${
       (scored[0].candidate.label ?? "").slice(0, 40)
-    }" ${scored[0].score?.toFixed(3)}` + (margin != null ? ` (margin ${margin.toFixed(3)})` : ""),
+    }" ${scored[0].score?.toFixed(3)}` +
+      (half ? ` [structure ${half.structure.toFixed(3)} colour ${half.colour.toFixed(3)}]` : "") +
+      (margin != null ? ` (margin ${margin.toFixed(3)})` : ""),
   );
   return { pick: scored[0].candidate, ranked, method: "visual", margin };
 }

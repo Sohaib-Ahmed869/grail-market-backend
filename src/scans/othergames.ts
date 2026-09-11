@@ -209,6 +209,27 @@ export async function identifyOnePiece(
   );
   const c: Record<string, any> = choice?.pick ?? printings[0];
 
+  /* The ranking, carried rather than dropped.
+   *
+   * This used to keep `pick` and discard `ranked`, `method` and `margin`, so
+   * everything downstream saw a name and nothing else. On a low-confidence
+   * result that name is the BASE card's — the picker falls back to catalogue
+   * order — and the app, re-deriving the printing by looking for a variant
+   * word inside it, found none and asked the member. The system knew which
+   * card it was and could not say so. */
+  const printingChoice = choice
+    ? {
+        method: choice.method,
+        margin: choice.margin ?? null,
+        label: String(c.card_name ?? "") || null,
+        ranked: choice.ranked.map((r) => ({
+          label: String(r.candidate.card_name ?? r.candidate.label ?? ""),
+          imageUrl: r.imageUrl ?? null,
+          score: r.score ?? null,
+        })),
+      }
+    : null;
+
   const identification: Identification = {
     // The printing has to be part of the id. Both printings of OP11-119 carry
     // the same card_set_id, so keying on that alone made them one card to every
@@ -230,6 +251,7 @@ export async function identifyOnePiece(
     matchScore: 1, // exact set-code match
     ocrName: setCode.toUpperCase(),
     game: "onepiece",
+    printingChoice,
   };
   const market = c.market_price != null ? Number(c.market_price) : null;
   const valuation: Valuation | null =
