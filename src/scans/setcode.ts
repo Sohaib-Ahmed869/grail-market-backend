@@ -167,6 +167,18 @@ export function isSealedProduct(labelLines: (string | null | undefined)[]): bool
 // by exactly that shape.
 const OP_CARD_RE = /(OP|ST|EB|PRB)([0-9O]{2})\s*[-–—]?\s*([0-9O]{3})/i;
 
+// Promos break the shape above: they are "P-043", one letter and no set
+// number, so every rule written around a two-letter prefix and a two-digit set
+// missed them entirely. A PSA 10 of the 2nd Anniversary Tournament Luffy came
+// back with a blank card number, which meant the marketplace search was
+// "Monkey.D.Luffy PSA 10" with nothing to pin it — and it priced whichever
+// Luffy it found, US$150 against a market of US$190.
+//
+// Kept strict where the pattern above can afford to be generous: the separator
+// is required, the number is exactly three digits, and the P must start a word.
+// A lone P with a dash is too common a shape to match loosely.
+const OP_PROMO_RE = /(?:^|[^A-Z0-9])P\s*[-–—]\s*([0-9O]{3})(?![0-9])/i;
+
 /** The One Piece card number printed on the card face, or null.
  *
  *  Vision's own setCode reader is Pokemon-Japanese and returns nothing here,
@@ -175,7 +187,15 @@ const OP_CARD_RE = /(OP|ST|EB|PRB)([0-9O]{2})\s*[-–—]?\s*([0-9O]{3})/i;
 export function readOnePieceCode(texts: (string | null | undefined)[]): string | null {
   const hay = texts.filter(Boolean).join(" ");
   const m = OP_CARD_RE.exec(hay);
-  if (!m) return null;
+  if (!m) {
+    // A promo has no set number to read, and it is still the only thing that
+    // makes a search for this card specific.
+    const promo = OP_PROMO_RE.exec(hay);
+    if (promo && /\d/.test(promo[1])) {
+      return `P-${promo[1].replace(/[oO]/g, "0")}`;
+    }
+    return null;
+  }
   // Check for real digits BEFORE substituting, or the substitution creates the
   // digits the check is looking for and "OPOO-OOO" reads as OP00-000.
   if (!/\d/.test(m[2]) || !/\d/.test(m[3])) return null;

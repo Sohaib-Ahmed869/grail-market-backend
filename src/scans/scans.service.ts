@@ -1123,7 +1123,20 @@ export class ScansService {
             name: scan.identification.name,
             setName: scan.identification.setName,
             game: scan.identification.game ?? null,
-            number: scan.identification.localId,
+            /* The number we READ, when the catalogue could not give us one.
+             *
+             * `localId` comes from a catalogue match, and a card no catalogue
+             * covers has none — which is every One Piece promo, since the
+             * provider 404s on P-043. The number is then dropped and the
+             * search becomes "Monkey.D.Luffy PSA 10" with nothing to pin it,
+             * so it prices whichever Luffy it finds: US$150 against a market
+             * of US$190. What we read off the card is not as good as a
+             * catalogue id, and it is far better than nothing. */
+            number:
+              scan.identification.localId ||
+              readOnePieceCode(frontRes.ocr?.texts ?? []) ||
+              frontRes.ocr?.setCode ||
+              null,
             grader: askGrader,
             grade: askGrade,
             // Beckett's 10 is two products; ask for the one on this holder.

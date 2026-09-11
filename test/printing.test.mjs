@@ -158,3 +158,27 @@ test("the base print is not swallowed by an alt art listing", () => {
   // still be ours. Silence on OUR side is still not a conflict.
   assert.equal(comparePrinting(base, readPrinting("OP13-118 Alternate Art")), "unknown");
 });
+
+// One Piece promos are numbered "P-043" — one letter, no set number — so every
+// rule built around a two-letter prefix and a two-digit set missed them. The
+// number is the only thing that makes a marketplace search for a promo
+// specific, and without it a PSA 10 of the 2nd Anniversary Luffy was priced
+// from whichever Luffy the search happened to find.
+test("a One Piece promo number is read", async () => {
+  const { readOnePieceCode } = await import("../src/scans/setcode.js");
+  assert.equal(readOnePieceCode(["MONKEY.D.LUFFY", "P-043", "STRAW HAT CREW"]), "P-043");
+  assert.equal(readOnePieceCode(["2ND ANNIVERSARY", "P–043"]), "P-043");
+  // OCR reads zero as the letter O about as often as not.
+  assert.equal(readOnePieceCode(["P-O43"]), "P-043");
+});
+
+test("the ordinary set-code shape still wins", async () => {
+  const { readOnePieceCode } = await import("../src/scans/setcode.js");
+  assert.equal(readOnePieceCode(["OP13-118 MONKEY.D.LUFFY"]), "OP13-118");
+});
+
+test("a stray P and a number is not a promo", async () => {
+  const { readOnePieceCode } = await import("../src/scans/setcode.js");
+  assert.equal(readOnePieceCode(["HP-043"]), null);
+  assert.equal(readOnePieceCode(["P-43"]), null);
+});
