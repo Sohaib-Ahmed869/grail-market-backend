@@ -986,19 +986,40 @@ export async function fetchListings(opts: {
     if (cardPrinting.family || cardPrinting.language) {
       const matched = filtered.filter((l) => l.printingMatch === "match");
       const conflicting = filtered.filter((l) => l.printingMatch === "conflict");
+
+      // What we set aside, reported whether or not we could narrow. The card
+      // number alone does not identify a product and the interface should be
+      // able to say so even when the narrowing failed.
+      const byName = new Map<string, number[]>();
+      for (const l of conflicting) {
+        if (l.price == null) continue;
+        const n = l.printing ?? "other printing";
+        byName.set(n, [...(byName.get(n) ?? []), l.price]);
+      }
+      for (const [name, ps] of byName) {
+        ps.sort((a, b) => a - b);
+        otherPrintings.push({ name, count: ps.length, low: ps[0], high: ps[ps.length - 1] });
+      }
+      otherPrintings.sort((a, b) => b.count - a.count);
+
+      // A listing that NAMES a different printing is a different product, and
+      // it goes whatever the counts say.
+      //
+      // It used to survive unless at least three listings positively declared
+      // ours — and the scarcer the printing, the less likely three exist. So on
+      // the chase cards, the ones this whole path exists for, the filter
+      // switched itself off and the panel showed the base card's asks beside a
+      // correctly identified card worth a thousand times more. Silence is still
+      // treated as silence: a listing that says nothing about its printing is
+      // weak evidence, not wrong evidence, and it stays.
+      if (conflicting.length > 0) {
+        const known = new Set(conflicting);
+        filtered = filtered.filter((l) => !known.has(l));
+      }
+
+      // Narrowing to ONLY the listings that declare our printing is a stronger
+      // claim and still needs enough of them to stand on its own.
       if (matched.length >= 3) {
-        // report what we set aside, so the interface can name the alternatives
-        const byName = new Map<string, number[]>();
-        for (const l of conflicting) {
-          if (l.price == null) continue;
-          const n = l.printing ?? "other printing";
-          byName.set(n, [...(byName.get(n) ?? []), l.price]);
-        }
-        for (const [name, ps] of byName) {
-          ps.sort((a, b) => a - b);
-          otherPrintings.push({ name, count: ps.length, low: ps[0], high: ps[ps.length - 1] });
-        }
-        otherPrintings.sort((a, b) => b.count - a.count);
         filtered = matched;
         filteredToPrinting = true;
       }

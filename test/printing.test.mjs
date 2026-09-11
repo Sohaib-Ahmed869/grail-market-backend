@@ -117,3 +117,44 @@ test("Unlimited is a printing, not the absence of one", () => {
   // left unmatched, a 179-day-old Unlimited listing set the ceiling for a 1st Ed card
   assert.equal(comparePrinting(first, unl), "conflict");
 });
+
+// A listing that NAMES a different printing is a different product.
+//
+// The listing panel used to keep those unless at least three listings
+// positively declared OUR printing — and the scarcer a printing is, the less
+// likely three exist. So on the chase cards the filter switched itself off and
+// showed the base card's asks beside a correctly identified card worth a
+// thousand times more. That is the shape the two rules below pin.
+test("a conflicting printing is known-wrong, not merely unmatched", () => {
+  const red = readPrinting("Monkey.D.Luffy OP13-118 Red Super Alternate Art");
+  const wanted = readPrinting("Monkey.D.Luffy OP13-118 Wanted Poster");
+  assert.equal(comparePrinting(red, wanted), "conflict");
+});
+
+test("silence about the printing is not a conflict", () => {
+  const red = readPrinting("Monkey.D.Luffy OP13-118 Red Super Alternate Art");
+  // Most sellers write no printing at all. That is weak evidence, not wrong
+  // evidence, and it must not be discarded the way a conflict is.
+  const silent = readPrinting("Monkey.D.Luffy OP13-118 NM English");
+  assert.equal(comparePrinting(red, silent), "unknown");
+});
+
+test("a modifier-only card still matches its own printing", () => {
+  const red = readPrinting("Monkey.D.Luffy OP13-118 Red Super Alternate Art");
+  assert.equal(
+    comparePrinting(red, readPrinting("OP13-118 Luffy Super Alternate Art PSA 10")),
+    "match",
+  );
+});
+
+test("a modifier-only card does not conflict with a silent listing", () => {
+  const red = readPrinting("Monkey.D.Luffy OP13-118 Red Super Alternate Art");
+  assert.equal(comparePrinting(red, readPrinting("OP13-118 Luffy")), "unknown");
+});
+
+test("the base print is not swallowed by an alt art listing", () => {
+  const base = readPrinting("Monkey.D.Luffy OP13-118");
+  // Our own card declares nothing, so a listing that declares something may
+  // still be ours. Silence on OUR side is still not a conflict.
+  assert.equal(comparePrinting(base, readPrinting("OP13-118 Alternate Art")), "unknown");
+});

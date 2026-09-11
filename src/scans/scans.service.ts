@@ -969,6 +969,21 @@ export class ScansService {
     // number is what makes a search specific; without it "Charizard Base Set
     // 1st Edition" matches a category, and a stale $8.95 listing in that
     // category capped a raw Base Set Charizard that TCGplayer prices at $489.
+    /* The printing the PICTURES decided, added to the hints the listing search
+     * reads.
+     *
+     * Everything else in this list came off the card as text — OCR, a set
+     * code, the LLM's reading of the title. For most expensive printings there
+     * IS no text: "Red Super Alternate Art" is a collector's term for an
+     * artwork treatment and is printed nowhere on the card. So the listing
+     * search was told nothing about the printing on exactly the cards where it
+     * matters, could not narrow, and showed the base card's listings beside a
+     * correctly identified chase card. */
+    const decided = scan.identification?.printingChoice;
+    if (decided && decided.method !== "fallback" && decided.label) {
+      printingHints.push(decided.label);
+    }
+
     const rawSpecialPrinting =
       !askGrader &&
       Boolean(readPrinting(printingHints.join(" ")).family) &&
