@@ -5,6 +5,10 @@ import { storePool } from "../cards.store.js";
 import { callerId } from "../auth/auth.controller.js";
 import { gradedPricesFor } from "../scans/pricing.js";
 import { valueOfEntry, type Unpriced } from "./collectionvalue.js";
+import { marketStatusForOwner } from "./deals.js";
+import { fxRates } from "../scans/fx.js";
+import { currentShare, revokeShare, shareToken } from "../sharing/store.js";
+import { sharedView } from "../sharing/view.js";
 
 @Controller("collection")
 export class CollectionController {
@@ -23,6 +27,32 @@ export class CollectionController {
     const r = await pool.query(
       "select * from collection where user_id = $1 order by added_at desc", [me],
     );
+
+    // What each of these cards is doing on the market. A collection that
+    // cannot tell you a card is listed — or that it has already gone — is a
+    // list of things you might still own, which is not what it says it is.
+    //
+    // Handed out ONE TO AN ENTRY. A listing is one physical card, and a
+    // collector can own several of the same: matching purely on card identity
+    // meant selling one of two identical PSA 10s marked both of them sold and
+    // took both out of the value, which loses the owner a card they still
+    // hold. Each listing is claimed by the first entry it fits and then spent.
+    const unclaimed = await marketStatusForOwner(me);
+    const claim = (key: string) => {
+      const i = unclaimed.findIndex((m) => m.key === key);
+      return i === -1 ? undefined : unclaimed.splice(i, 1)[0];
+    };
+    // Claimed in one synchronous pass, BEFORE the pricing below. The rows are
+    // priced concurrently, so doing it inside that map would hand listings out
+    // in whatever order the price lookups happened to finish — the right
+    // number of them, to unpredictable rows.
+    const claimed = new Map<string, ReturnType<typeof claim>>();
+    for (const e of r.rows) {
+      claimed.set(
+        e.entry_id,
+        claim(`${e.catalog_id}|${e.grader ?? ""}|${e.grade ?? ""}`),
+      );
+    }
 
     const entries = await Promise.all(
       r.rows.map(async (e: any) => {
@@ -51,9 +81,18 @@ export class CollectionController {
           grader: e.grader, grade: e.grade, variant: e.variant ?? null,
           quantity: e.quantity ?? 1,
           paid: e.paid == null ? null : Number(e.paid),
+          // What that `paid` is DENOMINATED in. It was dropped on the way out,
+          // so a cost in Australian dollars was subtracted from a value in US
+          // dollars and the difference called a gain.
+          currency: e.currency ?? "AUD",
           // `unpriced` says WHY there is no figure. "grade" is the owner's to
           // fix and the screen offers the edit; the other two are ours.
           value, unpriced, addedAt: e.added_at,
+          // Listed, agreed, or gone. Named rather than left as the listing's
+          // own status word, because `in_review` and `reserved` mean nothing
+          // to the person who owns the card — what they want to know is
+          // whether it is still theirs and whether the money has happened.
+          market: describe(claimed.get(e.entry_id)),
         };
       }),
     );
@@ -61,14 +100,113 @@ export class CollectionController {
     // Quantity multiplies both sides. Four of the same card is four cards in
     // the total, and a paid price is per card — the earlier version counted
     // one of each and quietly under-reported anyone holding playsets.
-    const value = entries.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
-    const cost = entries.reduce((a, e) => a + (e.paid ?? 0) * (e.quantity ?? 1), 0);
+    //
+    // A card that has SOLD is not in the total. It is not owned any more, and
+    // counting it means a collection value that goes up when you sell and
+    // never comes down — the one number in this product people check daily,
+    // wrong in their own favour. The row stays, marked sold, because the
+    // history is worth keeping; the money is not theirs to still be holding.
+    const held = entries.filter((e) => !e.market?.settled);
+    const value = held.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
+
+    // `paid` is stored in whatever currency the buyer paid in; `value` comes
+    // from the price provider in US dollars. Subtracting one from the other
+    // gave a gain that was neither — a card bought for A$6,235 and worth
+    // US$4,250 reported a loss of 1,985 of nothing. Both sides are put in US
+    // dollars here, which is the currency `value` is already in and the one
+    // the clients convert from.
+    const fx = await fxRates().catch(() => null);
+    const toUsd = (n: number, currency: string) => {
+      if (!n) return 0;
+      const c = (currency || "USD").toUpperCase();
+      if (c === "USD") return n;
+      const rate = fx?.rates?.[c];
+      // No rate is not a reason to invent one. A cost we cannot express in the
+      // same currency as the value is left out of both, so the gain is
+      // computed from the rows it can actually compare.
+      return rate ? n / rate : NaN;
+    };
+    const paidUsd = (e: any) => toUsd((e.paid ?? 0), e.currency ?? "AUD") * (e.quantity ?? 1);
+
+    // What has been spent on everything still held. A true figure, and NOT the
+    // one the gain is measured against.
+    const spentAll = held.map(paidUsd);
+    const spent = spentAll.every((c) => Number.isFinite(c))
+      ? spentAll.reduce((a, c) => a + c, 0) : 0;
+
+    // The gain is computed over the rows that appear on BOTH sides of it.
+    //
+    // It used to subtract the cost of every held card from a value that only
+    // the priced ones contributed to, so a collection of five cards with one
+    // price and A$11,092 paid reported a loss of A$11,092 — it read as having
+    // lost everything, when the truth is that four of the cards have no price
+    // yet. A card with no market price cannot be up or down; it is unknown,
+    // and unknown is not zero.
+    const basis = held.filter((e) =>
+      e.value != null && e.paid != null && Number.isFinite(paidUsd(e)));
+    const cost = basis.reduce((a, e) => a + paidUsd(e), 0);
+    const basisValue = basis.reduce((a, e) => a + (e.value ?? 0) * (e.quantity ?? 1), 0);
+
+    // What the sold ones went for, which is a different and also interesting
+    // number rather than something to hide.
+    const realised = entries
+      .filter((e) => e.market?.settled)
+      .reduce((a, e) => a + (toUsd(e.market?.price ?? 0, e.market?.currency ?? "AUD") || 0), 0);
     return {
-      entries, value, cost, gain: value - cost,
+      entries, value, realised,
+      // US dollars. `cost` is what was paid for the cards the gain covers, so
+      // "up X against Y paid" compares like with like; `spent` is what was
+      // paid for everything still held.
+      cost, spent,
+      // Nothing comparable is reported as null, which the app draws as
+      // nothing — rather than as zero, which is a claim that the collection is
+      // exactly break even.
+      gain: basis.length > 0 ? basisValue - cost : null,
+      // How much of the collection that comparison actually covers. The app
+      // says so out loud when it is not all of it.
+      gainCards: basis.length,
+      held: held.length, sold: entries.length - held.length,
       // Said plainly: a total that silently skips unpriced cards reads as the
       // whole collection and is not.
-      priced: entries.filter((e) => e.value != null).length,
+      priced: held.filter((e) => e.value != null).length,
     };
+  }
+
+  /** My share link — minted on first ask, the same one thereafter. */
+  @Post("share")
+  async share(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated", message: "Sign in to share your collection." };
+    const token = await shareToken(me);
+    return token ? { token } : { error: "no-store" };
+  }
+
+  @Get("share")
+  async myShare(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    return { token: await currentShare(me) };
+  }
+
+  /** Turn the link off. Every copy of it stops working at once. */
+  @Delete("share")
+  async unshare(@Req() req: Request) {
+    const me = callerId(req);
+    if (!me) return { error: "unauthenticated" };
+    return { revoked: await revokeShare(me) };
+  }
+
+  /** Somebody else's collection, by link. No sign-in.
+   *
+   *  The payload is built in `sharing/view`, which the public HTML page reads
+   *  too, so the app and the browser can never disagree about what a link
+   *  shows. It carries the cards and what they are worth and nothing else —
+   *  what a person paid, and so whether they are up or down, is theirs. */
+  @Get("shared/:token")
+  async shared(@Param("token") token: string) {
+    const view = await sharedView(String(token));
+    if (!view) return { error: "not-found", message: "That link has been turned off." };
+    return view;
   }
 
   @Post()
@@ -118,4 +256,66 @@ export class CollectionController {
     }
     return { ok: true };
   }
+}
+
+/** How a card's market state reads to the person who owns it. */
+function describe(
+  m: { status: string; price: number; currency: string; listingId: string;
+       dealId?: string | null; dealState?: string | null;
+       buyerName?: string | null } | undefined,
+) {
+  if (!m) return null;
+  const base = {
+    listingId: m.listingId, dealId: m.dealId ?? null,
+    price: m.price, currency: m.currency,
+  };
+  // A completed deal is the only thing that means SOLD. A listing marked sold
+  // whose deal is still open is a card the seller has sent and the buyer has
+  // not confirmed — which is not the same fact, and telling an owner their
+  // card is sold before the other side has said so is how a collection total
+  // ends up wrong in the owner's favour.
+  if (m.dealState === "complete") {
+    // Named, because "Sold" is a state and "Sold to Sohaib" is the record of
+    // what happened — which is what somebody looking at a card that has left
+    // their collection actually wants to see.
+    return {
+      ...base,
+      state: "sold",
+      label: m.buyerName ? `Sold to ${m.buyerName}` : "Sold",
+      settled: true,
+    };
+  }
+  if (m.dealState === "handed_over") {
+    // Still reserved, not sold — the listing only sells when the buyer
+    // confirms. The owner is told it is in transit, which is the true thing.
+    return {
+      ...base, state: "sent", settled: false,
+      label: m.buyerName ? `Sent to ${m.buyerName} · awaiting confirmation`
+                         : "Sent · awaiting confirmation",
+    };
+  }
+  if (m.dealState === "agreed" || m.status === "reserved") {
+    return {
+      ...base, state: "agreed", settled: false,
+      label: m.buyerName ? `Agreed with ${m.buyerName} · not sold yet`
+                         : "Offer accepted · not sold yet",
+    };
+  }
+  if (m.status === "live" || m.status === "paused") {
+    return {
+      ...base,
+      state: "listed",
+      label: m.status === "paused" ? "Listed · paused" : "Listed · not sold yet",
+      settled: false,
+    };
+  }
+  if (m.status === "draft" || m.status === "in_review" || m.status === "info_requested") {
+    return { ...base, state: "pending", label: "Awaiting review", settled: false };
+  }
+  // A listing marked sold with no completed deal behind it — the old
+  // seller-only path. Honest about which of the two facts we actually have.
+  if (m.status === "sold") {
+    return { ...base, state: "sent", label: "Marked sold", settled: false };
+  }
+  return null;
 }

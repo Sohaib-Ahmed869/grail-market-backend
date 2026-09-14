@@ -1,4 +1,7 @@
-import { fetchGradedPrices, gradePointsFromStore, type GradePoint } from "./gradedprices.js";
+import {
+  extrasFromStore, fetchGradedPrices, gradePointsFromStore,
+  type GradePoint, type Printings, type SalesVelocity,
+} from "./gradedprices.js";
 import { readGradePrices, readRawPrice, writeRawPrice } from "../cards.store.js";
 import { priceForGrade, sanityCheck, gradeIsInverted, type LadderResult } from "./ladder.js";
 import { estimateFromListings, isRefusal } from "./estimate.js";
@@ -31,6 +34,15 @@ export type GradedLookup = {
   rawUsd: number | null;
   /** where the answer came from, so callers can label it honestly */
   source: "store" | "provider" | "none";
+  /** which printings exist and what each is worth. Holofoil and Reverse
+   *  Holofoil are different markets — on one Charizard the reverse is worth
+   *  three times the holo — so pricing one as the other is the same class of
+   *  error as pricing the wrong set. */
+  printings?: Printings;
+  /** how often a copy trades. Liquidity is half of what a price means: a card
+   *  that sells weekly has a price, one that sold once in a year has an
+   *  anecdote, and the same median should be read differently in each. */
+  velocity?: SalesVelocity;
 };
 
 export async function gradedPricesFor(card: {
@@ -48,11 +60,21 @@ export async function gradedPricesFor(card: {
     const held = await readGradePrices(catalogId, STORE_TTL_MS);
     const byGrader = held ? gradePointsFromStore(held) : null;
     if (byGrader) {
+      // The ladders come from grade_prices; the printing and the liquidity are
+      // in the provider payload behind them. Reading both keeps a store hit as
+      // informative as a live one — otherwise the cheap path is also the
+      // ignorant one, and it is the path almost every request takes.
+      const [rawUsd, extras] = await Promise.all([
+        readRawPrice(catalogId, STORE_TTL_MS),
+        extrasFromStore(card.name, card.number ?? null, card.setName ?? null),
+      ]);
       return {
         byGrader,
         byGrade: byGrader.PSA ?? null,
-        rawUsd: await readRawPrice(catalogId, STORE_TTL_MS),
+        rawUsd,
         source: "store",
+        printings: extras.printings,
+        velocity: extras.velocity,
       };
     }
   }
@@ -65,6 +87,8 @@ export async function gradedPricesFor(card: {
     byGrade: ppt.byGrade ?? null,
     rawUsd: ppt.rawUsd ?? null,
     source: ppt.byGrader || ppt.rawUsd != null ? "provider" : "none",
+    printings: ppt.printings ?? null,
+    velocity: ppt.velocity ?? null,
   };
 }
 

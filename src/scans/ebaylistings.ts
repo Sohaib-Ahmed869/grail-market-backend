@@ -391,12 +391,39 @@ export function statesACardNumber(title: string): boolean {
 }
 
 export function numberInTitle(title: string, number: string): boolean {
-  const wanted = number
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .replace(/^0+(?=\d)/, "");
-  if (!wanted) return false;
   const U = title.toUpperCase();
+
+  // A COMPOUND id — OP13-119, EB02-028, BT1-001 — is a set code and a card
+  // number joined by a separator, and sellers write that separator three ways:
+  // "OP13-119", "OP13 119", "OP13119". This used to strip the punctuation from
+  // the target, making "OP13119", and then tokenise the TITLE with a pattern
+  // that breaks on a hyphen and can only ever produce "OP13" and "119". No
+  // token could equal the target, so the filter matched nothing on every One
+  // Piece and Digimon card, declined to apply itself, and priced a $150 secret
+  // rare from a $54.99 leader card that happened to share a set.
+  //
+  // Matching on the parts, with the separator optional, accepts all three
+  // spellings and still refuses OP13-002 and EB01-119 — because BOTH halves
+  // have to be right. Neither half is an identity on its own: the set code
+  // alone is every card in the set, and the tail alone is a different card in
+  // any other set.
+  const parts = number
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean)
+    .map((p) => p.replace(/^0+(?=\d)/, ""));
+  if (parts.length === 0) return false;
+
+  if (parts.length > 1) {
+    const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Leading zeros are not a different card, so each numeric part accepts
+    // them: "119" must also match a title writing "0119".
+    const loose = parts.map((p) => (/^\d+$/.test(p) ? `0*${esc(p)}` : esc(p)));
+    const re = new RegExp(`(?<![A-Z0-9])${loose.join("[-\\s]?")}(?![A-Z0-9])`);
+    return re.test(U);
+  }
+
+  const wanted = parts[0];
   const run = /[A-Z]*\d[A-Z0-9]*/g;
   let m: RegExpExecArray | null;
   while ((m = run.exec(U)) !== null) {
@@ -858,12 +885,34 @@ export async function fetchListings(opts: {
           setName: null,
           labelSearchDone: true,
         });
-        if (narrowed && narrowed.matched >= 2) {
+        // ...and keep it ONLY if dropping the number actually found the
+        // labelled product.
+        //
+        // The number is the strongest signal there is, so giving it up has to
+        // buy something. It was given up whenever the re-search returned two
+        // of anything, which on a BGS 9.5 Portgas.D.Ace meant trading seven
+        // listings that all said OP13-119 for twelve that said nothing at all
+        // — every Ace at that grade, priced as one card. US$200 became US$21.
+        //
+        // The label token here was "MANGAARTSEC": OCR glues "MANGA ART SEC"
+        // and no seller types it that way, so it matches nothing whether the
+        // number is in the query or not. A token that cannot match is not
+        // evidence the identification was wrong; it is evidence the token is
+        // unusable. The prize-promo case this exists for is different — there
+        // the re-search genuinely surfaces the promo, and filteredToLabelText
+        // comes back true.
+        if (narrowed && narrowed.matched >= 2 && narrowed.filteredToLabelText) {
           console.log(
             `[listings] broad search found no "${opts.labelTokens[0]}" listings; ` +
               `re-searched with the label's own words and found ${narrowed.matched}`,
           );
           return narrowed;
+        }
+        if (narrowed && narrowed.matched >= 2) {
+          console.log(
+            `[listings] dropping the number found ${narrowed.matched} listings but none ` +
+              `carrying "${opts.labelTokens[0]}" either — keeping the numbered pool`,
+          );
         }
       }
     }
@@ -937,19 +986,40 @@ export async function fetchListings(opts: {
     if (cardPrinting.family || cardPrinting.language) {
       const matched = filtered.filter((l) => l.printingMatch === "match");
       const conflicting = filtered.filter((l) => l.printingMatch === "conflict");
+
+      // What we set aside, reported whether or not we could narrow. The card
+      // number alone does not identify a product and the interface should be
+      // able to say so even when the narrowing failed.
+      const byName = new Map<string, number[]>();
+      for (const l of conflicting) {
+        if (l.price == null) continue;
+        const n = l.printing ?? "other printing";
+        byName.set(n, [...(byName.get(n) ?? []), l.price]);
+      }
+      for (const [name, ps] of byName) {
+        ps.sort((a, b) => a - b);
+        otherPrintings.push({ name, count: ps.length, low: ps[0], high: ps[ps.length - 1] });
+      }
+      otherPrintings.sort((a, b) => b.count - a.count);
+
+      // A listing that NAMES a different printing is a different product, and
+      // it goes whatever the counts say.
+      //
+      // It used to survive unless at least three listings positively declared
+      // ours — and the scarcer the printing, the less likely three exist. So on
+      // the chase cards, the ones this whole path exists for, the filter
+      // switched itself off and the panel showed the base card's asks beside a
+      // correctly identified card worth a thousand times more. Silence is still
+      // treated as silence: a listing that says nothing about its printing is
+      // weak evidence, not wrong evidence, and it stays.
+      if (conflicting.length > 0) {
+        const known = new Set(conflicting);
+        filtered = filtered.filter((l) => !known.has(l));
+      }
+
+      // Narrowing to ONLY the listings that declare our printing is a stronger
+      // claim and still needs enough of them to stand on its own.
       if (matched.length >= 3) {
-        // report what we set aside, so the interface can name the alternatives
-        const byName = new Map<string, number[]>();
-        for (const l of conflicting) {
-          if (l.price == null) continue;
-          const n = l.printing ?? "other printing";
-          byName.set(n, [...(byName.get(n) ?? []), l.price]);
-        }
-        for (const [name, ps] of byName) {
-          ps.sort((a, b) => a - b);
-          otherPrintings.push({ name, count: ps.length, low: ps[0], high: ps[ps.length - 1] });
-        }
-        otherPrintings.sort((a, b) => b.count - a.count);
         filtered = matched;
         filteredToPrinting = true;
       }

@@ -209,11 +209,39 @@ export async function identifyOnePiece(
   );
   const c: Record<string, any> = choice?.pick ?? printings[0];
 
+  /* The ranking, carried rather than dropped.
+   *
+   * This used to keep `pick` and discard `ranked`, `method` and `margin`, so
+   * everything downstream saw a name and nothing else. On a low-confidence
+   * result that name is the BASE card's — the picker falls back to catalogue
+   * order — and the app, re-deriving the printing by looking for a variant
+   * word inside it, found none and asked the member. The system knew which
+   * card it was and could not say so. */
+  const printingChoice = choice
+    ? {
+        method: choice.method,
+        margin: choice.margin ?? null,
+        label: String(c.card_name ?? "") || null,
+        ranked: choice.ranked.map((r) => ({
+          label: String(r.candidate.card_name ?? r.candidate.label ?? ""),
+          imageUrl: r.imageUrl ?? null,
+          score: r.score ?? null,
+        })),
+      }
+    : null;
+
   const identification: Identification = {
     // The printing has to be part of the id. Both printings of OP11-119 carry
     // the same card_set_id, so keying on that alone made them one card to every
     // cache and every price lookup downstream.
-    cardId: `optcg-${c.card_set_id}${c.card_image && /_p\d+\./.test(String(c.card_image)) ? "-p" : ""}`,
+    // card_image_id distinguishes every printing; card_set_id does not.
+    //
+    // This used to append a bare "-p" when the image looked like a parallel,
+    // which separated parallels from base prints and then lumped all FOUR
+    // parallels of a card together — a $433 Wanted Poster and a $4,420 Red
+    // Super Alternate Art under one id. Their own image id already says which
+    // is which: OP13-119, _p1, _p2, _p3, _p4.
+    cardId: `optcg-${c.card_image_id ?? c.card_set_id}`,
     name: String(c.card_name).replace(/\s*\((\d+)\)\s*/g, " ").replace(/\s{2,}/g, " ").trim(),
     setId: c.set_id ?? "",
     setName: c.set_name ?? "",
@@ -223,6 +251,7 @@ export async function identifyOnePiece(
     matchScore: 1, // exact set-code match
     ocrName: setCode.toUpperCase(),
     game: "onepiece",
+    printingChoice,
   };
   const market = c.market_price != null ? Number(c.market_price) : null;
   const valuation: Valuation | null =

@@ -53,3 +53,35 @@ test("an already-set variable beats the file", () => {
   assert.equal(process.env.FROM_SHELL, "shell");
   delete process.env.FROM_SHELL;
 });
+
+test("an empty value in the environment does not beat the file", () => {
+  // The one that broke Didit on the box. A process manager remembering
+  // `DIDIT_API_KEY=` injects an empty string, which is `!== undefined`, so the
+  // real key three lines down in .env was never applied — and `Boolean("")`
+  // is false, so the feature reported the key as not set while it was
+  // visibly in the file.
+  const dir = mkdtempSync(join(tmpdir(), "envtest-"));
+  writeFileSync(join(dir, ".env"), "DIDIT_API_KEY=the-real-key\n");
+  process.env.DIDIT_API_KEY = "";
+  loadEnvFile(dir);
+  const got = process.env.DIDIT_API_KEY;
+  delete process.env.DIDIT_API_KEY;
+  assert.equal(got, "the-real-key");
+});
+
+test("a missing .env is announced, not swallowed", () => {
+  // A server that boots with no configuration and says nothing is a server
+  // that reports every key as unset an hour later, in a feature, to a user.
+  const dir = mkdtempSync(join(tmpdir(), "envtest-empty-"));
+  const said = [];
+  const warn = console.warn;
+  console.warn = (m) => said.push(String(m));
+  try {
+    loadEnvFile(dir);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(said.length, 1, "exactly one warning");
+  assert.match(said[0], /no \.env/);
+  assert.ok(said[0].includes(dir), "it has to name the path it looked in");
+});

@@ -613,7 +613,40 @@ export class ScansService {
     //
     // Cheaper too, which is the smaller point: a rejected scan now spends
     // nothing at any provider.
-    if (frontRes.rejection) {
+    // GLARE IS NOT FATAL WHEN THE CARD WAS STILL READ.
+    //
+    // The glare gate counts blown-out pixels: HSV value at or above 250 with
+    // almost no saturation, clustered over 4% of the card. That is a good
+    // description of light bouncing off a slab — and an equally good
+    // description of a manga alternate art, which is large flat panels of
+    // printed white. The detector cannot tell the two apart, so it refuses
+    // the card because of its own artwork.
+    //
+    // It refused OP17-079, a Super Leader Alternate Art worth about US$1,930,
+    // from a clean product scan with no glare anywhere in it. Every card this
+    // misfires on is a manga or alternate art, which is to say the expensive
+    // ones.
+    //
+    // The rest of the gate stands. A blurry photo or one too small to read
+    // has genuinely hidden something, and pricing a grade we could not see is
+    // how a $94,000 Championship Finalist came back as a raw card. But glare
+    // is only a problem because it HIDES the card, and a card we have just
+    // identified at full confidence is not hidden. Refusing to answer when we
+    // can answer has a cost too.
+    const readItAnyway =
+      frontRes.rejection?.reason === "too_much_glare" &&
+      (scan.identification?.matchScore ?? 0) >= 0.93;
+    if (readItAnyway) {
+      console.warn(
+        `[scan] too_much_glare overridden — identified ` +
+          `"${scan.identification?.name}" at ${scan.identification?.matchScore}; ` +
+          `pricing it`,
+      );
+      scan.rejection = null;
+      scan.status = "analyzed";
+    }
+
+    if (frontRes.rejection && !readItAnyway) {
       console.warn(
         `[scan] ${frontRes.rejection.reason} — not pricing; ` +
           `identification kept for context only`,
@@ -801,6 +834,9 @@ export class ScansService {
             low: pt.low ?? null,
             high: pt.high ?? null,
             median: pt.median ?? null,
+            // Same column the ingest fills. The scan path writes prices too,
+            // so leaving it out here would keep half the rows undated.
+            lastSaleAt: pt.lastSaleDate ?? null,
             source: scan.valuation?.graded?.source ?? "pokemonpricetracker",
           })),
         );
@@ -933,6 +969,21 @@ export class ScansService {
     // number is what makes a search specific; without it "Charizard Base Set
     // 1st Edition" matches a category, and a stale $8.95 listing in that
     // category capped a raw Base Set Charizard that TCGplayer prices at $489.
+    /* The printing the PICTURES decided, added to the hints the listing search
+     * reads.
+     *
+     * Everything else in this list came off the card as text — OCR, a set
+     * code, the LLM's reading of the title. For most expensive printings there
+     * IS no text: "Red Super Alternate Art" is a collector's term for an
+     * artwork treatment and is printed nowhere on the card. So the listing
+     * search was told nothing about the printing on exactly the cards where it
+     * matters, could not narrow, and showed the base card's listings beside a
+     * correctly identified chase card. */
+    const decided = scan.identification?.printingChoice;
+    if (decided && decided.method !== "fallback" && decided.label) {
+      printingHints.push(decided.label);
+    }
+
     const rawSpecialPrinting =
       !askGrader &&
       Boolean(readPrinting(printingHints.join(" ")).family) &&
@@ -1072,7 +1123,20 @@ export class ScansService {
             name: scan.identification.name,
             setName: scan.identification.setName,
             game: scan.identification.game ?? null,
-            number: scan.identification.localId,
+            /* The number we READ, when the catalogue could not give us one.
+             *
+             * `localId` comes from a catalogue match, and a card no catalogue
+             * covers has none — which is every One Piece promo, since the
+             * provider 404s on P-043. The number is then dropped and the
+             * search becomes "Monkey.D.Luffy PSA 10" with nothing to pin it,
+             * so it prices whichever Luffy it finds: US$150 against a market
+             * of US$190. What we read off the card is not as good as a
+             * catalogue id, and it is far better than nothing. */
+            number:
+              scan.identification.localId ||
+              readOnePieceCode(frontRes.ocr?.texts ?? []) ||
+              frontRes.ocr?.setCode ||
+              null,
             grader: askGrader,
             grade: askGrade,
             // Beckett's 10 is two products; ask for the one on this holder.

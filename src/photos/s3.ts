@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  S3Client,
-  DeleteObjectCommand,
-  GetObjectCommand,
-  PutObjectCommand,
+  S3Client, DeleteObjectCommand, GetObjectCommand, PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -15,26 +12,26 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 // it is also the one running the vision service. A presigned URL lets the
 // phone talk to S3 directly and keeps our credentials out of the app.
 
-/* Read when they are used, not when this file is first imported.
+/* Read when asked, not when imported.
  *
- * `main.ts` calls `loadEnvFile()` on line nine — but an ES `import` is
- * hoisted, so every module body in the tree has already run by the time that
- * line is reached. A `const BUCKET = process.env.S3_BUCKET_NAME` here is
- * therefore evaluated against an environment that has not been loaded yet,
- * and comes out empty. Nothing throws: `photosConfigured()` quietly answers
- * false, `publicUrlFor` builds `https://.s3.…`, and a signed URL is silently
- * never produced. Functions cost nothing and cannot be caught out by import
- * order. */
-const region = () => process.env.AWS_REGION ?? "eu-north-1";
-const bucket = () => process.env.S3_BUCKET_NAME ?? "";
+ *  These were module-level constants, and this package is `"type": "module"`
+ *  — so every import in main.ts evaluates BEFORE the `loadEnvFile()` call
+ *  beneath them. `BUCKET` was therefore captured as "" on every boot,
+ *  `photosConfigured()` answered false forever, and the API refused each
+ *  upload before it ever reached S3. The keys were in .env the whole time.
+ *
+ *  Reading them through a function costs a property lookup and cannot be
+ *  wrong about when the environment arrived. */
+const REGION = () => process.env.AWS_REGION ?? "eu-north-1";
+const BUCKET = () => process.env.S3_BUCKET_NAME ?? "";
 
 export const photosConfigured = () =>
-  Boolean(bucket() && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
+  Boolean(BUCKET() && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
 
 let client: S3Client | null = null;
 function s3(): S3Client {
   client ??= new S3Client({
-    region: region(),
+    region: REGION(),
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
@@ -65,6 +62,118 @@ export type Upload = { key: string; uploadUrl: string; publicUrl: string };
  *  The key is derived here, never taken from the client — otherwise a caller
  *  could name a path inside somebody else's listing and overwrite their
  *  photographs. */
+/** Put bytes we already hold into the bucket.
+ *
+ *  The presigned PUT above is still the right shape for a browser, and it is
+ *  what the console uses. React Native cannot use it: `fetch(fileUri).blob()`
+ *  is the only way to get a body for a raw PUT there, and RN's Blob is partial
+ *  enough that the request goes up empty or throws. Ten photographs failing
+ *  silently is how a $11,340 listing sat in `draft` and never reached the
+ *  review queue.
+ *
+ *  So the phone posts multipart to our API — the same shape the scan upload has
+ *  always used and the one RN genuinely supports — and this puts it away. The
+ *  header comment above still holds for the browser; it is simply no longer
+ *  true that there is only one path. */
+export async function putPhoto(
+  ownerId: string,
+  angle: Angle | "video" | string,
+  body: Buffer,
+  contentType: string,
+  prefix: "listings" | "disputes" = "listings",
+): Promise<Upload> {
+  if (!photosConfigured()) throw new Error("photo storage is not configured");
+  const ext = contentType.includes("png") ? "png" : contentType.startsWith("video") ? "mp4" : "jpg";
+  const key = `${prefix}/${ownerId}/${angle}-${randomUUID().slice(0, 8)}.${ext}`;
+  await s3().send(
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      ContentLength: body.length,
+    }),
+  );
+  return { key, uploadUrl: "", publicUrl: publicUrlFor(key) };
+}
+
+/** A short-lived read URL for something we stored.
+ *
+ *  The bucket blocks public access, which is right: it holds members' card
+ *  photographs and dispute evidence, and an object URL that anybody can guess
+ *  and fetch is a photograph of somebody's address on a shipping label. So
+ *  nothing is world-readable and reads are signed instead.
+ *
+ *  Takes the URL we wrote into the row rather than a key, because that is what
+ *  every caller already holds. Anything that is not one of ours comes back
+ *  untouched, so an external image in an old record still renders.
+ *
+ *  Fifteen minutes: long enough to open a record and look at ten angles,
+ *  short enough that a copied link is not a permanent one.
+ *
+ *  SIGNED AT A CLOCK BOUNDARY, not at the instant of the request. A signature
+ *  carries the moment it was made, so signing on demand produced a different
+ *  URL every single time the same photograph was returned — and a URL that
+ *  changes is a URL nothing can cache. On the phone the market tiles visibly
+ *  reloaded: an image whose address had changed was, to the list, a different
+ *  image, so it was thrown away and fetched again while the user watched.
+ *
+ *  Rounding the signing time down to a five-minute mark makes every request
+ *  inside that window produce a byte-identical URL, which the client cache
+ *  can then actually hold. The cost is that a link is valid for between ten
+ *  and fifteen minutes rather than exactly fifteen — bounded, and the reason
+ *  the window is padded below. */
+const SIGN_BUCKET_MS = 5 * 60_000;
+
+export async function signDownload(url: string, seconds = 900): Promise<string> {
+  if (!photosConfigured() || !url) return url;
+  const key = keyFromUrl(url);
+  if (key == null) return url;
+  try {
+    // Anchored to the boundary, and the lifetime extended by one bucket so a
+    // URL handed out at the very END of a window is still good for the full
+    // `seconds` the caller asked for rather than expiring early.
+    const signingDate = new Date(Math.floor(Date.now() / SIGN_BUCKET_MS) * SIGN_BUCKET_MS);
+    return await getSignedUrl(
+      s3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
+      { expiresIn: seconds + SIGN_BUCKET_MS / 1000, signingDate },
+    );
+  } catch {
+    // A signature we could not produce must not blank the record.
+    return url;
+  }
+}
+
+/** Where our own objects live. */
+const origin = () => `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/`;
+
+/** The object key inside our bucket, or null for a URL that is not ours.
+ *
+ *  The seeded fixtures point at tcgdex and scryfall, which are public and must
+ *  not be mangled into a signature for a bucket they are not in. */
+export function keyFromUrl(url: string): string | null {
+  const o = origin();
+  if (!BUCKET() || !url.startsWith(o)) return null;
+  const key = decodeURIComponent(url.slice(o.length));
+  return key.length > 0 ? key : null;
+}
+
+/** The same, for a list. */
+export const signAll = async <T extends { url: string }>(rows: T[]): Promise<T[]> =>
+  Promise.all(rows.map(async (r) => ({ ...r, url: await signDownload(r.url) })));
+
+/** The console's name for `signDownload`.
+ *
+ *  Both branches wrote this at the same time — the listings path called it
+ *  `signDownload`, the admin console called it `viewableUrl` — and merging
+ *  them left two functions signing GETs against the same bucket. Two
+ *  implementations of one rule is how they end up disagreeing about the
+ *  expiry, so this is an alias and not a second copy. Kept under its own name
+ *  because the console's call sites read better with it, and renaming forty
+ *  of them buys nothing. */
+export const viewableUrl = (url: string, expiresIn = 900): Promise<string> =>
+  signDownload(url, expiresIn);
+
 export async function signUpload(
   ownerId: string,
   angle: Angle | "video" | string,
@@ -82,7 +191,7 @@ export async function signUpload(
   const uploadUrl = await getSignedUrl(
     s3(),
     new PutObjectCommand({
-      Bucket: bucket(),
+      Bucket: BUCKET(),
       Key: key,
       ContentType: contentType,
       // A signed URL that does not pin the length is a signed URL somebody can
@@ -96,58 +205,11 @@ export async function signUpload(
 }
 
 export const publicUrlFor = (key: string) =>
-  `https://${bucket()}.s3.${region()}.amazonaws.com/${key}`;
-
-/**
- * `publicUrlFor` is a misnomer, and it cost us every listing photograph.
- *
- * The bucket is not public-read — it should not be; these are photographs of
- * somebody's property, taken to prove they hold it. So the URL that function
- * builds is a correct ADDRESS and not a working link: anyone who follows it
- * gets a 403 from S3. The upload side was always signed, which is why nobody
- * noticed: putting a photo up worked, and reading it back never did.
- *
- * `viewableUrl` is the missing half. It signs a short-lived GET for anything
- * that lives in our own bucket, and hands back anything else untouched — the
- * seeded fixtures point at tcgdex and scryfall, which are public and must not
- * be mangled into a signature for a bucket they are not in.
- */
-const origin = () => `https://${bucket()}.s3.${region()}.amazonaws.com/`;
-
-/** The object key inside our bucket, or null for a URL that is not ours. */
-export function keyFromUrl(url: string): string | null {
-  const o = origin();
-  if (!bucket() || !url.startsWith(o)) return null;
-  const key = decodeURIComponent(url.slice(o.length));
-  return key.length > 0 ? key : null;
-}
-
-/**
- * A link that will actually load, valid for fifteen minutes.
- *
- * Long enough to read a record and look at ten photographs, short enough that
- * a URL copied out of the network tab is not a permanent hole in a private
- * bucket. It has to be re-signed on every read, which is why this is done
- * when the record is served rather than stored on the row.
- */
-export async function viewableUrl(url: string, expiresIn = 900): Promise<string> {
-  const key = keyFromUrl(url);
-  if (!key || !photosConfigured()) return url;
-  try {
-    return await getSignedUrl(s3(), new GetObjectCommand({ Bucket: bucket(), Key: key }), {
-      expiresIn,
-    });
-  } catch {
-    /* A signature we could not produce is not a reason to lose the record.
-       The console draws an unreachable photograph as "would not load", which
-       is the truth either way. */
-    return url;
-  }
-}
+  `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/${key}`;
 
 export async function deletePhoto(key: string): Promise<void> {
   if (!photosConfigured()) return;
-  await s3().send(new DeleteObjectCommand({ Bucket: bucket(), Key: key })).catch(() => {});
+  await s3().send(new DeleteObjectCommand({ Bucket: BUCKET(), Key: key })).catch(() => {});
 }
 
 export const MAX_UPLOAD_BYTES = MAX_BYTES;

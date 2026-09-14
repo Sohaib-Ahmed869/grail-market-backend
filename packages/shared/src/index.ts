@@ -98,6 +98,42 @@ export const OcrReading = z.object({
 });
 export type OcrReading = z.infer<typeof OcrReading>;
 
+/** Which physical printing of a card the photograph is.
+ *
+ *  A collector number names a CARD; the artwork names the printing, and one
+ *  number can be five products a thousand times apart in price. The vision
+ *  service ranks the candidates by picture and this is its answer, carried all
+ *  the way to the screen rather than reduced to a name string on the way.
+ *
+ *  It used to be reduced. The ranking was computed, the winner's name was
+ *  kept, and the confidence, the runner-up and the margin were dropped at the
+ *  call site — so a screen further down could not tell a decision from a
+ *  shrug, and re-derived the printing by looking for a variant name inside
+ *  that string. On a low-confidence result the string was the BASE card's
+ *  name, which contains no variant, so the app asked the member instead. */
+export const PrintingChoice = z.object({
+  /** "visual" is a decision. "fallback" means the pictures did not settle it
+   *  and the catalogue's own order was used — never present that as a choice. */
+  method: z.enum(["visual", "single", "fallback"]),
+  /** how far the winner cleared the runner-up. Null when there was nothing to
+   *  clear, which is a different thing from clearing it by nothing. */
+  margin: z.number().nullish(),
+  /** the printing decided on, as the catalogue names it */
+  label: z.string().nullish(),
+  /** every candidate, best first — so the app can offer "not this one?"
+   *  rather than an open question */
+  ranked: z
+    .array(
+      z.object({
+        label: z.string(),
+        imageUrl: z.string().nullish(),
+        score: z.number().nullish(),
+      }),
+    )
+    .default([]),
+});
+export type PrintingChoice = z.infer<typeof PrintingChoice>;
+
 // Catalog match (TCGdex), resolved by the API from the OCR reading
 export const Identification = z.object({
   cardId: z.string(), // tcgdex id, e.g. "me05-031"
@@ -114,6 +150,9 @@ export const Identification = z.object({
    *  everywhere it is bought and sold; a collector wants to see both. */
   nameLocal: z.string().nullish(),
   game: z.string().default("pokemon"), // pokemon | mtg | yugioh
+  /** which printing this is, and how sure the pictures were. Absent where the
+   *  card has no printings to choose between. */
+  printingChoice: PrintingChoice.nullish(),
 });
 export type Identification = z.infer<typeof Identification>;
 

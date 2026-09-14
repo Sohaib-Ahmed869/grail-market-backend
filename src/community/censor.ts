@@ -12,6 +12,8 @@
 // number has and a card reference does not: a leading 0 or +, or grouping
 // into 3-4 digit blocks, and never a run that sits against a / # - or letter.
 
+import { fold, replaceFolded, type Folded } from "./fold.js";
+
 const MASK = "[contact removed]";
 
 export type CensorResult = {
@@ -66,7 +68,9 @@ const LINK_PATTERNS: RegExp[] = [
 ];
 
 const EMAIL_PATTERNS: RegExp[] = [
-  /\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b/g,
+  // Spaces are allowed around the @ and the dot, because "sohaib @ gmail .
+  // com" is an address and was reading as three ordinary words.
+  /\b[\w.+-]+\s*@\s*[\w-]+\s*\.\s*[\w.-]{2,}\b/g,
   // me (at) example (dot) com, me [at] example [dot] com, me AT example DOT com
   /\b[\w.+-]+\s*[\[(]?\s*at\s*[\])]?\s*[\w-]+\s*[\[(]?\s*(?:dot|\.)\s*[\])]?\s*[a-z]{2,}\b/gi,
 ];
@@ -76,6 +80,15 @@ const EMAIL_PATTERNS: RegExp[] = [
 const OFF_PLATFORM =
   /\b(whats\s?app|whatsap|telegram|signal|snap(?:chat)?|insta(?:gram)?|discord|messenger|viber|wechat|kik)\b/gi;
 const HANDLE = /(?:^|\s)@[A-Za-z0-9._]{3,30}\b/g;
+
+/** Somewhere to be reached, named without an address.
+ *
+ *  "search sohaib92 on gmail" carries no @ and no digits and is a complete set
+ *  of contact details. Naming a mail provider is flagged rather than masked,
+ *  for the same reason the app names above are: cutting the word "gmail" out
+ *  of a sentence reads as a bug, and the thread score is what this feeds. */
+const MAIL_PROVIDER =
+  /\b(g\s?mail|hot\s?mail|out\s?look|yahoo|proton\s?(?:mail)?|icloud|ymail|live\.com)\b/gi;
 
 /** Any run of seven or more digits, however it is spaced.
  *
@@ -111,56 +124,82 @@ function maskWordDigits(s: string): { text: string; found: boolean } {
   return { text, found };
 }
 
-/** Mask anything that would let two people finish the deal elsewhere. */
+/** Mask anything that would let two people finish the deal elsewhere.
+ *
+ *  Every rule runs against a FOLDED copy of the message — one canonical
+ *  string where a fullwidth digit, an Arabic-Indic digit, an emoji keycap, a
+ *  letter standing in for a digit and the word "three" have all already become
+ *  "3", and zero-width characters are gone. Without that, each of those was a
+ *  free bypass: the rules were sound and simply never saw the number.
+ *
+ *  What comes back is the ORIGINAL text with the offending spans replaced, so
+ *  a person still reads what they wrote. See `fold.ts` for how a match in the
+ *  fold is mapped back to the characters that produced it. */
 export function censor(input: string): CensorResult {
   if (!input) return { text: input, masked: false, hits: [] };
-  let text = input;
+  const f = fold(input);
   const hits: string[] = [];
+  const spans: { from: number; to: number }[] = [];
+  const hit = (h: string) => { if (!hits.includes(h)) hits.push(h); };
+
+  // A span already taken is not taken again. An address contains a domain, so
+  // the link rules would otherwise match the tail of every email and report a
+  // link that nobody sent — noise in the flags, which the thread score reads.
+  const taken = (from: number, to: number) =>
+    spans.some((s) => from < s.to && to > s.from);
+
+  const sweep = (re: RegExp, tag: string, keep?: (m: string, at: number) => boolean) => {
+    re.lastIndex = 0;
+    for (const m of f.text.matchAll(re)) {
+      const at = m.index ?? 0;
+      if (taken(at, at + m[0].length)) continue;
+      if (keep && keep(m[0], at)) continue;
+      spans.push({ from: at, to: at + m[0].length });
+      hit(tag);
+    }
+  };
 
   // Emails first: an address contains a domain, and running the link rules
   // first would eat half of it and leave "me@" behind.
-  for (const re of EMAIL_PATTERNS) {
-    text = text.replace(re, () => { if (!hits.includes("email")) hits.push("email"); return MASK; });
-  }
-
-  for (const re of LINK_PATTERNS) {
-    text = text.replace(re, () => {
-      if (!hits.includes("link")) hits.push("link");
-      return "[link removed]";
-    });
-  }
+  for (const re of EMAIL_PATTERNS) sweep(re, "email");
+  for (const re of LINK_PATTERNS) sweep(re, "link");
 
   for (const re of PHONE_PATTERNS) {
-    text = text.replace(re, (m, offset: number, whole: string) => {
+    sweep(re, "phone", (m, at) => {
       // A card reference sits against a slash, hash, dash-with-letters or a
       // letter; a phone number does not. Checking the neighbours is what
       // keeps "Base Set 4/102" and "OP13-119" intact.
-      const before = whole[offset - 1] ?? " ";
-      const after = whole[offset + m.length] ?? " ";
-      if (/[\/#\w]/.test(before) || /[\/#]/.test(after)) return m;
+      const before = f.text[at - 1] ?? " ";
+      const after = f.text[at + m.length] ?? " ";
+      if (/[\/#\w]/.test(before) || /[\/#]/.test(after)) return true;
       // A Beckett certificate starts 00 and is ten digits, which is exactly
-      // the shape of a landline. The label is the only thing that separates
-      // them, so this rule has to read it too — not just the newer one.
-      if (LABELLED.test(whole.slice(Math.max(0, offset - 24), offset))) return m;
-      // needs enough digits to be a number at all
-      if ((m.match(/\d/g) ?? []).length < 8) return m;
-      if (!hits.includes("phone")) hits.push("phone");
-      return MASK;
+      // the shape of a landline. The label is the only thing separating them.
+      if (LABELLED.test(f.text.slice(Math.max(0, at - 24), at))) return true;
+      return (m.match(/\d/g) ?? []).length < 8;
     });
   }
 
-  const runs = maskLongRuns(text);
-  text = runs.text;
-  if (runs.found && !hits.includes("phone")) hits.push("phone");
+  // Any long run of digits, however it is spaced. Seven is the shortest thing
+  // anyone can dial, and prices, years and card numbers are all shorter.
+  sweep(/\d(?:[\s.\-()]*\d){6,}/g, "phone", (m, at) => {
+    const before = f.text.slice(Math.max(0, at - 24), at);
+    if (LABELLED.test(before)) return true;
+    if (/[\/#\w]$/.test(before)) return true;
+    return /[\/]/.test(f.text[at + m.length] ?? " ");
+  });
 
-  const spelled = maskWordDigits(text);
-  text = spelled.text;
-  if (spelled.found && !hits.includes("phone")) hits.push("phone");
+  let text = replaceFolded(input, f, spans, MASK);
+  // Links say "[link removed]" rather than "[contact removed]", which is the
+  // only place the two masks differ and is worth keeping.
+  if (hits.includes("link") && !hits.includes("email") && !hits.includes("phone")) {
+    text = text.split(MASK).join("[link removed]");
+  }
 
-  if (OFF_PLATFORM.test(text)) hits.push("off-platform");
-  OFF_PLATFORM.lastIndex = 0;
-  if (HANDLE.test(text)) hits.push("handle");
-  HANDLE.lastIndex = 0;
+  for (const [re, tag] of [[OFF_PLATFORM, "off-platform"], [MAIL_PROVIDER, "mail-provider"], [HANDLE, "handle"]] as const) {
+    re.lastIndex = 0;
+    if (re.test(f.text)) hit(tag);
+    re.lastIndex = 0;
+  }
 
   return { text, masked: text !== input, hits };
 }

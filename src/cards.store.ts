@@ -650,6 +650,43 @@ export async function noteCatalogCard(c: {
 }
 
 /** Cache the ungraded market price alongside the card's identity. */
+/** Register a catalogue card and its raw price, from a set listing.
+ *
+ *  Not `noteCatalogCard`: that one bumps seen_count, which is the demand
+ *  signal the movers board is ranked on, and it is meant to count a person
+ *  pointing a camera at a card. Opening a set page touches every card in
+ *  the set at once, and running that through the same counter would put a
+ *  whole set's worth of commons at the top of "on the move".
+ *
+ *  This writes what a set listing knows — identity and today's ungraded
+ *  price — and leaves the counter alone. A card that was never scanned
+ *  still gets a row, which is what lets the collection, the card page and
+ *  the market show a price for it. */
+export async function seedCatalogPrice(c: {
+  catalogId: string; game?: string | null; name: string;
+  setName?: string | null; cardNumber?: string | null; rawUsd: number;
+}): Promise<void> {
+  if (!c.catalogId || !c.name || !(c.rawUsd > 0)) return;
+  if (!usable || !(await initStore())) return;
+  const p = getPool();
+  if (!p) return;
+  try {
+    await p.query(
+      `INSERT INTO catalog_cards (catalog_id, game, name, set_name, card_number, raw_usd, raw_fetched_at, seen_count)
+       VALUES ($1,$2,$3,$4,$5,$6, now(), 0)
+       ON CONFLICT (catalog_id) DO UPDATE SET
+         game        = COALESCE(catalog_cards.game, excluded.game),
+         set_name    = COALESCE(catalog_cards.set_name, excluded.set_name),
+         card_number = COALESCE(catalog_cards.card_number, excluded.card_number),
+         raw_usd     = excluded.raw_usd,
+         raw_fetched_at = now()`,
+      [c.catalogId, c.game ?? null, c.name, c.setName ?? null, c.cardNumber ?? null, c.rawUsd],
+    );
+  } catch (err) {
+    console.warn(`[store] seed failed for ${c.catalogId}: ${(err as Error).message}`);
+  }
+}
+
 export async function writeRawPrice(catalogId: string, rawUsd: number | null): Promise<void> {
   if (!catalogId || rawUsd == null) return;
   if (!usable || !(await initStore())) return;

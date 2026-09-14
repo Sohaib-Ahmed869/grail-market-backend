@@ -6,13 +6,16 @@ import { quotaStatus } from "./gradedprices.js";
 import { scanCounts } from "./ledger.js";
 import { cardNews, cardTrend, marketPulse } from "./market.js";
 import { searchCards } from "./search.js";
+import { cardMeta } from "./demand.js";
+import { cardHedgerStatus } from "./cardhedger.js";
 import { getSet, listSets } from "./sets.js";
-import { gamesWithPreviews, setDetailForGame, setsForGame } from "./games.js";
+import { gameOfCard, gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
 import { ebayShop, shopsFor, type ShopQuote } from "./shops.js";
 import { gradeIsInverted } from "./ladder.js";
 import { readPrinting } from "./printing.js";
+import { printingsFor, priceIsAmbiguous } from "../printings/store.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
 import { identifyBySetCode } from "./setcode.js";
 
@@ -42,7 +45,14 @@ export class MarketController {
       scanCounts(),
       scanBudget(),
     ]);
-    return { ...status, scans: counts, budget };
+    return {
+      ...status, scans: counts, budget,
+      // Whether the bought catalogue is on, and how much of today it has
+      // spent. Reported as two separate facts on purpose: a key present with
+      // the cap left at zero looks exactly like no key at all from outside,
+      // and that costs an afternoon every time.
+      providers: { cardhedger: cardHedgerStatus() },
+    };
   }
 
   // Live listings for one card. Kept off the scan response deliberately: a
@@ -106,6 +116,66 @@ export class MarketController {
     // No game keeps the old behaviour — Pokemon — so anything already calling
     // this is unaffected.
     return { sets: game ? await setsForGame(game) : await listSets() };
+  }
+
+  /** One card's identity, by catalogue id.
+   *
+   *  The phone used to work this out itself, by cutting the id at its last
+   *  hyphen and asking for the front half as a set. That is correct for
+   *  Pokemon (`swsh7-215` -> `swsh7`) and for nothing else: One Piece ids look
+   *  like `optcg-OP13-119` and the cut gives `optcg-OP13`, while the set
+   *  endpoint wants `optcg:OP13` — so every One Piece card opened onto a page
+   *  with no name, which meant no price either. Magic ids are `mtg-<uuid>`,
+   *  where the set is not in the string at all.
+   *
+   *  So the answer comes from what we already store rather than from parsing.
+   *  A card the market can show has been listed, watched, held or scanned, and
+   *  all four of those tables carry its name.
+   *
+   *  Falls back to the set for a card we hold nothing about — a deep link into
+   *  a set nobody here has touched still resolves. */
+  @Get("card")
+  async card(@Query("catalogId") catalogId?: string, @Query("setId") setId?: string) {
+    const id = (catalogId ?? "").trim();
+    if (!id) return { error: "no-id", message: "A catalogue id is required." };
+
+    const held = await cardMeta(id);
+    if (held) {
+      return {
+        cardId: held.catalogId,
+        name: held.name,
+        setName: held.setName,
+        number: held.number ?? null,
+        game: held.game,
+        imageUrl: held.imageUrl,
+        source: "store",
+      };
+    }
+
+    // Nothing stored. Read the set it belongs to.
+    //
+    // The set is TOLD to us when the caller knows it, which the card page
+    // always does — it was opened from a set. Deriving it from the card id
+    // only ever worked for two catalogues: Pokemon, where a card id really is
+    // `<set>-<number>`, and One Piece once its hyphen was handled. Every other
+    // source keys cards on an opaque provider id with no set inside it, so
+    // seven of the nine games answered "Card Not Found" on every card in
+    // every set. Asking the caller is the fix; deriving is the fallback.
+    const from = (setId ?? "").trim() || setIdOfCard(id);
+    if (!from) return { error: "not-found", cardId: id };
+    const other = await setDetailForGame(from);
+    const set = other !== undefined ? other : await getSet(from);
+    const c = set?.cards.find((x: any) => x.cardId === id);
+    if (!set || !c) return { error: "not-found", cardId: id };
+    return {
+      cardId: id,
+      name: c.name,
+      setName: set.name,
+      number: c.localId ?? null,
+      game: null,
+      imageUrl: c.imageUrl ?? null,
+      source: "set",
+    };
   }
 
   /** One set and the cards in it. */
@@ -221,6 +291,27 @@ export class MarketController {
     };
   }
 
+  /** Every printing of one collector number, and whether they disagree.
+   *
+   *  Split out from `/market/price` because the scan result needs the same
+   *  answer without paying for the whole price chain — and because a scan
+   *  already knows which printing it saw, so it can name one rather than ask.
+   *  Both screens reading one source is what stops them disagreeing. */
+  @Get("printings")
+  async printings(
+    @Query("cardId") cardId?: string,
+    @Query("number") number?: string,
+    @Query("set") setName?: string,
+    @Query("game") game?: string,
+  ) {
+    const variants = await printingsFor({
+      game: game ?? gameOfCard(cardId ?? null),
+      number: number ?? null,
+      setName: setName ?? null,
+    });
+    return { variants, ambiguous: priceIsAmbiguous(variants) };
+  }
+
   @Get("price")
   async price(
     @Query("name") name?: string,
@@ -310,14 +401,41 @@ export class MarketController {
         : null,
     );
 
+    // Every printing this collector number has, from TCGplayer's own
+    // catalogue — see src/printings. This is the answer to the defect that
+    // priced a Red Super Alternate Art Luffy at A$197: five printings share
+    // one catalogue id here, so the expensive one had no address and the
+    // figure came from a text search of eBay instead.
+    const variants = await printingsFor({
+      // Told, or read off the id. The card page has never sent a game and
+      // adding it there would only fix the card page — a lookup that silently
+      // returns nothing when a caller omits an argument is the shape of a bug
+      // that comes back.
+      game: game ?? gameOfCard(cardId ?? null),
+      number: number ?? null,
+      setName: setName ?? null,
+    });
+    // When the printings disagree beyond a ratio, ONE number for all of them
+    // is a claim we cannot stand behind. Say so rather than pick one: the
+    // client is told which versions exist and asked which they hold.
+    const ambiguous = priceIsAmbiguous(variants);
+
     return {
       name,
       setName: setName ?? null,
       number: number ?? null,
       grader: grader ?? null,
       grade: grade_,
-      rawUsd: raw,
+      rawUsd: ambiguous ? null : raw,
+      variants,
+      variantsAmbiguous: ambiguous,
       byGrader: ppt.byGrader ?? null,
+      // Which printing this is and how often it trades. Both have been in the
+      // provider payload the whole time and neither ever reached a screen, so
+      // a holo and a reverse holo — different markets, sometimes by 3x — were
+      // shown as one card with one price.
+      printings: ppt.printings ?? null,
+      velocity: ppt.velocity ?? null,
       sold,
       slabPrice,
       liveAsk:

@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS offers (
   created_at timestamptz NOT NULL DEFAULT now(),
   settled_at timestamptz
 );
+-- The seller's counter, kept BESIDE the buyer's offer rather than on top of it.
+-- Countering used to overwrite the amount column, which erased the only record
+-- of what the buyer had offered: an A$11,800 offer countered at A$120,000 read
+-- back as an A$120,000 offer from the buyer. Both numbers matter — the screen
+-- has to say "you offered X, they want Y" — and only one of them was survived.
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS counter_amount numeric;
+-- Which offer this one replaces, when a buyer counters a counter. The chain is
+-- worth keeping: it is the negotiation.
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS replaces text;
+
 CREATE INDEX IF NOT EXISTS offers_listing ON offers (listing_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS offers_buyer ON offers (buyer_id, created_at DESC);
 
@@ -138,9 +148,21 @@ export const TRANSITIONS: Record<string, string[]> = {
   // `paused` takes a live listing off the market without closing it. A
   // withdrawal is final; this is not, and conflating the two meant every
   // temporary hold destroyed the listing it was protecting.
-  live: ["sold", "paused", "withdrawn"],
+  // `reserved` is a card two people have agreed on: off the market, not yet
+  // gone. Accepting an offer used to change one word on the offer row and
+  // leave the listing live, so a card that was already promised kept taking
+  // offers from other buyers — every one of them a person who thought they
+  // were in with a chance.
+  live: ["reserved", "sold", "paused", "withdrawn"],
+  reserved: ["sold", "live", "withdrawn"],
   paused: ["live", "withdrawn"],
   rejected: ["in_review", "withdrawn"],
+  // Still final, as it always has been. The first version of the deal flow
+  // opened `sold -> live` so a deal that collapsed after dispatch could put
+  // the card back, and two existing tests caught it: "a sold or withdrawn
+  // listing is final" is a rule, not an accident. The right answer was that a
+  // card in transit is not sold — it stays `reserved` until the buyer
+  // confirms, which is both true and leaves this alone.
   sold: [],
   withdrawn: [],
 };

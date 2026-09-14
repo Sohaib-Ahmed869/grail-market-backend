@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { censor } from "../community/censor.js";
+import { weigh } from "../community/pressure.js";
 import { notify } from "../notifications/store.js";
 
 // Buyer and seller talking about one card.
@@ -148,12 +149,36 @@ export async function say(
   if (!thread) return null;
   if (thread.buyer_id !== senderId && thread.seller_id !== senderId) return null;
 
-  const c = censor(body);
+  /* Two passes, because they catch different things.
+   *
+   * `censor` reads this message on its own and masks anything that is a
+   * contact detail in it. `weigh` reads it against what the same person has
+   * said in this thread over the last hour, and catches the number that only
+   * exists across four messages — which no rule looking at one message can
+   * ever see. A sender who has already put nine unexplained digits into the
+   * conversation does not get to place the last three. */
+  const recent = await pool.query(
+    `select coalesce(raw_body, body) as said
+       from messages
+      where thread_id = $1 and sender_id = $2 and kind = 'text'
+        and created_at > now() - interval '60 minutes'
+      order by created_at desc
+      limit 10`,
+    [threadId, senderId],
+  );
+  const split = weigh(body, recent.rows.map((r: any) => r.said ?? ""));
+
+  const c = censor(split.text);
+  const flags = [...c.hits];
+  if (split.masked && !flags.includes("split-contact")) flags.push("split-contact");
+
   const id = `m_${randomUUID().slice(0, 12)}`;
   await pool.query(
     `insert into messages (message_id, thread_id, sender_id, body, raw_body, flags, kind)
      values ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, threadId, senderId, c.text, c.masked ? body : null, c.hits, kind],
+    // The original is kept whenever anything was changed, because moderation
+    // needs to read what was actually typed.
+    [id, threadId, senderId, c.text, (c.masked || split.masked) ? body : null, flags, kind],
   );
   await pool.query("update threads set last_at = now() where thread_id = $1", [threadId]);
 
@@ -166,7 +191,7 @@ export async function say(
     href: `/messages/${threadId}`,
   });
 
-  return { messageId: id, masked: c.masked };
+  return { messageId: id, masked: c.masked || split.masked };
 }
 
 /** An event in the deal, written into the conversation by the system. */

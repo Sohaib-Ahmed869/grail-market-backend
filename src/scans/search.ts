@@ -144,7 +144,21 @@ async function buildOnePieceIndex(): Promise<SearchHit[]> {
     for (const c of page) {
       if (!c?.card_name || !c?.card_set_id) continue;
       out.push({
-        cardId: `optcg-${c.card_set_id}`,
+        // `card_image_id`, not `card_set_id`.
+        //
+        // One Piece prints a card and then reprints it as a parallel, an
+        // alternate art, a Wanted Poster — and gives every one of them the SAME
+        // card_set_id. OP13-119 is five cards: a $1.77 base, an $18 parallel, a
+        // $433 Wanted Poster, a $1,085 Super Alternate Art and a $4,420 Red
+        // Super Alternate Art. Keyed on card_set_id they were one catalogue
+        // entry, so `grade_prices` — which keys on catalog_id — could not tell
+        // the cheapest from the dearest. 33 of the 154 cards in OP-02 collide
+        // this way; card_image_id is unique across all 154.
+        //
+        // A base print's image id IS its set id, so every existing id is
+        // unchanged and nothing already stored is orphaned. Only the parallels,
+        // which were wrong anyway, gain their `_p1` suffix.
+        cardId: `optcg-${c.card_image_id ?? c.card_set_id}`,
         // the catalog suffixes a disambiguating number: "Portgas.D.Ace (119)"
         name: String(c.card_name).replace(/\s*\(\d+\)\s*$/, ""),
         nameLocal: null,

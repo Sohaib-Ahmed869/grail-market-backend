@@ -106,8 +106,17 @@ export function comparePrinting(card: Printing, listing: Printing): Verdict {
   } else if (card.family && !listing.family) {
     return "unknown";
   } else if (!card.family && listing.family) {
-    // We could not read a family off our own card. A listing that declares one
-    // may still be ours, so this cannot be a conflict.
+    /* No family on our card. Usually that means we could not read one, and a
+     * listing that declares one may still be ours — so silence is not a
+     * conflict.
+     *
+     * But a modifier is a declaration too, and the taxonomy could not say so.
+     * "Red Super Alternate Art" carries the altart MODIFIER and no family at
+     * all, so against a "Wanted Poster" listing — a different product, two
+     * thousand dollars away — this returned "unknown" and the listing stayed
+     * in the panel beside a correctly identified chase card. A card that
+     * declares what it is has not been silent. */
+    if (card.modifiers.length > 0) return "conflict";
     return "unknown";
   }
 
@@ -125,6 +134,20 @@ export function comparePrinting(card: Printing, listing: Printing): Verdict {
 
   if (card.family && listing.family === card.family) return "match";
   if (card.form && listing.form === card.form) return "match";
+
+  /* Modifiers, where neither side named a family.
+   *
+   * They cannot carry a match on their own where a family exists — "Manga Alt
+   * Art" is the manga printing and the family decides it — but on a card whose
+   * whole identity IS the modifier, they are the only thing there is to
+   * compare. Both silent stays unknown; both declaring the same thing is as
+   * positive as this reading gets. */
+  if (!card.family && !listing.family && card.modifiers.length > 0) {
+    const theirs = new Set(listing.modifiers);
+    if (listing.modifiers.length === 0) return "unknown";
+    return card.modifiers.every((m) => theirs.has(m)) ? "match" : "conflict";
+  }
+
   return "unknown";
 }
 

@@ -1,14 +1,20 @@
-import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
+import {
+  Body, Controller, Get, Param, Post, Query, Req, UploadedFile, UseInterceptors,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, photosConfigured, signUpload, type Angle } from "../photos/s3.js";
+import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
 } from "./store.js";
-import { makeOffer, offersByBuyer, offersFor, settleOffer } from "./offers.js";
+import {
+  makeOffer, offersByBuyer, offersFor, settleOffer, offersToSeller, hasStakeIn,
+  replyToCounter,
+} from "./offers.js";
 import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
@@ -44,7 +50,7 @@ export class ListingsController {
       min: min ? Number(min) : null, max: max ? Number(max) : null,
       sort: sort ?? null,
     });
-    return { listings: rows.map(publicShape), sort: sort ?? "featured" };
+    return { listings: await signPreviews(rows.map(publicShape)), sort: sort ?? "featured" };
   }
 
   @Get("mine")
@@ -59,7 +65,7 @@ export class ListingsController {
     const plan = findPlan(planId ?? "");
     const live = rows.filter((r) => ["live", "in_review"].includes(r.status)).length;
     return {
-      listings: rows.map(sellerShape),
+      listings: await signPreviews(rows.map(sellerShape)),
       // The ceiling is reported with the listings rather than discovered at
       // the moment of publishing, so hitting it is never a surprise.
       quota: { plan: plan?.name ?? null, limit: plan?.listings ?? null, used: live },
@@ -72,7 +78,7 @@ export class ListingsController {
   async queue(@Req() req: Request) {
     if (!need(req)) return { error: "unauthenticated" };
     // TODO(admin): gate on an admin role once one exists.
-    return { listings: (await reviewQueue()).map(sellerShape) };
+    return { listings: await signPreviews((await reviewQueue()).map(sellerShape)) };
   }
 
   @Get(":id")
@@ -80,10 +86,28 @@ export class ListingsController {
     const l = await getListing(id);
     if (!l) return { error: "not-found" };
     const me = need(req);
-    // A listing in review is visible to its seller and nobody else.
-    if (l.status !== "live" && l.seller_id !== me) return { error: "not-found" };
+    // A listing in review is visible to its seller and nobody else — but a
+    // listing that has STOPPED being live because somebody bought it has to
+    // stay visible to the person who bought it.
+    //
+    // Accepting an offer moves a listing to `reserved`, and this test then hid
+    // it from the buyer: their own offers list, the message thread and the
+    // notification all linked to a page that answered "Listing Not Available".
+    // It also meant the dispute entry point, which only renders on a sold
+    // listing, was reachable by the seller and never by the buyer — who is the
+    // one who would raise a dispute.
+    const partyToIt = Boolean(me) && (l.seller_id === me || (await hasStakeIn(id, me!)));
+    if (l.status !== "live" && !partyToIt) return { error: "not-found" };
     if (l.status === "live" && me !== l.seller_id) void bumpView(id);
-    return { listing: l.seller_id === me ? sellerShape(l) : publicShape(l) };
+    const shaped = l.seller_id === me ? sellerShape(l) : publicShape(l);
+    // The bucket is not public, so the stored object URLs 403 for everyone.
+    // Signed only on the single-listing read: the market grid shows one
+    // thumbnail per card and signing every photo of every listing to render a
+    // grid is a signature nobody looks at.
+    if (Array.isArray((shaped as any).photos)) {
+      (shaped as any).photos = await signAll((shaped as any).photos);
+    }
+    return { listing: shaped };
   }
 
   /** Step 1-3 of the sell flow, in one call. The draft exists before any
@@ -146,6 +170,45 @@ export class ListingsController {
       })),
     );
     return { uploads: urls };
+  }
+
+  /** One photograph, posted straight to us as multipart.
+   *
+   *  The presigned PUT beside this still exists and the browser still uses it.
+   *  React Native cannot: the only way to build a body for a raw PUT there is
+   *  `fetch(fileUri).blob()`, and RN's Blob is partial enough that the request
+   *  goes up empty or throws — which is why ten photographs failed silently
+   *  and a listing sat in `draft`, never reaching the review queue.
+   *
+   *  Multipart is the shape the scan upload has always used from the phone, so
+   *  this is the path we already know works rather than a second guess. */
+  @Post(":id/photo")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 25 * 1024 * 1024 } }))
+  async photo(
+    @Param("id") id: string,
+    @Req() req: Request,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() b: any,
+  ) {
+    const me = need(req);
+    if (!me) return { error: "unauthenticated" };
+    if (!photosConfigured()) {
+      return { error: "photos-unconfigured", message: "Photo storage is not configured." };
+    }
+    if (!file?.buffer?.length) {
+      return { error: "no-file", message: "No photograph was received." };
+    }
+    const l = await getListing(id);
+    if (!l || l.seller_id !== me) return { error: "not-found" };
+
+    const angle = String(b?.angle ?? "front");
+    try {
+      const up = await putPhoto(id, angle, file.buffer, file.mimetype || "image/jpeg");
+      return { angle, url: up.publicUrl };
+    } catch (e: any) {
+      console.error("[listings] photo upload failed:", e?.message);
+      return { error: "upload-failed", message: "That photograph could not be stored." };
+    }
   }
 
   @Post(":id/photos")
@@ -331,7 +394,19 @@ export class ListingsController {
     const me = need(req);
     if (!me) return { error: "unauthenticated", message: "Sign in to make an offer." };
     const l = await getListing(id);
-    if (!l || l.status !== "live") return { error: "not-found" };
+    if (!l) return { error: "not-found" };
+    // A card already promised to somebody is not missing, and saying so is not
+    // a leak — it is on the market page in front of them. "Not found" for a
+    // listing they are looking at reads as the app being broken.
+    if (l.status === "reserved") {
+      return {
+        error: "reserved",
+        message: "This one is under offer already. It comes back if the deal falls through.",
+      };
+    }
+    if (l.status !== "live") {
+      return { error: "not-available", message: "This listing is not taking offers." };
+    }
     if (l.seller_id === me) return { error: "own-listing", message: "That's your own listing." };
     const amount = Number(b?.amount);
     if (!(amount > 0)) return { error: "invalid", message: "Enter an amount." };
@@ -366,20 +441,67 @@ export class ListingsController {
     const action = String(b?.action) as "accepted" | "declined" | "countered";
     if (!["accepted", "declined", "countered"].includes(action)) return { error: "invalid" };
     const r = await settleOffer(offerId, me, action, b?.amount != null ? Number(b.amount) : undefined);
-    return r.ok ? { status: r.status } : { error: r.why };
+    // The deal id travels back so the app can go straight to it. Accepting an
+    // offer and then having to hunt for what happens next is the gap this
+    // whole flow exists to close.
+    return r.ok ? { status: r.status, dealId: r.dealId ?? null } : { error: r.why };
+  }
+
+  /** The buyer answering a counter: take it, walk away, or come back with a
+   *  number of their own.
+   *
+   *  Without this the negotiation had one move in it. The seller countered and
+   *  the buyer was left looking at a figure with no way to act on it — the
+   *  offer sat "countered" forever and the deal died of having no next step. */
+  @Post("offers/:offerId/reply")
+  async replyOffer(@Param("offerId") offerId: string, @Req() req: Request, @Body() b: any) {
+    const me = need(req);
+    if (!me) return { error: "unauthenticated" };
+    const action = String(b?.action) as "accepted" | "declined" | "countered";
+    if (!["accepted", "declined", "countered"].includes(action)) return { error: "invalid" };
+    const amount = b?.amount != null ? Number(b.amount) : undefined;
+    if (action === "countered" && !(Number(amount) > 0)) {
+      return { error: "invalid", message: "Enter an amount." };
+    }
+    const r = await replyToCounter(offerId, me, action, amount);
+    return r.ok
+      ? { status: r.status, dealId: r.dealId ?? null, offerId: r.offerId ?? null }
+      : { error: r.why };
   }
 
   @Get("offers/mine")
   async myOffers(@Req() req: Request) {
     const me = need(req);
     if (!me) return { error: "unauthenticated" };
-    return { offers: await offersByBuyer(me) };
+    // Both directions. A person is a buyer on some listings and a seller on
+    // others, and one screen that only ever showed one of those told half of
+    // them they had no offers.
+    const [made, received] = await Promise.all([offersByBuyer(me), offersToSeller(me)]);
+    return { offers: made, received };
   }
 }
 
 /** What a buyer sees. Deliberately omits the seller's own analytics — views
  *  and saves are for the person who listed it, never for the person deciding
  *  whether it has gone stale. */
+/** Sign the FIRST photo of each listing, and only the first.
+ *
+ *  A market card draws one thumbnail — `photos[0].url` — and the bucket is not
+ *  public, so every one of them 403'd and the grid rendered as empty frames.
+ *  The single-listing read signs all ten angles because somebody is about to
+ *  look at all ten; a grid of forty cards needs forty signatures, not four
+ *  hundred, so the rest are left alone and signed when the card is opened. */
+async function signPreviews<T extends { photos?: unknown }>(rows: T[]): Promise<T[]> {
+  return Promise.all(
+    rows.map(async (r) => {
+      const photos = (r as any).photos;
+      if (!Array.isArray(photos) || photos.length === 0 || !photos[0]?.url) return r;
+      const [first, ...rest] = photos;
+      return { ...r, photos: [{ ...first, url: await signDownload(first.url) }, ...rest] };
+    }),
+  );
+}
+
 function publicShape(l: any) {
   // seller_id stays: it is an opaque handle, and without it a buyer cannot
   // open the page of the person they are about to send money to. Views and

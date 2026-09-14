@@ -126,6 +126,11 @@ export async function ingestPrices(opts?: {
           low: pt.low ?? null,
           high: pt.high ?? null,
           median: pt.median ?? null,
+          // When a copy at this grade last changed hands. grade_prices has had
+          // the column since it was created and nothing ever filled it, so
+          // every stored price was undated and the app could not tell a sale
+          // from last week from one from two years ago.
+          lastSaleAt: pt.lastSaleDate ?? null,
           source: "pokemonpricetracker",
         })),
       );

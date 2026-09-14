@@ -97,8 +97,32 @@ test("one bar is not a chart", () => {
 });
 
 test("a long series offers every bar size", () => {
-  const long = [c("2024-01-01", 10), c("2025-06-01", 15), c("2026-03-10", 20)];
+  /* Dense, not sparse. Three readings eighteen months apart group into three
+     buckets at every size — so daily, weekly and monthly drew the identical
+     three-bar chart and the fixture proved the opposite of its own name.
+     A real two-year history has readings close enough together that the
+     three sizes genuinely differ, which is when offering all three is right. */
+  const long = [];
+  for (let i = 0; i < 240; i++) {
+    const d = new Date(Date.UTC(2024, 0, 1) + i * 3 * 86400000);
+    long.push(c(d.toISOString().slice(0, 10), 10 + (i % 7)));
+  }
   assert.deepEqual(availableRanges(long), RANGES.map((r) => r.id));
+});
+
+test("a bar size that draws the same chart as a shorter one is not offered", () => {
+  /* Eleven days, 26 Aug to 5 Sep — the real history behind the complaint.
+     Two calendar weeks AND two calendar months, so weekly and monthly split
+     the same closes at the same point and drew one chart under two names. */
+  const eleven = [];
+  for (let i = 0; i < 11; i++) {
+    const d = new Date(Date.UTC(2026, 7, 26) + i * 86400000);
+    eleven.push(c(d.toISOString().slice(0, 10), 100 + i));
+  }
+  const got = availableRanges(eleven);
+  assert.ok(got.includes("D"), "eleven separate days is a daily chart");
+  assert.ok(got.includes("W"), "26 Aug and 5 Sep are different weeks");
+  assert.ok(!got.includes("M"), "two bars either way, and not two months of history");
 });
 
 test("one reading offers nothing at all", () => {

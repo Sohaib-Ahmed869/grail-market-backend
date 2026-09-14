@@ -22,11 +22,15 @@ import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initDisputes } from "./disputes/store.js";
 import { initAdmin } from "./admin/store.js";
+import { initDeals } from "./listings/deals.js";
 import { initScanQuota } from "./scans/scanquota.store.js";
 import { initMaintenance } from "./maintenance/jobs.js";
 import { initMessages } from "./messages/store.js";
 import { initNotifications } from "./notifications/store.js";
 import { initNotificationPrefs } from "./notifications/prefs.js";
+import { initPrintings } from "./printings/store.js";
+import { initShares } from "./sharing/store.js";
+import { initSupport } from "./admin/support.store.js";
 import { reloadKeys } from "./scans/pptkeys.js";
 import { rateLimit } from "./limits/middleware.js";
 
@@ -64,6 +68,7 @@ async function bootstrap() {
     await initPush();
     await initRatings();
     await initDisputes();
+    await initDeals();
     await initScanQuota();
     // Applies the schema the whole admin console depends on — the staff
     // role, the member record's admin-only columns, conduct, support,
@@ -80,6 +85,12 @@ async function bootstrap() {
     await initMessages();
     await initNotifications();
     await initNotificationPrefs();
+    // Never called at boot: the support tables existed only because a seed
+    // script had made them, so a fresh database had a console that read a
+    // queue nobody could file into.
+    await initSupport();
+    await initPrintings();
+    await initShares();
   }
   else console.log("[store] DATABASE_URL not set — using local cache only");
 

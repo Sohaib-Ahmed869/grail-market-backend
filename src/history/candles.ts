@@ -107,8 +107,38 @@ export type RangeId = (typeof RANGES)[number]["id"];
  *  nothing. */
 export function availableRanges(closes: Close[]): RangeId[] {
   if (closes.length < 2) return [];
-  return RANGES.filter((r) => {
-    const buckets = new Set(closes.map((c) => bucketOf(c.day, r.bucket)));
-    return buckets.size >= 2;
-  }).map((r) => r.id);
+
+  // A bar size earns its tab by drawing something the shorter ones do not.
+  //
+  // The test was "two or more buckets", which every size passes the moment a
+  // history crosses a month boundary. Eleven days from 26 August to 5
+  // September is two weeks AND two months: weekly drew two bars, monthly drew
+  // two bars, and the split differed by a single day. Two charts of two bars
+  // that differ by one day are the same picture, and a tab that changes only
+  // the label reads as the app being broken — fairly.
+  //
+  // So a longer size has to EITHER group the closes into a different number of
+  // bars than every shorter size already kept, OR have enough history behind
+  // it to be worth its own view: two of its own bucket widths. Monthly returns
+  // on its own the day there are two months of readings, without anybody
+  // choosing a threshold.
+  const WIDTH: Record<Bucket, number> = { day: 1, week: 7, month: 28 };
+  const days = closes.map((c) => Date.parse(`${c.day}T00:00:00Z`)).filter(Number.isFinite);
+  const spanDays = days.length ? (Math.max(...days) - Math.min(...days)) / 86400000 : 0;
+
+  const kept: RangeId[] = [];
+  const counts: number[] = [];
+
+  for (const r of RANGES) {
+    const size = new Set(closes.map((c) => bucketOf(c.day, r.bucket))).size;
+    if (size < 2) continue;
+    const novel = !counts.includes(size);
+    const earned = spanDays >= WIDTH[r.bucket] * 2;
+    if (!novel && !earned) continue;
+    counts.push(size);
+    kept.push(r.id);
+  }
+
+  return kept;
 }
+

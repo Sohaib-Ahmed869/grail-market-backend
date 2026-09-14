@@ -89,6 +89,10 @@ export type AdminListing = {
   marketSource: "comps" | "listing" | "none";
   confidence: "high" | "medium" | "low";
   sampleSize: number;
+  /** Whether `sampleSize` counts our own confirmed sales or the price
+   *  engine's window. They are different populations and the console must
+   *  not present one as the other. */
+  sampleSource: "comps" | "engine" | "none";
   tier: "grail" | "high-value" | "standard";
   status: AdminStatus;
   seller: {
@@ -135,7 +139,13 @@ const ROW_SQL = `
     coalesce(rep.n, 0)    as seller_reviews,
     rep.avg               as seller_rating,
     comps.n               as comp_count,
-    comps.median          as comp_median
+    comps.median          as comp_median,
+    -- Named explicitly, or they are not in the row at all. The lateral joined
+    -- correctly and this SELECT did not carry it, so the code read undefined
+    -- and fell back to "low, n=0" — the exact answer it was written to stop
+    -- giving.
+    engine.confidence     as engine_confidence,
+    engine.sample_size    as engine_n
   from listings l
   left join users u on u.user_id = l.seller_id
   left join identity_status idn on idn.user_id = l.seller_id
@@ -157,6 +167,24 @@ const ROW_SQL = `
        and sl.grader is not distinct from l.grader
        and sl.grade  is not distinct from l.grade
   ) comps on true
+  -- What the PRICE ENGINE holds for this exact card, grader and grade.
+  --
+  -- Separate from the comps join above, which counts our own confirmed sales
+  -- and is zero
+  -- for nearly every card on a young marketplace. The console read only that
+  -- and therefore stamped "low confidence" on a figure the engine rates high
+  -- on nine hundred sales — an assertion about a number, made from a count of
+  -- something else. Both are carried so the record can say which it is.
+  left join lateral (
+    select gp.confidence, gp.sample_size, gp.price, gp.currency
+      from grade_prices gp
+     where l.catalog_id is not null
+       and gp.catalog_id = l.catalog_id
+       and gp.grader is not distinct from l.grader
+       -- "10" and "10.0" are the same rung written two ways.
+       and gp.grade::numeric is not distinct from nullif(l.grade, '')::numeric
+     limit 1
+  ) engine on true
 `;
 
 export async function adminListings(q: {
@@ -279,6 +307,13 @@ export async function listingPhotos(
   if (!pool) return [];
   const r = await pool.query("select photos from listings where listing_id = $1", [id]);
   const raw = r.rows[0]?.photos;
+  // Signed, because the bucket is not public. The rows hold the plain object
+  // URL; every one of them 403s to anybody, including the reviewer who has to
+  // look at ten angles before approving a card.
+  //
+  // Shaped rather than passed straight through, so the declared return type
+  // is one this function actually honours — `photos` is jsonb and a row that
+  // predates the current writer can be missing either field.
   if (!Array.isArray(raw)) return [];
   return Promise.all(
     raw.map(async (p: any) => ({
@@ -487,6 +522,22 @@ export async function shape(
   const marketSource: AdminListing["marketSource"] =
     fromComps ? "comps" : market > 0 ? "listing" : "none";
 
+  // Confidence follows whichever source the figure actually came from.
+  //
+  // It used to be derived from `comps` alone, so a card the price engine
+  // rates high on 986 sales was shown as low confidence because WE had never
+  // sold one. That is a claim about the number on screen, drawn from a count
+  // of something the number was not built from.
+  const engineN = Number(r.engine_n ?? 0);
+  const engineConf = typeof r.engine_confidence === "string" ? r.engine_confidence : null;
+  const sampleSize = fromComps ? comps : engineN;
+  const confidence: AdminListing["confidence"] =
+    fromComps
+      ? (comps >= 20 ? "high" : comps >= 5 ? "medium" : "low")
+      : engineConf === "high" || engineConf === "medium" || engineConf === "low"
+        ? engineConf
+        : "low";
+
   const name: string = r.seller_name ?? "Unknown seller";
 
   // `image_url` is never written by the real listing-creation path, so it is
@@ -515,9 +566,13 @@ export async function shape(
     currency: r.currency ?? "AUD",
     marketPrice: market,
     marketSource,
-    confidence: comps >= 20 ? "high" : comps >= 5 ? "medium" : "low",
-    sampleSize: comps,
-    tier: ask >= floors.grailFloor ? "grail" : ask >= floors.highValueFloor ? "high-value" : "standard",
+    confidence,
+    sampleSize,
+    /** Which of the two the confidence and the sample describe. The panel has
+     *  to say so — "9 sales" means our ledger under one and the provider's
+     *  window under the other. */
+    sampleSource: fromComps ? "comps" : engineN > 0 ? "engine" : "none",
+    tier: ask >= GRAIL_FLOOR ? "grail" : ask >= HIGH_VALUE_FLOOR ? "high-value" : "standard",
     status: adminStatus(r),
     seller: {
       id: r.seller_id,
