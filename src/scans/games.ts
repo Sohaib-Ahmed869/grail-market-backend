@@ -6,7 +6,7 @@ import {
   sorcerySetDetail, sorcerySets, swuSetDetail, swuSets,
 } from "./opensources.js";
 import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
-import { CATEGORY, groupsFor } from "../printings/tcgcsv.js";
+import { CATEGORY, groupsFor, setContents } from "../printings/tcgcsv.js";
 
 // Browsing, one level up.
 //
@@ -22,6 +22,8 @@ import { CATEGORY, groupsFor } from "../printings/tcgcsv.js";
 export type Game = {
   id: string;
   name: string;
+  /** tcg | sports | entertainment — see categoryOf. */
+  category?: string;
   /** Roughly how many sets, for the tile. Filled after the first fetch. */
   sets?: number;
   /** Artwork for the tile — the newest set's logo. A name on a coloured
@@ -272,7 +274,14 @@ async function ygoSets(): Promise<SetSummary[]> {
  *  somebody taps a tile is how a free catalogue starts refusing us. */
 async function withCardArt(gameId: string, sets: SetSummary[]): Promise<SetSummary[]> {
   const out = [...sets];
-  const queue = out.map((s, i) => ({ s, i })).filter((x) => !x.s.logo);
+  // The first screenful, not all of them. Yu-Gi-Oh has 1,035 sets and one
+  // request each would be 1,035 requests to decorate a list nobody has
+  // scrolled. The rest keep their names, which is what the tile falls back to.
+  const ART_BUDGET = 24;
+  const queue = out
+    .map((s, i) => ({ s, i }))
+    .filter((x) => !x.s.logo)
+    .slice(0, ART_BUDGET);
 
   const worker = async () => {
     for (;;) {
@@ -291,6 +300,31 @@ async function withCardArt(gameId: string, sets: SetSummary[]): Promise<SetSumma
           const list = Array.isArray(r) ? r : (r?.data ?? []);
           const url = list.find((c: any) => c?.card_image)?.card_image;
           if (url) out[job.i] = { ...job.s, logo: url };
+        } else if (gameId === "pokemon") {
+          // TCGdex publishes a logo for most sets and nothing for the rest -
+          // trainer kits, promo lines, the small sub-sets. Those drew as a
+          // two-letter placeholder sitting in a grid next to real logos,
+          // which reads as broken rather than as missing. The set's own first
+          // card is a better stand-in than its initials.
+          const r = await json<any>(`https://api.tcgdex.net/v2/en/sets/${encodeURIComponent(code)}`);
+          // The first card WITH a picture, not the first card. TCGdex ships
+          // the checklist ahead of the artwork on a new set, so cards[0] is
+          // routinely imageless while later ones are fine - Paldean Wonders
+          // lists 131 cards and 0 images, Mega Evolution the same. Taking
+          // cards[0] blindly found nothing on exactly the sets people are
+          // looking for.
+          const first = (r?.cards ?? []).find((c: any) => c?.image);
+          if (first?.image) out[job.i] = { ...job.s, logo: `${first.image}/low.png` };
+        } else if (CATEGORY[gameId]) {
+          // tcgcsv games: the set's own first card. Their group carries no
+          // logo, so the alternative is a grey rectangle next to sets that
+          // have one, which reads worse than either extreme.
+          const groupId = Number(job.s.setId.split(":")[2]);
+          if (Number.isFinite(groupId)) {
+            const { products } = await setContents(gameId, groupId);
+            const url = products.find((x) => x.imageUrl)?.imageUrl;
+            if (url) out[job.i] = { ...job.s, logo: url };
+          }
         }
       } catch {
         // A set without a picture keeps its name, which is the fallback the
@@ -365,7 +399,7 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
   // seconds to see names they could have had immediately is a bad trade for
   // pictures. It runs after the answer has gone out and updates the cache, so
   // the art is there a moment later and for the rest of the day.
-  if (sets.length && !enriching.has(gameId) && (gameId === "onepiece" || gameId === "lorcana")) {
+  if (sets.length && !enriching.has(gameId) && (gameId === "onepiece" || gameId === "lorcana" || gameId === "pokemon" || CATEGORY[gameId])) {
     enriching.add(gameId);
     void withCardArt(gameId, sets)
       .then((withArt) => cache.set(gameId, withArt))
@@ -403,6 +437,20 @@ async function cardPreview(gameId: string, sets: SetSummary[]): Promise<string |
       );
       const list = Array.isArray(r) ? r : (r?.data ?? []);
       url = list.find((c: any) => c?.card_image)?.card_image ?? null;
+    }
+    // Everything else tcgcsv carries, which is most of the list. Their
+    // products carry an image each, so the newest set's first card is the
+    // cover - the same trick the three above use against their own APIs.
+    //
+    // Without this the browse row was nine games with art and fifty-three
+    // grey rectangles, which reads as broken rather than as sparse. One
+    // request per game, in the background, cached for a day.
+    else if (CATEGORY[gameId] && sets[0]?.setId.startsWith("tcg:")) {
+      const groupId = Number(sets[0].setId.split(":")[2]);
+      if (Number.isFinite(groupId)) {
+        const { products } = await setContents(gameId, groupId);
+        url = products.find((x) => x.imageUrl)?.imageUrl ?? null;
+      }
     }
   } catch {
     // A tile without a picture is still a tile.
@@ -643,6 +691,39 @@ function warm(gameId: string): Promise<unknown> {
  *  Grand Archive crawl is 26 requests and can take a minute cold. */
 const GAMES_BUDGET_MS = 8_000;
 
+/** What kind of thing a game is, so a filter can offer "sports" without
+ *  listing sixty-two chips and hoping somebody reads them all.
+ *
+ *  Three groups, because that is how people actually ask: the trading card
+ *  games, sports, and everything licensed from something else. A game with no
+ *  entry is a TCG - that is what the overwhelming majority are, and defaulting
+ *  the other way would put Pokemon under "other". */
+export type GameCategory = "tcg" | "sports" | "entertainment";
+
+const ENTERTAINMENT = new Set([
+  "godzilla", "palworld", "cookierun", "cyberpunk", "transformers", "bakugan",
+  "mlp", "mlpccg", "neopets", "hololive", "naruto", "dbz", "dbsccg",
+  "dbsfusion", "finalfantasy", "gundam", "riftbound", "swu", "swdestiny",
+  "wow", "aoschampions", "munchkin", "lightseekers", "redakai", "elestrals",
+]);
+
+/** Sports is empty on purpose, and that is the honest state of it.
+ *
+ *  tcgcsv carries no sports at all - every one of its 94 categories is a
+ *  trading card game, checked. Sports arrives when Card Hedge is switched on
+ *  or TCDB is reachable through Parse, and each of those lands its games with
+ *  a category already attached rather than being guessed at here. */
+const SPORTS = new Set<string>([]);
+
+export const categoryOf = (id: string): GameCategory =>
+  SPORTS.has(id) ? "sports" : ENTERTAINMENT.has(id) ? "entertainment" : "tcg";
+
+export const GAME_CATEGORIES: { id: GameCategory; name: string }[] = [
+  { id: "tcg", name: "Trading card games" },
+  { id: "entertainment", name: "Licensed & entertainment" },
+  { id: "sports", name: "Sports" },
+];
+
 export async function gamesWithPreviews(): Promise<Game[]> {
   const bought = await boughtGames();
   const all = [...GAMES, ...bought];
@@ -679,6 +760,7 @@ export async function gamesWithPreviews(): Promise<Game[]> {
       const logo = sets.find((s) => s.logo)?.logo ?? null;
       return {
         ...g,
+        category: categoryOf(g.id),
         sets: sets.length || undefined,
         preview: logo ?? (sets.length ? await cardPreview(g.id, sets) : null),
       };
