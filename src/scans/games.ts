@@ -6,6 +6,7 @@ import {
   sorcerySetDetail, sorcerySets, swuSetDetail, swuSets,
 } from "./opensources.js";
 import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
+import { CATEGORY, groupsFor } from "../printings/tcgcsv.js";
 
 // Browsing, one level up.
 //
@@ -29,18 +30,76 @@ export type Game = {
 };
 
 export const GAMES: Game[] = [
+  // Every game tcgcsv carries, which is every TCGplayer category that is
+  // actually cards. The first nine have a free catalogue of their own behind
+  // them as well; the rest resolve through `printings`, which is the same
+  // source the first nine already use for their variants and prices.
+  //
+  // Order is deliberate: the games people come here for first, then the rest
+  // alphabetically-ish by how likely anyone is to look for them. A browse
+  // screen with sixty tiles needs the first row to be the right one.
   { id: "pokemon", name: "Pokémon" },
   { id: "onepiece", name: "One Piece" },
   { id: "yugioh", name: "Yu-Gi-Oh!" },
   { id: "lorcana", name: "Lorcana" },
   { id: "mtg", name: "Magic: The Gathering" },
-  // Four more free catalogues, each called and read before being wired. They
-  // were absent for no better reason than that this list was hardcoded at five
-  // and nobody came back to it.
   { id: "swu", name: "Star Wars Unlimited" },
   { id: "sorcery", name: "Sorcery: Contested Realm" },
   { id: "digimon", name: "Digimon" },
   { id: "gatcg", name: "Grand Archive" },
+  { id: "pokemonjp", name: "Pokémon (Japan)" },
+  { id: "fab", name: "Flesh and Blood" },
+  { id: "vanguard", name: "Cardfight!! Vanguard" },
+  { id: "weiss", name: "Weiss Schwarz" },
+  { id: "unionarena", name: "Union Arena" },
+  { id: "gundam", name: "Gundam Card Game" },
+  { id: "riftbound", name: "Riftbound" },
+  { id: "dbsfusion", name: "Dragon Ball Super Fusion World" },
+  { id: "dbsccg", name: "Dragon Ball Super CCG" },
+  { id: "dbz", name: "Dragon Ball Z" },
+  { id: "naruto", name: "Naruto" },
+  { id: "hololive", name: "hololive" },
+  { id: "metazoo", name: "MetaZoo" },
+  { id: "wixoss", name: "WIXOSS" },
+  { id: "elestrals", name: "Elestrals" },
+  { id: "battlespirits", name: "Battle Spirits Saga" },
+  { id: "shadowverse", name: "Shadowverse Evolve" },
+  { id: "finalfantasy", name: "Final Fantasy TCG" },
+  { id: "universus", name: "UniVersus" },
+  { id: "keyforge", name: "KeyForge" },
+  { id: "transformers", name: "Transformers" },
+  { id: "godzilla", name: "Godzilla" },
+  { id: "palworld", name: "Palworld" },
+  { id: "cookierun", name: "CookieRun Braverse" },
+  { id: "cyberpunk", name: "Cyberpunk" },
+  { id: "alphaclash", name: "Alpha Clash" },
+  { id: "akora", name: "Akora" },
+  { id: "kryptik", name: "Kryptik" },
+  { id: "gateruler", name: "Gate Ruler" },
+  { id: "alternatesouls", name: "Alternate Souls" },
+  { id: "argentsaga", name: "Argent Saga" },
+  { id: "chronoclash", name: "Chrono Clash System" },
+  { id: "architect", name: "Architect" },
+  { id: "aoschampions", name: "Warhammer Age of Sigmar Champions" },
+  { id: "munchkin", name: "Munchkin CCG" },
+  { id: "lightseekers", name: "Lightseekers" },
+  { id: "exodus", name: "Exodus" },
+  { id: "mlpccg", name: "My Little Pony CCG" },
+  { id: "casterchronicles", name: "The Caster Chronicles" },
+  { id: "zwo", name: "Zombie World Order" },
+  { id: "metax", name: "MetaX" },
+  { id: "dragoborne", name: "Dragoborne" },
+  { id: "swdestiny", name: "Star Wars Destiny" },
+  { id: "buddyfight", name: "Future Card BuddyFight" },
+  { id: "dicemasters", name: "Dice Masters" },
+  { id: "forceofwill", name: "Force of Will" },
+  { id: "wow", name: "World of Warcraft TCG" },
+  { id: "redakai", name: "Redakai" },
+  { id: "epic", name: "Epic" },
+  { id: "bakugan", name: "Bakugan" },
+  { id: "mlp", name: "My Little Pony" },
+  { id: "neopets", name: "Neopets Battledome" },
+  { id: "rushofikorr", name: "Rush of Ikorr" },
 ];
 
 /** The five above are the ones with a free catalogue behind them, and they
@@ -244,6 +303,34 @@ async function withCardArt(gameId: string, sets: SetSummary[]): Promise<SetSumma
   return out;
 }
 
+/** Sets for any game tcgcsv carries.
+ *
+ *  Their "groups" are sets. No key, no contract, and already fetched for this
+ *  game whenever a printing is looked up, so the first tap on a new game costs
+ *  one request and the cache covers the rest of the day.
+ *
+ *  No release date and no card count: tcgcsv publishes neither on a group, and
+ *  inventing them would put a number on screen that nothing stands behind. The
+ *  set list renders without them. */
+async function tcgcsvSets(gameId: string): Promise<SetSummary[]> {
+  if (!CATEGORY[gameId]) return [];
+  const groups = await groupsFor(gameId).catch(() => []);
+  return groups
+    .filter((g) => g.name)
+    .map((g) => ({
+      setId: `tcg:${gameId}:${g.groupId}`,
+      name: g.name,
+      logo: null,
+      symbol: null,
+      total: 0,
+      official: 0,
+      releasedAt: null,
+    }))
+    // Newest first is what a set list wants, and their group ids climb with
+    // time, so the id is the closest thing to a date they give us.
+    .sort((a, b) => Number(b.setId.split(":")[2]) - Number(a.setId.split(":")[2]));
+}
+
 export async function setsForGame(gameId: string): Promise<SetSummary[]> {
   const hit = cache.get(gameId);
   if (hit) return hit;
@@ -262,7 +349,11 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
     // shape is theirs rather than one API per game — which is the whole
     // difference between paying for a catalogue and wiring five of them.
     : gameId.startsWith(`${CH_PREFIX}:`) ? await boughtSets(gameId.slice(CH_PREFIX.length + 1))
-    : [];
+    // Every other mapped game resolves its sets from tcgcsv, which is where
+    // `printings` already gets its variants and prices. The nine above keep
+    // their own catalogues because those carry artwork, release dates and card
+    // counts that tcgcsv does not - this is the floor, not a replacement.
+    : await tcgcsvSets(gameId);
 
   // Never cache an empty answer. An upstream having a bad minute would
   // otherwise leave a game looking permanently empty for a day.

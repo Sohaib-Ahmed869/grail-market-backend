@@ -35,19 +35,88 @@ import { TtlCache } from "../scans/ttlcache.js";
 
 const BASE = "https://tcgcsv.com/tcgplayer";
 
-/** Our game ids to theirs. Japanese Pokemon is a separate category there and
- *  is deliberately not mapped: it is a different market with different prices,
- *  and folding it in is the mistake `printing.ts` already guards against. */
+/** Our game ids to theirs, for every TCGplayer category that is actually
+ *  CARDS. Their list runs to 94 and includes miniatures, board games, sleeves,
+ *  storage, Warhammer product lines and TCGplayer's own housekeeping; those are
+ *  excluded, leaving 64.
+ *
+ *  This was nine for no better reason than that nine were typed. Every one of
+ *  the rest costs nothing extra: tcgcsv is free, unauthenticated and already
+ *  the source behind `printings`, so the sets, the products and the prices for
+ *  all of them arrive through exactly the same two calls.
+ *
+ *  Japanese Pokemon is category 85 and is its OWN game id rather than being
+ *  folded into `pokemon`. It is a different market at different prices, which
+ *  `printing.ts` already guards against mixing — now that the SKU carries a
+ *  language axis it can be carried properly instead of dropped.
+ *
+ *  Marvel (69) and DC (70) are excluded and should stay excluded: those are
+ *  TCGplayer's COMIC BOOK categories, 10,823 and 8,979 groups, one per
+ *  issue. Wiring them buries sixty-odd real games under twenty thousand
+ *  comics in browse-by-game. */
 export const CATEGORY: Record<string, number> = {
-  mtg: 1,
-  yugioh: 2,
   pokemon: 3,
-  digimon: 63,
   onepiece: 68,
+  yugioh: 2,
   lorcana: 71,
-  gatcg: 74,
-  sorcery: 77,
+  mtg: 1,
   swu: 79,
+  sorcery: 77,
+  digimon: 63,
+  gatcg: 74,
+  pokemonjp: 85,
+  fab: 62,
+  vanguard: 16,
+  weiss: 20,
+  unionarena: 81,
+  gundam: 86,
+  riftbound: 89,
+  dbsfusion: 80,
+  dbsccg: 27,
+  dbz: 23,
+  naruto: 93,
+  hololive: 87,
+  metazoo: 66,
+  wixoss: 67,
+  elestrals: 83,
+  battlespirits: 72,
+  shadowverse: 73,
+  finalfantasy: 24,
+  universus: 25,
+  keyforge: 59,
+  transformers: 57,
+  godzilla: 88,
+  palworld: 91,
+  cookierun: 90,
+  cyberpunk: 92,
+  alphaclash: 78,
+  akora: 75,
+  kryptik: 76,
+  gateruler: 65,
+  alternatesouls: 64,
+  argentsaga: 61,
+  chronoclash: 60,
+  architect: 55,
+  aoschampions: 54,
+  munchkin: 53,
+  lightseekers: 48,
+  exodus: 47,
+  mlpccg: 38,
+  casterchronicles: 37,
+  zwo: 36,
+  metax: 30,
+  dragoborne: 28,
+  swdestiny: 26,
+  buddyfight: 19,
+  dicemasters: 18,
+  forceofwill: 17,
+  wow: 13,
+  redakai: 10,
+  epic: 7,
+  bakugan: 58,
+  mlp: 21,
+  neopets: 84,
+  rushofikorr: 94,
 };
 
 export type TcgGroup = { groupId: number; name: string; abbreviation: string | null };
