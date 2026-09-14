@@ -21,6 +21,7 @@ import { initWatchlist } from "./watchlist/store.js";
 import { initPush } from "./push/store.js";
 import { initRatings } from "./ratings/store.js";
 import { initDisputes } from "./disputes/store.js";
+import { initAdmin } from "./admin/store.js";
 import { initDeals } from "./listings/deals.js";
 import { initScanQuota } from "./scans/scanquota.store.js";
 import { initMaintenance } from "./maintenance/jobs.js";
@@ -69,6 +70,17 @@ async function bootstrap() {
     await initDisputes();
     await initDeals();
     await initScanQuota();
+    // Applies the schema the whole admin console depends on — the staff
+    // role, the member record's admin-only columns, conduct, support,
+    // commerce, pricing exclusions, the audit log, announcements and the
+    // settings table. This used to run only from the one-off seed scripts
+    // (`seed-audit.mts`, `seed-staff.mts`) and never from the server itself,
+    // which is why it has worked at all: whichever of those ran first left
+    // the schema behind. A fresh database with neither ever run would boot
+    // with no admin schema at all. Every statement in it is `create table if
+    // not exists` / `add column if not exists`, so running it here on every
+    // boot is a no-op once it has already been applied.
+    await initAdmin();
     await initMaintenance();
     await initMessages();
     await initNotifications();

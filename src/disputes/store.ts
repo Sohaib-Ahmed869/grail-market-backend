@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { censor } from "../community/censor.js";
 import { notify } from "../notifications/store.js";
+import { readSettings } from "../admin/settings.store.js";
+import { moveListing } from "../listings/store.js";
 import {
   canComment, canRaise, canResolve, canWithdraw, isOutcome, statusAfterComment,
   type Deal, type Outcome, type ReasonCode, type Status,
@@ -50,6 +52,21 @@ CREATE TABLE IF NOT EXISTS dispute_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS dispute_events_thread ON dispute_events (dispute_id, created_at);
+
+-- Marketplace policy's "Pause on report": which of the reported member's
+-- listings this dispute took off the market, so they can be given back when
+-- (and only when) it is safe to — see resumeAutoPausedListings() below. Not
+-- a column on listings itself: a listing can be paused for more than one
+-- open dispute against the same seller, and the row has to know which cases
+-- are still holding it down rather than a single "paused by" pointer that
+-- the first case to close would overwrite.
+CREATE TABLE IF NOT EXISTS dispute_pauses (
+  dispute_id text NOT NULL,
+  listing_id text NOT NULL,
+  paused_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (dispute_id, listing_id)
+);
+CREATE INDEX IF NOT EXISTS dispute_pauses_listing ON dispute_pauses (listing_id);
 `;
 
 export async function initDisputes(): Promise<void> {
@@ -112,13 +129,17 @@ export async function raiseDispute(a: {
   const deal = await dealFor(a.listingId, a.userId);
   if (!deal) return { ok: false, why: "not-found", message: "That listing doesn't exist." };
 
-  const v = canRaise(a.userId, deal, a.reason, deal.soldDaysAgo);
+  // Marketplace policy's own "Reporting window" — how long after a trade one
+  // member can still report the other. `RAISE_WINDOW_DAYS` in rules.ts is only
+  // the fallback for when nobody has set one.
+  const settings = await readSettings();
+  const v = canRaise(a.userId, deal, a.reason, deal.soldDaysAgo, settings.reportWindowDays);
   if (!v.ok) {
     const message: Record<string, string> = {
       "not-party": "You weren't part of this deal.",
       self: "You can't open a dispute with yourself.",
-      "no-deal": deal.soldDaysAgo != null && deal.soldDaysAgo > 45
-        ? "This sale is more than 45 days old. Get in touch and we'll look at it directly."
+      "no-deal": deal.soldDaysAgo != null && deal.soldDaysAgo > settings.reportWindowDays
+        ? `This sale is more than ${settings.reportWindowDays} days old. Get in touch and we'll look at it directly.`
         : "You can open a dispute once the card has changed hands.",
       "already-open": "There's already an open dispute on this sale.",
       "already-resolved": "This one has been settled. Get in touch if something's changed.",
@@ -149,6 +170,15 @@ export async function raiseDispute(a: {
     );
   }
 
+  // "Pause the reported member's listings when a case opens." A side effect
+  // of the report, not of the underlying account, so it must never be able
+  // to stop the report itself from being recorded.
+  if (settings.pauseOnReport) {
+    await pauseListingsFor(v.against, id).catch((err) => {
+      console.warn("[disputes] pause-on-report failed:", (err as Error).message);
+    });
+  }
+
   await notify({
     userId: v.against, kind: "offer-settled", actorId: a.userId,
     title: "A dispute was opened on your sale",
@@ -156,6 +186,77 @@ export async function raiseDispute(a: {
     href: `/dispute/${id}`,
   });
   return { ok: true, disputeId: id };
+}
+
+/** Take the reported member's live listings off the market, and remember
+ *  which ones so `resumeAutoPausedListings` can give back exactly these and
+ *  nothing the seller paused themselves. */
+async function pauseListingsFor(sellerId: string, disputeId: string): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  const r = await pool.query(
+    "select listing_id from listings where seller_id = $1 and status = 'live'",
+    [sellerId],
+  );
+  for (const row of r.rows) {
+    const listingId = row.listing_id as string;
+    const moved = await moveListing(listingId, "paused", {
+      reason: "Automatically paused — a dispute was opened against this seller.",
+    });
+    if (moved.ok) {
+      await pool.query(
+        `insert into dispute_pauses (dispute_id, listing_id) values ($1, $2)
+         on conflict (dispute_id, listing_id) do nothing`,
+        [disputeId, listingId],
+      );
+    }
+  }
+}
+
+/**
+ * Give back whatever this dispute paused, once it closes — "until the case
+ * closes", as the setting says. Only what THIS dispute is the last thing
+ * holding down: a listing paused for two open disputes against the same
+ * seller stays paused until both are done, and a listing the seller has
+ * since withdrawn or sold is left exactly where it is.
+ *
+ * Safe to call from more than one place a case can close (a decision, a
+ * bare state change, a withdrawal) and safe to call twice on the same
+ * dispute — there is nothing left to resume the second time.
+ */
+export async function resumeAutoPausedListings(disputeId: string): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  try {
+    const r = await pool.query(
+      "select listing_id from dispute_pauses where dispute_id = $1",
+      [disputeId],
+    );
+    for (const row of r.rows) {
+      const listingId = row.listing_id as string;
+      // Closed either way a case can close: the admin console decides through
+      // `conduct_cases.state` and never touches `disputes.status`, while the
+      // seller/staff path in this file is the other way round — so a listing
+      // only counts as still blocked when NEITHER says the other case is done.
+      const still = await pool.query(
+        `select 1
+           from dispute_pauses dp
+           join disputes d on d.dispute_id = dp.dispute_id
+      left join conduct_cases c on c.dispute_id = dp.dispute_id
+          where dp.listing_id = $1
+            and dp.dispute_id <> $2
+            and d.status not in ('resolved', 'withdrawn')
+            and coalesce(c.state, 'open') <> 'resolved'`,
+        [listingId, disputeId],
+      );
+      if ((still.rowCount ?? 0) > 0) continue;
+      await moveListing(listingId, "live", {
+        reason: "Automatically resumed — the case that paused it has closed.",
+      });
+    }
+  } catch (err) {
+    console.warn("[disputes] resume-on-close failed:", (err as Error).message);
+  }
 }
 
 export type DisputeRow = {
@@ -288,6 +389,7 @@ export async function withdrawDispute(
     body: "Nothing further is needed from you.",
     href: `/dispute/${id}`,
   });
+  await resumeAutoPausedListings(id);
   return { ok: true };
 }
 
@@ -336,5 +438,6 @@ export async function resolveDispute(a: {
       href: `/dispute/${a.disputeId}`,
     });
   }
+  await resumeAutoPausedListings(a.disputeId);
   return { ok: true };
 }

@@ -1,5 +1,6 @@
 import { storePool } from "../cards.store.js";
 import { viewableUrl } from "../photos/s3.js";
+import { readSettings } from "./settings.store.js";
 
 // The listing queue, as the admin console needs it.
 //
@@ -28,6 +29,7 @@ export type AdminStatus =
   | "info-requested"
   | "live"
   | "sold"
+  | "reserved"
   | "paused"
   | "withdrawn"
   | "rejected";
@@ -36,9 +38,9 @@ export type AdminStatus =
 export const VIEWS: Record<string, string[]> = {
   queue: ["in_review"],
   seller: ["info_requested"],
-  market: ["live", "sold", "paused"],
+  market: ["live", "sold", "reserved", "paused"],
   closed: ["withdrawn", "rejected"],
-  all: ["in_review", "info_requested", "live", "sold", "paused", "withdrawn", "rejected"],
+  all: ["in_review", "info_requested", "live", "sold", "reserved", "paused", "withdrawn", "rejected"],
 };
 
 /** The review target, in hours. The dashboard states it, so it lives once. */
@@ -50,9 +52,17 @@ export const SLA_HOURS = 24;
  * A tier is not stored because it is not a fact about the card — it is a fact
  * about how much is at stake, and it moves when the price does. A seller who
  * drops a grail-tier ask to $900 should not still be queued as a grail.
+ *
+ * Read from `admin_settings` — the console's Review thresholds page — rather
+ * than fixed here, so moving a floor there actually moves the tier a listing
+ * queues under. These used to be two constants carrying the same numbers,
+ * which is a bug waiting for someone to change one and not the other; see the
+ * warning in `settings.store.ts`.
  */
-export const GRAIL_FLOOR = 10_000;
-export const HIGH_VALUE_FLOOR = 2_000;
+async function tierFloors(): Promise<{ grailFloor: number; highValueFloor: number }> {
+  const { grailFloor, highValueFloor } = await readSettings();
+  return { grailFloor, highValueFloor };
+}
 
 export type AdminListing = {
   id: string;
@@ -189,6 +199,7 @@ export async function adminListings(q: {
   const statuses = VIEWS[q.view ?? "all"] ?? VIEWS.all;
   const args: any[] = [statuses];
   const where = ["l.status = any($1)"];
+  const floors = await tierFloors();
 
   // The console's search box says "card, cert, listing id, seller". It has to
   // mean all four, or a moderator handed a cert number by a seller has nowhere
@@ -203,7 +214,7 @@ export async function adminListings(q: {
   }
 
   if (q.tier && q.tier !== "all") {
-    args.push(GRAIL_FLOOR, HIGH_VALUE_FLOOR);
+    args.push(floors.grailFloor, floors.highValueFloor);
     const g = args.length - 1;
     const h = args.length;
     const expr =
@@ -225,14 +236,21 @@ export async function adminListings(q: {
       limit $${args.length}`,
     args,
   );
-  return r.rows.map(shape);
+  // `shape` signs a photo URL per row, which is a network round trip each —
+  // fine one at a time, ruinous in a loop across a few hundred rows. Firing
+  // them together and waiting once keeps the list endpoint at the cost of
+  // its slowest signature rather than the sum of all of them.
+  return Promise.all(r.rows.map((row) => shape(row, floors)));
 }
 
 export async function adminListing(id: string): Promise<AdminListing | null> {
   const pool = storePool();
   if (!pool) return null;
-  const r = await pool.query(`${ROW_SQL} where l.listing_id = $1`, [id]);
-  return r.rows[0] ? shape(r.rows[0]) : null;
+  const [r, floors] = await Promise.all([
+    pool.query(`${ROW_SQL} where l.listing_id = $1`, [id]),
+    tierFloors(),
+  ]);
+  return r.rows[0] ? await shape(r.rows[0], floors) : null;
 }
 
 /**
@@ -252,13 +270,26 @@ export async function queueCounts(): Promise<Record<string, number>> {
     `select status, count(*)::int n
        from listings where status <> 'draft' group by status`,
   );
+  /* Counted off the same VIEWS map the rows are filtered by, rather than by a
+     second list written out here.
+
+     This was an if/else chain ending in `else out.closed += n`, and the
+     catch-all is what broke it: `reserved` — a listing a buyer has spoken for
+     — is a status the console had never been told about, so it fell past
+     every branch and was counted as "Off the market". The tab then said 1 and
+     opened on nothing, because the ROW query filtered by VIEWS.closed, which
+     has only withdrawn and rejected in it. Two definitions of one word.
+
+     Now there is one. A status in no view is counted in `all` and nowhere
+     else, so the next status somebody adds shows up as a total that does not
+     add up — which is findable — rather than silently inflating a tab it is
+     not in. */
   for (const row of r.rows) {
     const n = Number(row.n);
     out.all += n;
-    if (row.status === "in_review") out.queue += n;
-    else if (row.status === "info_requested") out.seller += n;
-    else if (["live", "sold", "paused"].includes(row.status)) out.market += n;
-    else out.closed += n;
+    for (const [view, statuses] of Object.entries(VIEWS)) {
+      if (view !== "all" && statuses.includes(row.status)) out[view] += n;
+    }
   }
   return out;
 }
@@ -454,7 +485,25 @@ export async function annotate(
    Row → console
    -------------------------------------------------------------------------- */
 
-export function shape(r: any): AdminListing {
+/** The address of the row's own front photograph, unsigned.
+ *
+ *  `image_url` is never written by the real listing-creation path, so it is
+ *  null on every row; every row has `photos` instead. "Front" is the entry
+ *  angled that way, or the first entry when nothing claims the angle — the
+ *  console has to show something rather than a name for a photo that is not
+ *  there. Returns undefined, not "", so the caller's `??` chain keeps going
+ *  when there is genuinely no photo to fall back to. */
+function frontPhotoUrl(photos: unknown): string | undefined {
+  if (!Array.isArray(photos)) return undefined;
+  const usable = photos.filter((p: any) => typeof p?.url === "string");
+  const front = usable.find((p: any) => p.angle === "front") ?? usable[0];
+  return front?.url;
+}
+
+export async function shape(
+  r: any,
+  floors: { grailFloor: number; highValueFloor: number },
+): Promise<AdminListing> {
   const ask = Number(r.price ?? 0);
   const photos = Array.isArray(r.photos) ? r.photos.length : 0;
 
@@ -491,10 +540,20 @@ export function shape(r: any): AdminListing {
 
   const name: string = r.seller_name ?? "Unknown seller";
 
+  // `image_url` is never written by the real listing-creation path, so it is
+  // null on every row here — the console was drawing the hand-drawn slab
+  // placeholder beside a row whose actual photograph was one column away in
+  // the same table. Every listing does have `photos`, so the front of the
+  // card stands in when there is no dedicated `image_url`. Either way the
+  // address is signed before it reaches the console: the bucket is private,
+  // and an unsigned address is just as unloadable as none at all.
+  const rawArt: string | undefined = r.image_url ?? frontPhotoUrl(r.photos);
+  const art = rawArt ? await viewableUrl(rawArt) : undefined;
+
   return {
     id: r.listing_id,
     card: r.card_name,
-    art: r.image_url ?? undefined,
+    art,
     setLine: [r.set_name, r.variant, r.card_number ? `#${String(r.card_number).replace(/^#/, "")}` : null]
       .filter(Boolean)
       .join(" · "),
@@ -551,6 +610,8 @@ export function adminStatus(r: any): AdminStatus {
       return "live";
     case "sold":
       return "sold";
+    case "reserved":
+      return "reserved";
     case "rejected":
       return "rejected";
     default:

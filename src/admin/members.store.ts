@@ -1,5 +1,7 @@
 import { storePool } from "../cards.store.js";
 import { roleOf, ROLE_LABEL, type Role } from "./roles.js";
+import { readSettings } from "./settings.store.js";
+import { writeAudit } from "./audit.store.js";
 
 // The member record, as the console reads it.
 //
@@ -85,6 +87,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_tags jsonb NOT NULL DEFAULT '[]
 ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_note text;
 -- Read on every page of the directory.
 CREATE INDEX IF NOT EXISTS users_standing ON users (standing);
+-- Marketplace policy's "Strike limit": when the count of upheld conduct
+-- decisions against this member reaches it, a review opens automatically —
+-- recorded here rather than as a fifth standing, so reaching the limit does
+-- not silently restrict or revoke anyone on its own. Null until it fires,
+-- and never cleared automatically: a review that closed itself the moment
+-- nobody was looking would not be a review.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS strike_review_opened_at timestamptz;
 `;
 
 /* --------------------------------------------------------------------------
@@ -243,6 +252,49 @@ export async function setStanding(
     [id, standing, reason || null, by],
   );
   return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * Marketplace policy's "Strike limit": count the upheld conduct decisions
+ * against this member — the same count the member record itself shows — and
+ * open a review the moment it first reaches the limit.
+ *
+ * Called wherever a conduct decision can add a strike, right after it lands,
+ * because that is the only moment the count can cross the line. Idempotent:
+ * a member already under review is left alone rather than re-flagged on
+ * every strike after the first, which is what `strike_review_opened_at is
+ * null` in the WHERE clause guards.
+ */
+export async function checkStrikeLimit(userId: string, label?: string): Promise<void> {
+  const pool = storePool();
+  if (!pool) return;
+  const { strikeLimit } = await readSettings();
+  const r = await pool.query(
+    `update users set strike_review_opened_at = now()
+      where user_id = $1
+        and role = 'member'
+        and strike_review_opened_at is null
+        and (
+          select count(*)::int from conduct_cases c
+           where c.against_id = $1 and c.outcome is not null and c.outcome <> 'none'
+        ) >= $2
+      returning (
+        select count(*)::int from conduct_cases c
+         where c.against_id = $1 and c.outcome is not null and c.outcome <> 'none'
+      ) as strikes`,
+    [userId, strikeLimit],
+  );
+  if ((r.rowCount ?? 0) > 0) {
+    const strikes = r.rows[0]?.strikes ?? strikeLimit;
+    void writeAudit({
+      actor: "System",
+      area: "member",
+      action: "Opened a member review",
+      target: label ?? userId,
+      detail: `${strikes} strikes reached the limit of ${strikeLimit}.`,
+      weight: "high",
+    });
+  }
 }
 
 /** Internal labels and the staff note. Never visible to the member. */

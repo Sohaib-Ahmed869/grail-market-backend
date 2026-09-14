@@ -56,7 +56,12 @@ export type RaiseVerdict =
     };
 
 /** A window, so a dispute is about a recent trade rather than an argument
- *  reopened two years later when nobody has the packaging any more. */
+ *  reopened two years later when nobody has the packaging any more.
+ *
+ *  This is only the fallback for when the console has never set one — the
+ *  Marketplace policy page's own "Reporting window" setting is what actually
+ *  governs it; see `raiseDispute` in `store.ts`, which reads that setting and
+ *  passes it in. */
 export const RAISE_WINDOW_DAYS = 45;
 
 export function canRaise(
@@ -64,6 +69,7 @@ export function canRaise(
   d: Deal,
   reason: string,
   soldDaysAgo: number | null = 0,
+  windowDays: number = RAISE_WINDOW_DAYS,
 ): RaiseVerdict {
   if (!isReason(reason)) return { ok: false, why: "bad-reason" };
   if (d.buyerId && d.sellerId === d.buyerId) return { ok: false, why: "self" };
@@ -85,7 +91,7 @@ export function canRaise(
   // A withdrawn dispute may be raised again — withdrawing is often "let me
   // talk to them first", and that conversation sometimes fails.
 
-  if (soldDaysAgo != null && soldDaysAgo > RAISE_WINDOW_DAYS) {
+  if (soldDaysAgo != null && soldDaysAgo > windowDays) {
     return { ok: false, why: "no-deal" };
   }
 

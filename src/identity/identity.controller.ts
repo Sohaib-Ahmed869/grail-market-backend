@@ -1,10 +1,11 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { storePool } from "../cards.store.js";
-import { HIGH_VALUE_AUD, requiredFor, tierOf, whatIsMissing, type TierInputs } from "./tiers.js";
+import { requiredFor, tierOf, whatIsMissing, type TierInputs } from "./tiers.js";
 import { createSession, diditConfigured, verifyWebhook, type DiditStatus } from "./didit.js";
 import { callerId } from "../auth/auth.controller.js";
 import { alreadySeen, applyStatus, readStatus, recordEvent } from "./store.js";
+import { readSettings } from "../admin/settings.store.js";
 
 @Controller("identity")
 export class IdentityController {
@@ -76,11 +77,15 @@ export class IdentityController {
     }
 
     const tier = tierOf(inputs);
+    // The Review thresholds page's own "High-value floor" — read here rather
+    // than the env-var default in `tiers.ts`, so moving that setting actually
+    // moves the figure the app quotes and the gate it is checked against.
+    const { highValueFloor } = await readSettings();
     return {
       userId,
       tier,
       identityStatus: inputs.identityStatus ?? "Not Started",
-      highValueThresholdAud: HIGH_VALUE_AUD,
+      highValueThresholdAud: highValueFloor,
       have: {
         phone: inputs.phoneVerified,
         payment: inputs.hasPaymentInstrument,
@@ -96,7 +101,7 @@ export class IdentityController {
         sellHighValue: {
           need: requiredFor("sell-high-value"),
           ok: tier >= requiredFor("sell-high-value"),
-          missing: whatIsMissing(tier, requiredFor("sell-high-value"), inputs),
+          missing: whatIsMissing(tier, requiredFor("sell-high-value"), inputs, highValueFloor),
         },
       },
     };

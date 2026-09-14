@@ -26,9 +26,12 @@ CREATE TABLE IF NOT EXISTS admin_settings (
  * Every setting the console can change, with its default.
  *
  * The default is what the code does when nobody has said otherwise, so it has
- * to match what the code actually does today — `grailFloor` here and
- * `GRAIL_FLOOR` in `listings.store.ts` are the same number twice, and the day
- * they disagree the console will be describing a rule that is not enforced.
+ * to match what the code actually does today. `admin/listings.store.ts`,
+ * `identity/tiers.ts` and `disputes/store.ts` all call `readSettings()` for
+ * `grailFloor`/`highValueFloor`/`reportWindowDays` rather than holding a
+ * second copy of the number — a setting the console can change and a
+ * constant sitting beside it is two numbers that can quietly disagree, which
+ * is what this file used to warn about here.
  */
 export const DEFAULTS = {
   /* thresholds */
