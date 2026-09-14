@@ -1,5 +1,6 @@
 import { storePool } from "../cards.store.js";
 import { viewableUrl } from "../photos/s3.js";
+import { readSettings } from "./settings.store.js";
 
 // The listing queue, as the admin console needs it.
 //
@@ -51,9 +52,17 @@ export const SLA_HOURS = 24;
  * A tier is not stored because it is not a fact about the card — it is a fact
  * about how much is at stake, and it moves when the price does. A seller who
  * drops a grail-tier ask to $900 should not still be queued as a grail.
+ *
+ * Read from `admin_settings` — the console's Review thresholds page — rather
+ * than fixed here, so moving a floor there actually moves the tier a listing
+ * queues under. These used to be two constants carrying the same numbers,
+ * which is a bug waiting for someone to change one and not the other; see the
+ * warning in `settings.store.ts`.
  */
-export const GRAIL_FLOOR = 10_000;
-export const HIGH_VALUE_FLOOR = 2_000;
+async function tierFloors(): Promise<{ grailFloor: number; highValueFloor: number }> {
+  const { grailFloor, highValueFloor } = await readSettings();
+  return { grailFloor, highValueFloor };
+}
 
 export type AdminListing = {
   id: string;
@@ -162,6 +171,7 @@ export async function adminListings(q: {
   const statuses = VIEWS[q.view ?? "all"] ?? VIEWS.all;
   const args: any[] = [statuses];
   const where = ["l.status = any($1)"];
+  const floors = await tierFloors();
 
   // The console's search box says "card, cert, listing id, seller". It has to
   // mean all four, or a moderator handed a cert number by a seller has nowhere
@@ -176,7 +186,7 @@ export async function adminListings(q: {
   }
 
   if (q.tier && q.tier !== "all") {
-    args.push(GRAIL_FLOOR, HIGH_VALUE_FLOOR);
+    args.push(floors.grailFloor, floors.highValueFloor);
     const g = args.length - 1;
     const h = args.length;
     const expr =
@@ -202,14 +212,17 @@ export async function adminListings(q: {
   // fine one at a time, ruinous in a loop across a few hundred rows. Firing
   // them together and waiting once keeps the list endpoint at the cost of
   // its slowest signature rather than the sum of all of them.
-  return Promise.all(r.rows.map(shape));
+  return Promise.all(r.rows.map((row) => shape(row, floors)));
 }
 
 export async function adminListing(id: string): Promise<AdminListing | null> {
   const pool = storePool();
   if (!pool) return null;
-  const r = await pool.query(`${ROW_SQL} where l.listing_id = $1`, [id]);
-  return r.rows[0] ? await shape(r.rows[0]) : null;
+  const [r, floors] = await Promise.all([
+    pool.query(`${ROW_SQL} where l.listing_id = $1`, [id]),
+    tierFloors(),
+  ]);
+  return r.rows[0] ? await shape(r.rows[0], floors) : null;
 }
 
 /**
@@ -452,7 +465,10 @@ function frontPhotoUrl(photos: unknown): string | undefined {
   return front?.url;
 }
 
-export async function shape(r: any): Promise<AdminListing> {
+export async function shape(
+  r: any,
+  floors: { grailFloor: number; highValueFloor: number },
+): Promise<AdminListing> {
   const ask = Number(r.price ?? 0);
   const photos = Array.isArray(r.photos) ? r.photos.length : 0;
 
@@ -501,7 +517,7 @@ export async function shape(r: any): Promise<AdminListing> {
     marketSource,
     confidence: comps >= 20 ? "high" : comps >= 5 ? "medium" : "low",
     sampleSize: comps,
-    tier: ask >= GRAIL_FLOOR ? "grail" : ask >= HIGH_VALUE_FLOOR ? "high-value" : "standard",
+    tier: ask >= floors.grailFloor ? "grail" : ask >= floors.highValueFloor ? "high-value" : "standard",
     status: adminStatus(r),
     seller: {
       id: r.seller_id,

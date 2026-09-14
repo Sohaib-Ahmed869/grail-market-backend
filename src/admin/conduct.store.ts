@@ -298,6 +298,36 @@ export const setCaseState = (id: string, state: CaseState) =>
   upsert(id, "state = $2", [state]);
 
 /**
+ * Marketplace policy's "Auto-escalate after N hours" — a case with no
+ * finding yet, open this long, is handed to Trust and safety on its own.
+ *
+ * A dispute with no `conduct_cases` row is "open" by the same `coalesce`
+ * every read here uses, so this INSERTs one where none exists rather than
+ * only UPDATE-ing rows already on the table — otherwise a case nobody has
+ * so much as claimed yet could never age into this at all. Run from the
+ * maintenance sweep in `maintenance/jobs.ts`; see the note there about why
+ * it is checked once a day rather than to the hour.
+ */
+export async function escalateStale(hours: number): Promise<number> {
+  const pool = storePool();
+  if (!pool) return 0;
+  const r = await pool.query(
+    `insert into conduct_cases (dispute_id, state)
+     select d.dispute_id, 'escalated'
+       from disputes d
+       left join conduct_cases c on c.dispute_id = d.dispute_id
+      where coalesce(c.state, 'open') in ('open', 'awaiting-evidence')
+        and d.created_at < now() - ($1 || ' hours')::interval
+     on conflict (dispute_id) do update
+       set state = 'escalated', updated_at = now()
+       where conduct_cases.state in ('open', 'awaiting-evidence')
+     returning dispute_id`,
+    [hours],
+  );
+  return r.rowCount ?? 0;
+}
+
+/**
  * The decision.
  *
  * It names the person it lands on, because a case has two people in it and

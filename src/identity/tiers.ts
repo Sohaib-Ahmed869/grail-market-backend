@@ -29,7 +29,13 @@ export type TierInputs = {
 };
 
 /** The threshold above which a sale needs Tier 3, in AUD.
- *  Operator-tunable per the scope document; this is the recommended default. */
+ *
+ *  This env var is only the fallback for when the console has never been
+ *  used to set one — the same number the Review thresholds page calls the
+ *  "High-value floor", and the caller (`identity.controller.ts`) reads that
+ *  setting and passes it in. A price threshold hard-coded here as well as
+ *  stored in `admin_settings` is two numbers that can disagree; see the
+ *  warning in `settings.store.ts` about exactly this failure. */
 export const HIGH_VALUE_AUD = Number(process.env.HIGH_VALUE_THRESHOLD_AUD ?? 2000);
 
 /** Completed sales needed before Tier 3 is available. */
@@ -64,7 +70,7 @@ export const requiredFor = (gate: Gate): Tier => REQUIRED[gate];
  *  are genuinely different actions and telling someone to "verify" when they
  *  already have is how a gate becomes a dead end. */
 export function whatIsMissing(
-  current: Tier, needed: Tier, i?: TierInputs,
+  current: Tier, needed: Tier, i?: TierInputs, highValueAud: number = HIGH_VALUE_AUD,
 ): string | null {
   if (current >= needed) return null;
 
@@ -85,8 +91,11 @@ export function whatIsMissing(
     return "Pass the ID check: a document, a selfie and a liveness test.";
   }
   return `Tier 3 needs an address check and ${TIER3_SALES} completed sales. `
-    + `It unlocks selling above A$${HIGH_VALUE_AUD.toLocaleString()}.`;
+    + `It unlocks selling above A$${highValueAud.toLocaleString()}.`;
 }
 
-/** Does this listing price need the high-value tier? */
-export const needsHighValue = (priceAud: number) => priceAud >= HIGH_VALUE_AUD;
+/** Does this listing price need the high-value tier? `threshold` defaults to
+ *  the env fallback; pass the console's own "High-value floor" setting when
+ *  you have it. */
+export const needsHighValue = (priceAud: number, threshold: number = HIGH_VALUE_AUD) =>
+  priceAud >= threshold;

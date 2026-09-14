@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { getListing, moveListing } from "../listings/store.js";
+import { resumeAutoPausedListings } from "../disputes/store.js";
 import { notify } from "../notifications/store.js";
 import { tokensFor } from "../push/store.js";
 import { denied, devAuthActive, requireCapability, requireStaff } from "./guard.js";
@@ -10,8 +11,8 @@ import {
   decideCase, isOutcome, isState, setCaseState,
 } from "./conduct.store.js";
 import {
-  adminMember, adminMembers, adminStaff, annotateMember, memberTimeline,
-  setStanding, type MemberStatus,
+  adminMember, adminMembers, adminStaff, annotateMember, checkStrikeLimit,
+  memberTimeline, setStanding, type MemberStatus,
 } from "./members.store.js";
 import { setRole, userByEmail } from "./store.js";
 import {
@@ -217,6 +218,29 @@ export class AdminController {
 
     const before = await getListing(id);
     if (!before) return { error: "not-found" };
+
+    // "Block release on a low-confidence valuation" — Review thresholds. Too
+    // few comparable sales at this exact grader and grade means the asking
+    // price is a guess, not a quote, and this is the one moment that guess
+    // becomes a live listing a buyer can act on. An override note is the
+    // written exception the setting's own description promises; without one
+    // the release refuses rather than going live on a figure nobody stands
+    // behind.
+    if (to === "live") {
+      const { blockLowConfidence } = await readSettings();
+      const overrideNote = typeof b?.overrideNote === "string" ? b.overrideNote.trim() : "";
+      if (blockLowConfidence && overrideNote.length < 4) {
+        const enriched = await adminListing(id);
+        if (enriched?.confidence === "low") {
+          return {
+            error: "low-confidence",
+            message:
+              "Too few comparable sales for this grader and grade to trust the asking price. " +
+              "Approve with an override note to release it anyway.",
+          };
+        }
+      }
+    }
 
     const by = who.name;
     const r = await moveListing(id, to, { reason: reason || null, reviewedBy: by });
@@ -846,6 +870,11 @@ export class AdminController {
     const note = typeof b?.note === "string" ? b.note.trim() : "";
     if (note) await addCaseNote(id, who.name, note.slice(0, 2000));
 
+    // A case can be closed this way too — moved straight to "resolved" with
+    // no formal decision — so whatever it paused has to come back here as
+    // well, not only from the decision route below.
+    if (state === "resolved") await resumeAutoPausedListings(id);
+
     void writeAudit({
       actorId: who.userId,
       actor: who.name,
@@ -895,9 +924,19 @@ export class AdminController {
 
     await decideCase(id, { outcome, note, againstId, by: who.name });
     await addCaseNote(id, who.name, `Case closed: ${outcome}. ${note}`);
+    await resumeAutoPausedListings(id);
 
     if (outcome === "restricted") await setStanding(againstId, "restricted", note, who.name);
     if (outcome === "closed") await setStanding(againstId, "revoked", note, who.name);
+
+    // "Strike limit" — a decision is the only moment the count behind it can
+    // move, so this is the only place that needs to ask. "None" carries no
+    // strike, matching the count the member record itself shows.
+    if (outcome !== "none") {
+      const againstHandle =
+        againstId === record.against.id ? record.against.handle : record.raisedBy.handle;
+      await checkStrikeLimit(againstId, againstHandle);
+    }
 
     // The console tells the moderator both parties are told the outcome and
     // the reason. That has to be true where it is written, not somewhere else.

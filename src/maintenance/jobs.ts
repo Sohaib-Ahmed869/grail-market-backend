@@ -3,6 +3,9 @@ import { canClaim, isDue, worthChecking, DAILY, type Job } from "./schedule.js";
 import { demandedCards } from "../scans/demand.js";
 import { cardTrend } from "../scans/market.js";
 import { sweep } from "../watchlist/sweep.js";
+import { escalateStale } from "../admin/conduct.store.js";
+import { readSettings } from "../admin/settings.store.js";
+import { writeAudit } from "../admin/audit.store.js";
 
 // The background work, and the machinery that decides when it runs.
 //
@@ -144,11 +147,35 @@ async function runAlertSweep(): Promise<string> {
   return `${r.cards} cards, ${r.fired} alerts`;
 }
 
+/** Marketplace policy's "Auto-escalate after". Daily, not hourly, for the
+ *  same reason every job in this file is: there is no cron here, jobs ride
+ *  on request traffic, and the interval is deliberately never finer than a
+ *  day (see the header note and `LEASE_MS`, which is sized for that). A case
+ *  can sit up to a day past its own threshold before this notices — coarser
+ *  than the setting's own hours, but the alternative is a scheduler this
+ *  product does not otherwise need. */
+async function runConductEscalation(): Promise<string> {
+  const { autoEscalateHours } = await readSettings();
+  const n = await escalateStale(autoEscalateHours);
+  if (n > 0) {
+    void writeAudit({
+      actor: "System",
+      area: "conduct",
+      action: "Escalated stale cases automatically",
+      target: `${n} case${n === 1 ? "" : "s"}`,
+      detail: `No finding after ${autoEscalateHours} hours.`,
+      weight: "normal",
+    });
+  }
+  return `${n} escalated`;
+}
+
 const JOBS: (Job & { run: () => Promise<string> })[] = [
   { name: "alert-sweep", everyMs: DAILY, run: runAlertSweep },
   { name: "ingest-feed-history", everyMs: DAILY, run: ingestFeedHistory },
   { name: "snapshot-prices", everyMs: DAILY, run: snapshotPrices },
   { name: "prune-points", everyMs: 7 * DAILY, run: prunePoints },
+  { name: "conduct-escalation", everyMs: DAILY, run: runConductEscalation },
 ];
 
 /** When this process last bothered to ask the database. */

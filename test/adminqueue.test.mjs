@@ -8,8 +8,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   adminStatus,
-  GRAIL_FLOOR,
-  HIGH_VALUE_FLOOR,
   markOutliers,
   shape,
   SLA_HOURS,
@@ -23,6 +21,14 @@ import {
   roleOf,
   STAFF_ROLES,
 } from "../src/admin/roles.js";
+
+// `shape` no longer carries its own copy of the tier floors — it reads them
+// off whatever the Review thresholds page has stored, via `readSettings()`,
+// and the caller passes the result in. These match `DEFAULTS` in
+// `settings.store.ts`, which is what an untouched install actually enforces.
+const GRAIL_FLOOR = 10_000;
+const HIGH_VALUE_FLOOR = 2_000;
+const floors = { grailFloor: GRAIL_FLOOR, highValueFloor: HIGH_VALUE_FLOOR };
 
 /** A minimal row, as `select l.*, …` would hand it back. */
 const row = (over = {}) => ({
@@ -83,41 +89,50 @@ test("every store status the console can be shown maps to one it can draw", () =
 
 /* -------------------------------------------------------------------- tier */
 
-test("the tier follows the ask, because that is what it is a statement about", () => {
-  assert.equal(shape(row({ price: GRAIL_FLOOR })).tier, "grail");
-  assert.equal(shape(row({ price: GRAIL_FLOOR - 1 })).tier, "high-value");
-  assert.equal(shape(row({ price: HIGH_VALUE_FLOOR })).tier, "high-value");
-  assert.equal(shape(row({ price: HIGH_VALUE_FLOOR - 1 })).tier, "standard");
+test("the tier follows the ask, because that is what it is a statement about", async () => {
+  assert.equal((await shape(row({ price: GRAIL_FLOOR }), floors)).tier, "grail");
+  assert.equal((await shape(row({ price: GRAIL_FLOOR - 1 }), floors)).tier, "high-value");
+  assert.equal((await shape(row({ price: HIGH_VALUE_FLOOR }), floors)).tier, "high-value");
+  assert.equal((await shape(row({ price: HIGH_VALUE_FLOOR - 1 }), floors)).tier, "standard");
+});
+
+test("the tier follows whichever floors are passed in, not a fixed pair", async () => {
+  // The whole point of reading the floors from settings: move the Review
+  // thresholds page's numbers and the tier a listing queues under moves too.
+  const moved = { grailFloor: 500, highValueFloor: 100 };
+  assert.equal((await shape(row({ price: 500 }), moved)).tier, "grail");
+  assert.equal((await shape(row({ price: 100 }), moved)).tier, "high-value");
+  assert.equal((await shape(row({ price: 50 }), moved)).tier, "standard");
 });
 
 /* ------------------------------------------------------------------- price */
 
-test("a market figure from confirmed sales says so, and one from the listing says that instead", () => {
+test("a market figure from confirmed sales says so, and one from the listing says that instead", async () => {
   // A moderator reading "$1,878 from 0 comparable sales" is being told two
   // contradictory things. The source is part of the answer.
-  const withComps = shape(row({ comp_count: 12, comp_median: 17000 }));
+  const withComps = await shape(row({ comp_count: 12, comp_median: 17000 }), floors);
   assert.equal(withComps.marketPrice, 17000);
   assert.equal(withComps.marketSource, "comps");
   assert.equal(withComps.sampleSize, 12);
 
-  const fromListing = shape(row({ comp_count: 0, comp_median: null, market_value: 17250 }));
+  const fromListing = await shape(row({ comp_count: 0, comp_median: null, market_value: 17250 }), floors);
   assert.equal(fromListing.marketPrice, 17250);
   assert.equal(fromListing.marketSource, "listing");
   assert.equal(fromListing.sampleSize, 0);
 
-  const nothing = shape(row({ comp_count: 0, comp_median: null, market_value: null }));
+  const nothing = await shape(row({ comp_count: 0, comp_median: null, market_value: null }), floors);
   assert.equal(nothing.marketPrice, 0);
   assert.equal(nothing.marketSource, "none");
 });
 
-test("confidence is a statement about the sample, never about the figure", () => {
-  assert.equal(shape(row({ comp_count: 34, comp_median: 1 })).confidence, "high");
-  assert.equal(shape(row({ comp_count: 20, comp_median: 1 })).confidence, "high");
-  assert.equal(shape(row({ comp_count: 19, comp_median: 1 })).confidence, "medium");
-  assert.equal(shape(row({ comp_count: 5, comp_median: 1 })).confidence, "medium");
-  assert.equal(shape(row({ comp_count: 4, comp_median: 1 })).confidence, "low");
+test("confidence is a statement about the sample, never about the figure", async () => {
+  assert.equal((await shape(row({ comp_count: 34, comp_median: 1 }), floors)).confidence, "high");
+  assert.equal((await shape(row({ comp_count: 20, comp_median: 1 }), floors)).confidence, "high");
+  assert.equal((await shape(row({ comp_count: 19, comp_median: 1 }), floors)).confidence, "medium");
+  assert.equal((await shape(row({ comp_count: 5, comp_median: 1 }), floors)).confidence, "medium");
+  assert.equal((await shape(row({ comp_count: 4, comp_median: 1 }), floors)).confidence, "low");
   // A figure carried over from the listing has no sample behind it at all.
-  assert.equal(shape(row({ comp_count: 0, market_value: 17250 })).confidence, "low");
+  assert.equal((await shape(row({ comp_count: 0, market_value: 17250 }), floors)).confidence, "low");
 });
 
 /* --------------------------------------------------------------------- SLA */
@@ -208,8 +223,8 @@ test("pausing is reversible and withdrawing is not", () => {
 
 /* ------------------------------------------------------------------ shape */
 
-test("a raw card is not given a grader it does not have", () => {
-  const raw = shape(row({ is_raw: true, grader: null, grade: null, cert_number: null }));
+test("a raw card is not given a grader it does not have", async () => {
+  const raw = await shape(row({ is_raw: true, grader: null, grade: null, cert_number: null }), floors);
   assert.equal(raw.grader, "Raw");
   assert.equal(raw.grade, "None");
   /* Words, not a symbol. The placeholder used to be an em dash, which is a
@@ -217,25 +232,25 @@ test("a raw card is not given a grader it does not have", () => {
   assert.equal(raw.cert, "None on the label");
 });
 
-test("the set line is built from what is there, with no empty separators", () => {
-  assert.equal(shape(row()).setLine, "Base Set · holo · #4");
-  assert.equal(shape(row({ variant: null })).setLine, "Base Set · #4");
-  assert.equal(shape(row({ set_name: null, variant: null, card_number: null })).setLine, "");
+test("the set line is built from what is there, with no empty separators", async () => {
+  assert.equal((await shape(row(), floors)).setLine, "Base Set · holo · #4");
+  assert.equal((await shape(row({ variant: null }), floors)).setLine, "Base Set · #4");
+  assert.equal((await shape(row({ set_name: null, variant: null, card_number: null }), floors)).setLine, "");
   // A seller who typed the hash themselves does not get two of them.
-  assert.equal(shape(row({ card_number: "#4" })).setLine, "Base Set · holo · #4");
+  assert.equal((await shape(row({ card_number: "#4" }), floors)).setLine, "Base Set · holo · #4");
 });
 
-test("initials come from the ends of a name, not the first two words of it", () => {
-  assert.equal(shape(row({ seller_name: "Daniel Wu" })).seller.initials, "DW");
-  assert.equal(shape(row({ seller_name: "Mia de la Fontaine" })).seller.initials, "MF");
-  assert.equal(shape(row({ seller_name: "Prince" })).seller.initials, "P");
-  assert.equal(shape(row({ seller_name: null })).seller.initials, "US"); // "Unknown seller"
+test("initials come from the ends of a name, not the first two words of it", async () => {
+  assert.equal((await shape(row({ seller_name: "Daniel Wu" }), floors)).seller.initials, "DW");
+  assert.equal((await shape(row({ seller_name: "Mia de la Fontaine" }), floors)).seller.initials, "MF");
+  assert.equal((await shape(row({ seller_name: "Prince" }), floors)).seller.initials, "P");
+  assert.equal((await shape(row({ seller_name: null }), floors)).seller.initials, "US"); // "Unknown seller"
 });
 
-test("the photo count is the angles supplied, and an absent set is zero rather than a crash", () => {
-  assert.equal(shape(row({ photos: [{ angle: "front", url: "a" }] })).photos, 1);
-  assert.equal(shape(row({ photos: null })).photos, 0);
-  assert.equal(shape(row({ photos: "not an array" })).photos, 0);
+test("the photo count is the angles supplied, and an absent set is zero rather than a crash", async () => {
+  assert.equal((await shape(row({ photos: [{ angle: "front", url: "a" }] }), floors)).photos, 1);
+  assert.equal((await shape(row({ photos: null }), floors)).photos, 0);
+  assert.equal((await shape(row({ photos: "not an array" }), floors)).photos, 0);
 });
 
 /* ------------------------------------------------------------------ roles */
