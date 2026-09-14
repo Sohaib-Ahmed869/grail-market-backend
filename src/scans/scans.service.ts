@@ -271,7 +271,11 @@ export class ScansService {
             note: frontRes.ocr.japaneseTextDetected
               ? "Japanese text detected on the card — this is (or includes) a Japanese-language printing."
               : (frontRes.ocr.language ?? "unknown") === "en"
-                ? "Rules text reads as English — treated as an English-language printing. Stylized art lettering (which can be Japanese on promos) is not part of this call."
+                // Says what was actually observed. The previous wording —
+                // "Rules text reads as English" — named a specific thing the
+                // pipeline does not check, and it was printed over a Japanese
+                // card whose rules text had not been read at all.
+                ? "The text read off this card is English — treated as an English-language printing. Stylized art lettering (which can be Japanese on promos) is not part of this call."
                 : "Card language could not be determined from the photo.",
           }
         : null,

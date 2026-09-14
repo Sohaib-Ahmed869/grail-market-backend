@@ -28,12 +28,14 @@ export type Capability =
   | "reports.read"
   | "audit.read"
   | "announce.write"
+  | "catalog.write"
   | "settings.write";
 
 const ALL: Capability[] = [
   "dashboard.read", "listings.review", "members.read", "members.act", "team.read",
   "conduct.decide", "support.read", "support.reply", "id.exceptions", "billing.read",
-  "pricing.read", "reports.read", "audit.read", "announce.write", "settings.write",
+  "pricing.read", "reports.read", "audit.read", "announce.write", "catalog.write",
+  "settings.write",
 ];
 
 export const CAPABILITIES: Record<Role, Capability[]> = {

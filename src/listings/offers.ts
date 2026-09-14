@@ -102,7 +102,7 @@ export async function hasStakeIn(listingId: string, userId: string): Promise<boo
 
 export type SettleResult =
   | { ok: true; status: string; dealId?: string | null }
-  | { ok: false; why: "not-found" | "not-yours" | "already-settled" };
+  | { ok: false; why: "not-found" | "not-yours" | "already-settled" | "not-available" };
 
 /** Accept, counter or decline. Only the seller may.
  *
@@ -120,6 +120,34 @@ export async function settleOffer(
   if (!o) return { ok: false, why: "not-found" };
   if (o.seller_id !== sellerId) return { ok: false, why: "not-yours" };
   if (o.status !== "open") return { ok: false, why: "already-settled" };
+
+  // The CARD has to still be available, not just the offer still open.
+  //
+  // These are different questions and only the second was being asked. A
+  // seller with two open offers accepts the first — the listing goes
+  // `reserved` and a deal opens — and their offers screen still shows the
+  // second one with an Accept button on it. Accepting it declined every other
+  // offer, wrote "Offer accepted at A$4,500. Arrange the handover here." into
+  // the thread, pushed "Your A$4,500 offer was accepted" to the buyer, and
+  // then `startDeal` returned null because one live deal per listing is a
+  // unique index. The caller got `{ok: true, dealId: null}` and reported
+  // success.
+  //
+  // So the second buyer was told they had bought a card that was already
+  // promised to somebody else, sent to a message thread to arrange a handover
+  // for a deal that does not exist. That is precisely the outcome the
+  // decline-the-others block below was written to prevent, arrived at from
+  // the other side.
+  //
+  // Only accepting is blocked. A seller can still decline a stale offer, and
+  // should be able to — that is how they tidy up after a deal falls through.
+  if (action === "accepted") {
+    const { getListing } = await import("./store.js");
+    const l = await getListing(o.listing_id);
+    if (!l || l.status !== "live") {
+      return { ok: false, why: "not-available" };
+    }
+  }
 
   // A counter is written BESIDE the offer, never over it.
   //

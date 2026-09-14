@@ -1,0 +1,8 @@
+[project]
+name = "tcdb-parse"
+version = "0.1.0"
+description = "TCDB catalogue via Parse — the free sports card reference this platform has never had"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+

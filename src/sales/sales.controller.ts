@@ -1,5 +1,7 @@
 import { Controller, Get, Query } from "@nestjs/common";
 import { countSales, recentSales } from "./ledger.js";
+import { hasGuidance, listingGuidance } from "./guidance.js";
+import { fxRates } from "../scans/fx.js";
 import { gradedPricesFor } from "../scans/pricing.js";
 
 @Controller("market")
@@ -88,5 +90,36 @@ export class SalesController {
           ? `We can itemise ${itemised} of ${known} recorded sales. Our price source reports totals, not individual sales.`
           : null,
     };
+  }
+
+  /** What to list this card for, from settled sales only.
+   *
+   *  The rule is the client's, recorded on GM001-59: settled sales rather than
+   *  asking prices, the three most recent PROVIDED they sit close together in
+   *  time, and a recommended range the seller may list above or below. The
+   *  refusals matter as much as the figures — "too-spread" and "too-few" are
+   *  answers, and a seller told plainly that we cannot advise is better served
+   *  than one handed a number built from a sale in February.
+   *
+   *  Keyed on (card, grader, grade) in full, per invariant 1. There is no
+   *  grade-only guidance because there is no grade-only price.
+   */
+  @Get("guidance")
+  async guidance(
+    @Query("cardId") cardId?: string,
+    @Query("grader") grader?: string,
+    @Query("grade") grade?: string,
+    @Query("currency") currency?: string,
+  ) {
+    if (!cardId) return { error: "invalid", message: "cardId required" };
+    const g = grader ? grader.toUpperCase() : null;
+    const gr = grade ? String(grade).replace(/\.0$/, "") : null;
+
+    // Asked for more than the three the rule uses, so that a set rejected for
+    // being too spread can still report what was there.
+    const sales = await recentSales(cardId, g, gr, 10);
+    const fx = await fxRates();
+    const out = listingGuidance(sales, fx, currency ?? "AUD");
+    return hasGuidance(out) ? { guidance: out } : { guidance: null, ...out };
   }
 }

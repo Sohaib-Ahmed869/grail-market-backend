@@ -254,17 +254,57 @@ export async function identifyOnePiece(
     printingChoice,
   };
   const market = c.market_price != null ? Number(c.market_price) : null;
+
+  // A printing we did not actually choose must not be priced as if we had.
+  //
+  // `pickPrinting` is honest when the picture does not settle it: it reports
+  // `method: "fallback"` and keeps the catalogue's order. But the catalogue's
+  // order is the BASE printing first, so the fallback pick is systematically
+  // the cheapest one — and pricing it produced a US$0.87 figure for the
+  // photographed Kaido OP17-062 Super Alternate Art, which is US$235. A 270x
+  // understatement, delivered with no hint that anything was uncertain.
+  //
+  // That is the house rule exactly backwards: a missing answer is cheap, a
+  // confident wrong answer is expensive. The ranked list is already carried
+  // for this — the app can show the alternatives and let the member say which
+  // one they are holding.
+  //
+  // Only flagged when it would MATTER. Printings whose prices sit close
+  // together make the ambiguity worth nothing to resolve, and flagging those
+  // would put a warning on cards where either answer is right.
+  const prices = printings
+    .map((p: Record<string, any>) => (p.market_price != null ? Number(p.market_price) : null))
+    .filter((n): n is number => Number.isFinite(n) && (n as number) > 0);
+  const dearest = prices.length ? Math.max(...prices) : null;
+  const undecided = choice?.method === "fallback" && printings.length > 1;
+  const spread = undecided && dearest != null && market != null && market > 0
+    ? dearest / market
+    : 1;
+  const AMBIGUOUS_SPREAD = 2;
+
+  const identificationSuspect =
+    undecided && market != null && dearest != null && spread >= AMBIGUOUS_SPREAD
+      ? `The photograph did not settle which printing this is. ${printings.length} share ` +
+        `this number and they range from US$${market.toFixed(2)} to US$${dearest.toFixed(2)} — ` +
+        `pick the artwork that matches your card.`
+      : null;
+
   const valuation: Valuation | null =
     market != null
       ? {
           source: "optcgapi",
           updatedAt: c.date_scraped ?? null,
+          // Means: do not lead with the figure. Null when we are confident,
+          // so the common case is unchanged.
+          identificationSuspect,
           tcgplayer: {
             unit: "USD",
             variant: "normal",
             low: c.inventory_price != null ? Number(c.inventory_price) : null,
             mid: null,
-            high: null,
+            // The top of the range this card could be, so a screen that must
+            // show something can show what is at stake rather than the floor.
+            high: identificationSuspect ? dearest : null,
             market,
           },
           cardmarket: null,

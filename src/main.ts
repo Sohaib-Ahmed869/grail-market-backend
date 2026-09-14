@@ -15,6 +15,7 @@ import { initIdentity } from "./identity/store.js";
 import { initBilling } from "./billing/store.js";
 import { initAuth } from "./auth/store.js";
 import { initSales } from "./sales/ledger.js";
+import { initCatalog } from "./catalog/store.js";
 import { initListings } from "./listings/store.js";
 import { initCommunity } from "./community/store.js";
 import { initWatchlist } from "./watchlist/store.js";
@@ -61,6 +62,9 @@ async function bootstrap() {
     await initBilling();
     await initAuth();
     await initSales();
+    // The SKU axes and the two grade entities. After initSales because the
+    // column migrations touch listings and collection, which those create.
+    await initCatalog();
     await initListings();
     await initCommunity();
     await initWatchlist();

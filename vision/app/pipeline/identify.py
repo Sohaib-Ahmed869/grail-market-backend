@@ -374,6 +374,54 @@ def _clean_name(text: str) -> str:
     return re.sub(r"\s{2,}", " ", text).strip(" -–—.·")
 
 
+# How much Latin text has to be read before "this card is English" is a claim
+# rather than a shrug. Seven short fragments off a logo and a frame is not it.
+MIN_LATIN_FOR_EN = 24
+
+
+def decide_language(all_text: str) -> tuple[str, bool]:
+    """What language this card is in, and whether Japanese was actually seen.
+
+    Pulled out of read_card_text so it can be tested against text rather than
+    against an image, because the bug it exists to prevent is about what the
+    text does NOT contain.
+
+    "en" has to be EARNED, not defaulted to. The recogniser running here reads
+    Latin script; given a Japanese card it does not report Japanese badly, it
+    reports almost nothing, and what little comes back is Latin. A ST01-001
+    Luffy leader read as ['ONE PIECE', '60', '0009', 'C', 'GAM', '·D·', '294/']
+    — seven fragments off the logo and the frame, every kana dropped. It even
+    caught the ·D· out of モンキー・D・ルフィ and none of the characters around it.
+
+    `latin > 0` was then enough to call the card English, and the app told the
+    member "Rules text reads as English" about rules text it had never read.
+    The card was priced as the English printing, which is a different card at
+    a different price.
+
+    Below the floor the honest answer is "unknown" — the caller already handles
+    it by asking instead of asserting. This does not try to READ Japanese: per
+    the house rule, accuracy is fixed in the crops, not by swapping the engine.
+    It only stops us asserting the absence of something we cannot see.
+
+    Kana is the reliable positive signal — it appears in Japanese rules text and
+    essentially never as decoration. Kanji has to clear a real count, because a
+    Japanese card carries dozens and a decorated English card carries one or
+    two: One Piece prints 特 ("SPECIAL") and 商 on ENGLISH cards, and matching
+    any CJK at all once declared an English Stussy Japanese.
+    """
+    kana = len(re.findall(r"[\u3040-\u30ff]", all_text))
+    kanji = len(re.findall(r"[\u4e00-\u9fff]", all_text))
+    japanese = kana >= 2 or kanji >= 6
+    latin = len(re.findall(r"[A-Za-z]", all_text))
+    cjk = kana + kanji
+
+    if cjk > 0 and cjk > latin * 0.5:
+        return "ja", japanese
+    if latin >= MIN_LATIN_FOR_EN:
+        return "en", japanese
+    return "unknown", japanese
+
+
 def read_card_text(warped: np.ndarray) -> dict:
     h, w = warped.shape[:2]
     # normalize height for OCR: big enough to read, small enough to fit in
@@ -508,12 +556,7 @@ def read_card_text(warped: np.ndarray) -> dict:
     # essentially never as decoration. Kanji has to clear a real count, because
     # a Japanese card's rules text carries dozens and a decorated English card
     # carries one or two.
-    kana = len(re.findall(r"[぀-ヿ]", all_text))
-    kanji = len(re.findall(r"[一-鿿]", all_text))
-    japanese = kana >= 2 or kanji >= 6
-    latin = len(re.findall(r"[A-Za-z]", all_text))
-    cjk = len(re.findall(r"[぀-ヿ一-鿿]", all_text))
-    language = "ja" if cjk > latin * 0.5 else ("en" if latin > 0 else "unknown")
+    language, japanese = decide_language(all_text)
 
     return {
         "nameCandidates": names,

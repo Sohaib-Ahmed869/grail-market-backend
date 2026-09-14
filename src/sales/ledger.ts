@@ -66,6 +66,18 @@ export type Sale = {
  *  recording the correction, not by editing history — which is what makes the
  *  ledger answerable when somebody disputes a price months later. */
 export async function recordSale(s: {
+  /** A deterministic id, for sales that came from somewhere else.
+   *
+   *  Our own trades are unique events and get a random one. A sale pulled
+   *  from a provider is not: the same eBay item comes back on every refresh
+   *  whose window still covers it, and a random id per pull would write the
+   *  same sale into the ledger once a day forever, inflating every sample
+   *  size that is supposed to be evidence. Pass the provider's own id here
+   *  and re-ingesting is free.
+   *
+   *  This does not weaken invariant 5. The insert below still never UPDATEs
+   *  and never DELETEs — a row that already exists is simply left alone. */
+  saleId?: string;
   catalogId: string;
   grader?: string | null;
   grade?: string | number | null;
@@ -80,12 +92,13 @@ export async function recordSale(s: {
 }): Promise<string | null> {
   const pool = storePool();
   if (!pool) return null;
-  const saleId = randomUUID();
+  const saleId = s.saleId ?? randomUUID();
   await pool.query(
     `insert into sales_ledger
        (sale_id, catalog_id, grader, grade, qualifier, label_variant,
         price, currency, sold_at, source, source_url, raw_title, parser_version)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     on conflict (sale_id) do nothing`,
     [
       saleId, s.catalogId, s.grader ?? null,
       s.grade == null ? null : String(s.grade),

@@ -2,6 +2,7 @@ import { quotaStatus, CREDITS_PER_LOOKUP } from "./gradedprices.js";
 import { allUsedToday, monthStart, usedSince, usedToday } from "./usage.js";
 import { storeStats } from "../cards.store.js";
 import { justTcgQuota } from "./justtcg.js";
+import { theCardApiStatus } from "./thecardapi.js";
 import { observedCostPerScan } from "./ledger.js";
 
 // "How many more cards can this system actually scan today?"
@@ -188,6 +189,40 @@ export async function scanBudget(): Promise<ScanBudget> {
     note: "pay-per-call, no daily cap",
     period: "day",
   });
+
+  // The Card API meters ROWS, not requests — the only provider here that
+  // does. So `costPerScan` is rows-per-scan rather than calls-per-scan, and
+  // the figure is what `soldComps` asks for on a miss.
+  //
+  // Not gating: a scan whose sold comps are missing still prices from the
+  // store, the feed and the asks panel. It fills the evidence behind a price,
+  // it does not decide whether there is one.
+  const tca = theCardApiStatus();
+  if (tca.hasKey) {
+    const used = tca.reported.limit != null && tca.reported.remaining != null
+      ? tca.reported.limit - tca.reported.remaining
+      : tca.rowsUsedToday;
+    const limit = tca.reported.limit ?? (tca.dailyRows || null);
+    providers.push({
+      id: "thecardapi",
+      label: "The Card API",
+      role: "Completed sales",
+      unit: "credits",
+      used,
+      limit,
+      remaining: tca.reported.remaining ?? (limit == null ? null : Math.max(0, limit - used)),
+      costPerScan: 20,
+      scansLeft: null,
+      // Their x-ratelimit-* headers, once the first call of the day has been
+      // made. Before that this is our own count and says so.
+      reported: tca.reported.limit != null,
+      gating: false,
+      note: tca.enabled
+        ? "rows/day; half reserved for the sold-comp job"
+        : "key present but THECARDAPI_DAILY_ROWS is 0 — off",
+      period: "day",
+    });
+  }
 
   // the binding constraint across everything that actually gates a scan
   const gating = providers.filter((p) => p.gating && p.scansLeft != null);

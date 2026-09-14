@@ -115,3 +115,87 @@ the slab label, is not grading and is core to the product — keep `slab.py`.
 tree, still tested, called from nowhere. If you wire either back in, know that
 you are also re-enabling every paid grading dependency that guards on a
 non-null grade.
+
+## The Card API — completed sales
+
+`src/scans/thecardapi.ts`. Itemised SOLD rows, which no other source here
+sells: PPT returns per-grade rollups, JustTCG a trend line, and eBay's
+Marketplace Insights was never approved. `sales_ledger` was built on the
+assumption this was unbuyable; it now fills from the market as well as from
+our own trades, via the `ingest-sold-feed` maintenance job.
+
+Off unless `THECARDAPI_KEY` and `THECARDAPI_DAILY_ROWS` are both set.
+
+- **The budget is ROWS, not calls.** The only provider here that is metered
+  that way. One request may return 1,000 rows and the plan grants a fixed
+  number per UTC day, so a cap counted in requests means nothing. The job may
+  spend half; the rest is held for scans.
+- **eBay rows are a raw title and nothing else.** `category`, `sport`,
+  `player`, `grader`, `card_set` and `card_number` are null on every one —
+  measured, not read off the docs. Any filter on a structured field silently
+  drops the whole eBay half, which is 99% of the volume and all of the sports.
+  `category=sports` returns zero rows while the feed is full of hockey.
+- **The query is the highest-leverage line in the file.** `q=<name>` sorted
+  date_desc returns whatever released this week; on 2026-09-11 a bare
+  `Charizard` kept 0 of 25 rows. `q=<name> "<set>"` kept 9 of 25, all real.
+- **The query syntax, measured 2026-09-14.** An earlier note here said they had
+  no boolean syntax. That was wrong — it was written after testing only the
+  two forms that fail.
+  - Space = AND. `xyzzy select` returns 0.
+  - `"..."` = phrase. `"gold parallel"` 167 vs unquoted `gold parallel` 274.
+  - `(a,b)` = OR, and it is a true union rather than a sum:
+    `(charizard,pikachu) pokemon` is 5,500 against 2,447 + 3,102 = 5,549,
+    the 49 difference being listings holding both terms.
+  - The literal word `AND` is a SEARCH TERM, not an operator — it collapses
+    117 rows to 1. `+term` returns nothing. A comma outside parentheses is
+    literal too: `afl,nrl select` is 0 where `(afl,nrl) select` is 195.
+- **Every row goes through the asks-panel guards** (`mentionsCard`,
+  `sameForm`, `setInTitle`, `numberInTitle`) plus `setEditionMismatch`, which
+  is new and separates "Base Set" from "Base Set 2". A sold row is worse than
+  an ask row when it is wrong: an ask is a claim, a sale is evidence, and the
+  evidence lands in an append-only ledger.
+- `saleGrade()` is where invariant 4 finally lives in code. A grade token in a
+  title is not a grade — "PSA 10 CANDIDATE", "would grade PSA 9", a trailing
+  "?" and `#PSA 10` are all raw cards.
+- `recordSale()` now takes an optional deterministic `saleId` and the insert
+  is `on conflict do nothing`. Provider rows reappear on every pull whose
+  window still covers them; without this, sample sizes would grow daily on no
+  new evidence. Still never UPDATEs and never DELETEs.
+- `/coverage` hangs — two consecutive 60s timeouts on 2026-09-11 against
+  `/platforms` returning the identical payload in 1.3s. `coverage()` reads
+  `/platforms`.
+- On a short lookback plan, five of their seven platforms are invisible:
+  Goldin, REA, SCP, Hakes and Lelands all have newest sales months old, so a
+  3-day window ends before their data begins. Only eBay and TCGplayer are live.
+- Rows carry mixed currencies (USD, AUD, GBP seen in one result set). The
+  ledger stores `currency` per row; anything aggregating them must convert.
+- **Australian sports is covered, and it is all AUD.** AFL and NRL both return
+  real recent sales — `(afl,nrl) select` 195, `"footy stars"` 50, `nrl traders`
+  8 — and across 108 rows sampled every one was eBay and every one was AUD, so
+  the home market needs no conversion. They are all unenriched like the rest of
+  the eBay half: no grader, no sport, no player, no category. 38 of those 108
+  were `best_offer`, which is the accepted-offer price eBay's own API will not
+  give us.
+
+## Parse (parse.bot)
+
+Not yet wired. Intended for tcdb.com — the free sports/non-sport catalogue
+that `games.ts` says does not exist anywhere, which is the one gap Card Hedge
+was bought to cover.
+
+Parse exposes both a Python SDK (`uv add parse-sdk`, clients generated under
+`parse_apis/`) and plain HTTP:
+
+    POST https://api.parse.bot/scraper/{scraper_id}/{endpoint_name}
+    X-API-Key: $PARSE_API_KEY
+    {"year": 1986, "sport": "Baseball"}
+
+For this repo the HTTP form is the one to use — the catalogue is consumed by
+NestJS, and a Python sidecar would need its own process to reach Postgres.
+The adapter belongs beside `opensources.ts` and must be cached for a day like
+every other catalogue there. The key is read from `PARSE_API_KEY`, never
+committed.
+
+Blocked on the `scraper_id`: it is not the marketplace slug (`tcdb-com-api`
+404s) and the only lookup is `uv run parse list --json`, which needs the SDK
+installed.

@@ -1,9 +1,13 @@
-import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { getListing, moveListing } from "../listings/store.js";
 import { notify } from "../notifications/store.js";
 import { tokensFor } from "../push/store.js";
 import { denied, devAuthActive, requireCapability, requireStaff } from "./guard.js";
+import {
+  catalogReferences, createCatalogCard, deleteCatalogCard, getCatalogCard,
+  searchCatalog, updateCatalogCard,
+} from "./catalog.store.js";
 import { capabilitiesOf, isRole, ROLE_LABEL } from "./roles.js";
 import {
   addCaseNote, adminCase, adminCases, caseCounts, caseThread, claimCase,
@@ -23,6 +27,7 @@ import {
   adminListing, adminListings, annotate, claimListing, listingComps,
   listingPhotos, queueCounts, releaseListing, sellerHistory, SLA_HOURS, VIEWS,
 } from "./listings.store.js";
+import { repeatSignals, repeatVerdict } from "./repeat.js";
 import {
   adminBoost, adminPlans, applyBoost, billingLedger, boostLedger, BOOST_TIERS,
   cachePlan, compBoost, compPlan, planCatalog, planExists,
@@ -146,16 +151,22 @@ export class AdminController {
   async one(@Param("id") id: string, @Req() req: Request) {
     const who = await requireCapability(req, "listings.review");
     if (denied(who)) return who;
-    // All four at once. The store is a few hundred milliseconds away, so four
-    // sequential reads is most of a second of a moderator's time per record.
-    const [listing, comps, photos, history] = await Promise.all([
+    // All at once. The store is a few hundred milliseconds away, so reading
+    // these in sequence is most of a second of a moderator's time per record.
+    const [listing, comps, photos, history, repeatRows] = await Promise.all([
       adminListing(id),
       listingComps(id),
       listingPhotos(id),
       sellerHistory(id),
+      repeatSignals(id),
     ]);
     if (!listing) return { error: "not-found" };
-    return { listing, comps, photos, history };
+    // The pattern a per-listing review cannot see by itself: the same card
+    // listed again and again, or a certificate number that is on somebody
+    // else's listing too. Derived on read, like every other rule-raised flag —
+    // a stored one goes stale the moment the seller lists again.
+    const repeat = repeatVerdict(repeatRows);
+    return { listing, comps, photos, history, repeat };
   }
 
   /** Take the row. Two moderators deciding the same card is the thing this
@@ -1521,5 +1532,64 @@ export class AdminController {
       weight: "normal",
     });
     return { ticket: await adminTicket(id) };
+  }
+
+  // ---------------------------------------------------------------- catalogue
+  //
+  // The only WRITE surface in this console that touches the thing every price
+  // is keyed on, so it carries its own capability rather than reusing
+  // listings.review: approving one listing and renumbering a card that
+  // thousands of prices hang off are different kinds of power.
+
+  @Get("catalog")
+  async catalogSearch(
+    @Req() req: Request,
+    @Query("q") q?: string,
+    @Query("game") game?: string,
+    @Query("limit") limit?: string,
+    @Query("offset") offset?: string,
+  ) {
+    const who = await requireCapability(req, "catalog.write");
+    if (denied(who)) return who;
+    return searchCatalog({
+      text: q ?? null, game: game ?? null,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+  }
+
+  @Get("catalog/:id")
+  async catalogOne(@Param("id") id: string, @Req() req: Request) {
+    const who = await requireCapability(req, "catalog.write");
+    if (denied(who)) return who;
+    const card = await getCatalogCard(id);
+    if (!card) return { error: "not-found" };
+    // What points at it travels with it, so the console can grey out delete
+    // and say why rather than offering a button that always fails.
+    return { card, references: await catalogReferences(id) };
+  }
+
+  @Post("catalog")
+  async catalogCreate(@Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "catalog.write");
+    if (denied(who)) return who;
+    const r = await createCatalogCard(b ?? {});
+    return r.ok ? { card: r.card } : { error: r.why, message: r.message };
+  }
+
+  @Post("catalog/:id")
+  async catalogUpdate(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "catalog.write");
+    if (denied(who)) return who;
+    const r = await updateCatalogCard(id, b ?? {});
+    return r.ok ? { card: r.card } : { error: r.why, message: r.message };
+  }
+
+  @Delete("catalog/:id")
+  async catalogDelete(@Param("id") id: string, @Req() req: Request) {
+    const who = await requireCapability(req, "catalog.write");
+    if (denied(who)) return who;
+    const r = await deleteCatalogCard(id);
+    return r.ok ? { deleted: r.card.catalogId } : { error: r.why, message: r.message };
   }
 }

@@ -2,7 +2,7 @@
   "name": "grail-market-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "GrailCard backend — card identification, grading-label reading and valuation.",
+  "description": "GrailCard backend \u2014 card identification, grading-label reading and valuation.",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -20,7 +20,9 @@
     "keys": "tsx src/ingest/keys.ts",
     "backtest": "tsx src/ingest/backtest.ts",
     "stripe:setup": "tsx src/billing/setup.ts",
-    "walk": "node scripts/walk-catalogue.mjs"
+    "walk": "node scripts/walk-catalogue.mjs",
+    "backfill:sku": "tsx scripts/backfill-sku.mjs",
+    "seed:ygo": "tsx scripts/seed-ygo.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1123.0",

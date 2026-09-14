@@ -4,6 +4,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
+import { denied, requireCapability } from "../admin/guard.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
 import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
@@ -75,8 +76,12 @@ export class ListingsController {
    *  looked at it. */
   @Get("queue")
   async queue(@Req() req: Request) {
-    if (!need(req)) return { error: "unauthenticated" };
-    // TODO(admin): gate on an admin role once one exists.
+    // Staff only, for the same reason as `review` below — and this one leaks
+    // as well as grants: the queue returns `sellerShape`, which carries other
+    // people's unpublished drafts, their certificate numbers and their
+    // photographs, to anyone holding any session token.
+    const who = await requireCapability(req, "listings.review");
+    if (denied(who)) return { error: who.error, message: who.message };
     return { listings: await signPreviews((await reviewQueue()).map(sellerShape)) };
   }
 
@@ -246,11 +251,20 @@ export class ListingsController {
     return r.ok ? { status: "in_review" } : { error: r.why };
   }
 
-  /** Admin. Nothing reaches a buyer without passing through here. */
+  /** Admin. Nothing reaches a buyer without passing through here.
+   *
+   *  That sentence was not true until now. The gate was a TODO waiting on an
+   *  admin role, and the role arrived without anyone coming back — so the
+   *  check was `need(req)`, which any signed-in account passes. A seller could
+   *  submit their own listing and then approve it, straight past the review
+   *  this endpoint exists to be, with nothing but their own session token.
+   *
+   *  `listings.review` was already defined in `admin/roles.ts` and already
+   *  granted to the roles that should have it; it only had to be asked for. */
   @Post(":id/review")
   async review(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
-    if (!need(req)) return { error: "unauthenticated" };
-    // TODO(admin): gate on an admin role once one exists.
+    const who = await requireCapability(req, "listings.review");
+    if (denied(who)) return { error: who.error, message: who.message };
     const to = b?.approve ? "live" : "rejected";
     const r = await moveListing(id, to, { reason: b?.reason ?? null });
     if (r.ok) {

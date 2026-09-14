@@ -3,6 +3,7 @@ import { canClaim, isDue, worthChecking, DAILY, type Job } from "./schedule.js";
 import { demandedCards } from "../scans/demand.js";
 import { cardTrend } from "../scans/market.js";
 import { sweep } from "../watchlist/sweep.js";
+import { ingestSoldComps } from "../sales/soldfeed.js";
 
 // The background work, and the machinery that decides when it runs.
 //
@@ -144,8 +145,26 @@ async function runAlertSweep(): Promise<string> {
   return `${r.cards} cards, ${r.fired} alerts`;
 }
 
+/** Completed sales for the cards people touch, into the append-only ledger.
+ *
+ *  This one CAN reach a paid API, so the comment the house rule asks for:
+ *  it spends The Card API's row budget, it is bounded to half of it by
+ *  `ingestSoldComps` with the other half held for live scans, and it is a
+ *  no-op unless both `THECARDAPI_KEY` and `THECARDAPI_DAILY_ROWS` are set.
+ *
+ *  Daily rather than hourly because a completed sale is permanent — the only
+ *  thing a second pass finds is sales that happened since, and the free
+ *  plan's lookback is three days, so a daily pass cannot miss a window. */
+async function ingestSoldFeed(): Promise<string> {
+  const r = await ingestSoldComps();
+  if (!r.cards) return "off, or budget spent";
+  return `${r.recorded} sales from ${r.cards} cards ` +
+    `(${r.examined} rows examined, ${r.rejected} rejected)`;
+}
+
 const JOBS: (Job & { run: () => Promise<string> })[] = [
   { name: "alert-sweep", everyMs: DAILY, run: runAlertSweep },
+  { name: "ingest-sold-feed", everyMs: DAILY, run: ingestSoldFeed },
   { name: "ingest-feed-history", everyMs: DAILY, run: ingestFeedHistory },
   { name: "snapshot-prices", everyMs: DAILY, run: snapshotPrices },
   { name: "prune-points", everyMs: 7 * DAILY, run: prunePoints },
