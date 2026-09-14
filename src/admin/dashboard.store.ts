@@ -39,6 +39,15 @@ export type Dashboard = {
     collected: number;
     failed: number;
     failedAccounts: number;
+    /* Invoices paid in the last seven days, and in the seven before them.
+       Two figures rather than one because a revenue number with no
+       comparison beside it cannot be read: the dashboard prints the change
+       between them, and the only honest way to print a change is to have
+       both ends of it. Rolling windows, not calendar weeks — a Monday-aligned
+       "this week" is one day long on a Tuesday and would halve itself every
+       seven days for reasons that have nothing to do with the business. */
+    week: number;
+    weekBefore: number;
   };
   /** New accounts through verification, last 30 days. */
   funnel: FunnelStage[];
@@ -90,7 +99,16 @@ function thisMonth(events: { kind: string; amount: number | null; at: string; us
 export async function dashboard(): Promise<Dashboard> {
   const empty: Dashboard = {
     stats: { liveListings: 0, queueDepth: 0, breached: 0, openReports: 0, members: 0 },
-    money: { mrr: 0, subscribers: 0, tiers: [], collected: 0, failed: 0, failedAccounts: 0 },
+    money: {
+      mrr: 0,
+      subscribers: 0,
+      tiers: [],
+      collected: 0,
+      failed: 0,
+      failedAccounts: 0,
+      week: 0,
+      weekBefore: 0,
+    },
     funnel: [],
     gmv: [],
     queueMix: [],
@@ -122,7 +140,7 @@ export async function dashboard(): Promise<Dashboard> {
   // dashboard reads six lines of it rather than the page growing a second idea
   // of what happened. It rides in this same single read for the reason the
   // file's header comment already gives about one endpoint rather than five.
-  const [counts, funnelRow, sold, verified, mix, events, plans, recent, tickets] = await Promise.all([
+  const [counts, funnelRow, sold, verified, mix, events, weekPair, plans, recent, tickets] = await Promise.all([
     one(
       `select
          count(*) filter (where status = 'live')::int live,
@@ -188,6 +206,38 @@ export async function dashboard(): Promise<Dashboard> {
        `billingLedger`, and a second parser here would be a second opinion
        about what a webhook meant. */
     billingLedger(300).catch(() => []),
+    /* The weekly pair, in SQL rather than off the ledger above, for two
+       reasons the month figure beside it does not have to care about.
+
+       Stripe sends `invoice.paid` AND `invoice.payment_succeeded` for one
+       payment, and `EVENT_KINDS` maps both to "paid" — summing the ledger
+       therefore counts every invoice twice. That is survivable in a figure
+       nobody divides, and it is not survivable in a percentage: two weeks
+       that double-count by different amounts is a change that never
+       happened. `distinct on` the invoice's own id collapses the pair back
+       to the one payment it was.
+
+       The second reason is the window. The ledger is the last 300 events,
+       which is a count, not a period — on a busy fortnight the fourteenth
+       day falls off the end and the earlier week silently shrinks. */
+    one(
+      `select
+         coalesce(sum(amount) filter (where at >= now() - interval '7 days'), 0)::float week,
+         coalesce(sum(amount) filter (
+           where at >= now() - interval '14 days' and at < now() - interval '7 days'
+         ), 0)::float week_before
+       from (
+         select distinct on (payload->>'id')
+                (payload->>'amount_paid')::numeric / 100 amount,
+                received_at at
+           from billing_events
+          where type in ('invoice.paid', 'invoice.payment_succeeded')
+            and received_at > now() - interval '14 days'
+            and payload->>'id' is not null
+            and payload->>'amount_paid' is not null
+          order by payload->>'id', received_at
+       ) paid`,
+    ),
     adminPlans().catch(() => []),
     auditEntries({ limit: 6 }).catch(() => []),
     /* The console has a whole support section with a first-reply target, and
@@ -282,6 +332,8 @@ export async function dashboard(): Promise<Dashboard> {
         mrr: p.mrr,
       })),
       ...thisMonth(events),
+      week: weekPair.week ?? 0,
+      weekBefore: weekPair.week_before ?? 0,
     },
     funnel: [
       { key: "created", label: "Account created", value: f.created ?? 0 },

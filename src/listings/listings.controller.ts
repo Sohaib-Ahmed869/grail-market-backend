@@ -7,7 +7,7 @@ import { callerId } from "../auth/auth.controller.js";
 import { denied, requireCapability } from "../admin/guard.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
 import { findPlan, PLANS } from "../billing/plans.js";
-import { ANGLES, MIN_PHOTOS, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
+import { ANGLES, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
   liveCount, moveListing, reviewQueue, setPhotos,
@@ -20,6 +20,7 @@ import { recordSale } from "../sales/ledger.js";
 import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
 import { censor } from "../community/censor.js";
+import { readSettings } from "../admin/settings.store.js";
 
 const need = (req: Request) => callerId(req);
 
@@ -234,16 +235,42 @@ export class ListingsController {
       return { error: "not-declared", message: "All four statements must be agreed." };
     }
 
-    // The photograph floor is enforced here as well as in the app. A rule that
-    // only the client applies is not a rule — it is a suggestion that anything
-    // holding a session token can ignore.
     const l = await getListing(id);
     if (!l || l.seller_id !== me) return { error: "not-found" };
+
+    // Every requirement on this step comes from the Review thresholds page —
+    // the API enforces it here as well as in the app, because a rule that
+    // only the client applies is not a rule, it is a suggestion that anything
+    // holding a session token can ignore.
+    const settings = await readSettings();
+
     const shots = Array.isArray(l.photos) ? l.photos.length : 0;
-    if (shots < MIN_PHOTOS) {
+    if (shots < settings.minPhotos) {
       return {
         error: "too-few-photos",
-        message: `${MIN_PHOTOS} photographs are needed before a listing can go up. This one has ${shots}.`,
+        message: `${settings.minPhotos} photographs are needed before a listing can go up. This one has ${shots}.`,
+      };
+    }
+
+    // "Require a certificate number for slabbed cards." A grade always
+    // belongs to a grading company, so a listing with a grader on it but no
+    // certificate is exactly the case this setting names.
+    if (settings.requireCert && l.grader && !l.is_raw && !l.cert_number) {
+      return {
+        error: "cert-required",
+        message: `A certificate number is required for a ${l.grader}-graded card.`,
+      };
+    }
+
+    // "Allow raw (ungraded) cards above the high-value floor." Off by
+    // default — an expensive raw card is the hardest thing on the platform
+    // to authenticate from photographs.
+    if (!settings.allowRaw && l.is_raw && Number(l.price) >= settings.highValueFloor) {
+      return {
+        error: "raw-above-floor",
+        message:
+          `Raw cards above A$${settings.highValueFloor.toLocaleString()} are not accepted. ` +
+          "Get this one graded, or lower the asking price.",
       };
     }
 
