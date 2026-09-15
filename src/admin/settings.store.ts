@@ -37,8 +37,12 @@ export const DEFAULTS = {
   /* thresholds */
   grailFloor: 10000,
   highValueFloor: 2000,
+  /* Publish listings that pass every automatic check without a person
+     looking, below `autoPublishBelow` (A$). Off until the client has agreed
+     in writing what the automatic step tests — see listings/autopublish.ts. */
   autoClear: false,
   autoClearHours: 24,
+  autoPublishBelow: 2500,
   sampleRate: 5,
   requireCert: true,
   blockLowConfidence: true,
@@ -51,7 +55,12 @@ export const DEFAULTS = {
   strikeLimit: 3,
   allowRaw: false,
   /* notifications */
+  /* Whether chat, posts and comments have contact details masked on the way
+     in. Off records the attempts but leaves the text as typed. */
   interceptOn: true,
+  /* Contact-sharing attempts in 30 days that open a member review on their
+     own. 0 turns the automatic review off; the record is kept either way. */
+  contactReviewAfter: 3,
 } as const;
 
 export type SettingKey = keyof typeof DEFAULTS;

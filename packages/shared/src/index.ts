@@ -153,6 +153,17 @@ export const Identification = z.object({
   /** which printing this is, and how sure the pictures were. Absent where the
    *  card has no printings to choose between. */
   printingChoice: PrintingChoice.nullish(),
+  /** Whether something on the card itself settled WHICH printing this is: a
+   *  set code or collector number read off the face, a clear picture match,
+   *  or a name with only one printing. `false` means the card is named but no
+   *  printing is asserted and nothing is priced — see src/scans/printingproof.ts.
+   *  Absent on the exact-code paths (slab label, set code), which are
+   *  confirmed by construction. */
+  printingConfirmed: z.boolean().nullish(),
+  /** Why it is unconfirmed, for the screen: "printing-not-read" or
+   *  "name-not-on-card" (the AI named a card whose name we could not find in
+   *  the text on it). */
+  unconfirmedReason: z.string().nullish(),
 });
 export type Identification = z.infer<typeof Identification>;
 

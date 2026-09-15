@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from "@nestjs/common";
 import { storePool } from "../cards.store.js";
 import { reputationFor, sellerMetrics } from "../ratings/store.js";
+import { publicListing } from "./publicshape.js";
 
 // Who you are dealing with.
 //
@@ -71,10 +72,8 @@ export class SellersController {
       reputation,
       metrics,
       suburbs,
-      listings: listings.rows.map((l: any) => {
-        const { views, saves, reject_reason, ...rest } = l;
-        return { ...rest, featured: l.featured_until != null && new Date(l.featured_until) > new Date() };
-      }),
+      // The same public allowlist as the marketplace — see publicshape.ts.
+      listings: listings.rows.map((l: any) => publicListing(l)),
     };
   }
 }

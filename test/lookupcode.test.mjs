@@ -71,6 +71,7 @@ test("cert links point at the company's own register, and refuse when unknown", 
   assert.match(certUrl("PSA", "123"), /psacard\.com\/cert\/123/);
   assert.match(certUrl("cgc", "123"), /cgccards\.com/);
   assert.equal(certUrl("NOBODY", "123"), null, "never invent a register");
-  assert.equal(certLinks("123").length, 4);
+  assert.match(certUrl("ace", "1234567"), /^https:\/\/acegrading\.com\/cert\/1234567$/);
+  assert.equal(certLinks("123").length, 5);
   assert.ok(certLinks("123").every((l) => l.url.includes("123")));
 });

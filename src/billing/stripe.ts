@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { findPlan, priceIdFor } from "./plans.js";
+import { findPlan, priceIdFor, type Interval } from "./plans.js";
 import { livePriceFor } from "./liveprice.js";
 
 // Stripe, over plain HTTP rather than the SDK.
@@ -32,6 +32,9 @@ function form(params: Record<string, string | number | undefined>): string {
  *  home but the back gesture. */
 export async function createCheckout(opts: {
   userId: string; planId: string; returnBase: string;
+  /** Monthly or yearly. Defaults to monthly, which is what every caller
+   *  before annual pricing meant. */
+  interval?: Interval;
   /**
    * The price to sell at, when the caller knows a newer one than the
    * environment names.
@@ -48,14 +51,23 @@ export async function createCheckout(opts: {
 
   const plan = findPlan(opts.planId);
   if (!plan) throw new Error(`unknown plan: ${opts.planId}`);
+  if (plan.free || plan.legacy) throw new Error(`${plan.name} is not sold`);
+  const interval: Interval = opts.interval === "year" ? "year" : "month";
   // The price Stripe currently sells this product at, which is not necessarily
   // the id in the environment: editing a price archives it and creates a new
   // one, and Stripe rejects an archived price with "The price specified is
   // inactive". Falling back to the pinned id keeps this working when Stripe
   // cannot be reached to resolve anything better.
   const live = await livePriceFor(plan);
-  const price = live?.priceId ?? priceIdFor(plan);
-  if (!price) throw new Error(`${plan.priceEnv} is not set`);
+  // The caller's price only ever describes the MONTHLY price (the console's
+  // cached catalogue), so it is not used for a yearly checkout. A yearly price
+  // Stripe cannot resolve is refused rather than sold at a monthly figure.
+  const price = interval === "year"
+    ? live?.annual?.priceId ?? priceIdFor(plan, "year")
+    : live?.priceId || opts.priceId || priceIdFor(plan, "month");
+  if (!price) {
+    throw new Error(`${interval === "year" ? plan.annualPriceEnv : plan.priceEnv} is not set`);
+  }
 
   const res = await fetch(`${API}/checkout/sessions`, {
     method: "POST",
@@ -70,10 +82,12 @@ export async function createCheckout(opts: {
       client_reference_id: opts.userId,
       "metadata[user_id]": opts.userId,
       "metadata[plan_id]": plan.id,
+      "metadata[interval]": interval,
       // subscription_data metadata survives onto the subscription itself, so a
       // later renewal webhook still knows who and which plan
       "subscription_data[metadata][user_id]": opts.userId,
       "subscription_data[metadata][plan_id]": plan.id,
+      "subscription_data[metadata][interval]": interval,
       success_url: `${opts.returnBase}?status=done&plan=${plan.id}`,
       cancel_url: `${opts.returnBase}?status=cancelled`,
     }),

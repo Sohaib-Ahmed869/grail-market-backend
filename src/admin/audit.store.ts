@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS admin_audit (
   actor_id   text,
   actor      text NOT NULL,
   -- 'listing' | 'member' | 'conduct' | 'support' | 'billing' | 'pricing'
-  -- | 'settings' | 'staff'
+  -- | 'catalog' | 'settings' | 'staff'
   area       text NOT NULL,
   -- The verb, past tense, as it reads in a list.
   action     text NOT NULL,
@@ -56,6 +56,7 @@ export const AREAS = [
   "support",
   "billing",
   "pricing",
+  "catalog",
   "settings",
   "staff",
 ] as const;

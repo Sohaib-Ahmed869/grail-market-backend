@@ -422,6 +422,46 @@ def decide_language(all_text: str) -> tuple[str, bool]:
     return "unknown", japanese
 
 
+# Where the printing codes are, as fractions of card height: the strip under the
+# artwork (Yu-Gi-Oh set codes, One Piece codes) and the bottom edge (Pokemon,
+# Magic and Lorcana collector lines, sports card numbers).
+REREAD_BANDS = ((0.62, 0.80), (0.80, 1.0))
+REREAD_SCALE = 2.0
+
+
+def _has_printing_code(texts: list[dict]) -> bool:
+    """Did the first pass already read something that pins the printing?"""
+    for t in texts:
+        if t["top"] > 0.80 and COLLECTOR_RE.search(t["text"]):
+            return True
+        if SET_CODE_RE.search(t["text"]):
+            return True
+    return False
+
+
+def _band_to_card_texts(result, y0: float, h: int, w: int, scale: float) -> list[dict]:
+    """OCR boxes read on an enlarged crop, placed back on the whole card.
+
+    The crop starts at `y0` of the card height and was scaled by `scale`, so a
+    box at pixel y in the crop sits at y0 + (y / scale) / h on the card. Kept
+    in the same shape as the first pass so every reader downstream treats a
+    re-read line exactly like one read the first time."""
+    out = []
+    for box, text, score in result or []:
+        ys = [p[1] / scale for p in box]
+        xs = [p[0] / scale for p in box]
+        out.append(
+            {
+                "text": str(text).strip(),
+                "score": float(score),
+                "top": float(y0 + min(ys) / h),
+                "height": float((max(ys) - min(ys)) / h),
+                "left": float(min(xs) / w),
+            }
+        )
+    return out
+
+
 def read_card_text(warped: np.ndarray) -> dict:
     h, w = warped.shape[:2]
     # normalize height for OCR: big enough to read, small enough to fit in
@@ -485,6 +525,23 @@ def read_card_text(warped: np.ndarray) -> dict:
                 "left": float(min(xs) / w),
             }
         )
+
+    # The number is the smallest type on the card, and at 800px of card height
+    # it is four or five pixels tall — below what the OCR model reads. On 63
+    # scans not one collector number came back, and a card with no number is a
+    # name matched to whichever printing a catalogue lists first. So when
+    # neither a collector number nor a set code was found, the bands where
+    # games print them are read again, cropped and enlarged.
+    if not _has_printing_code(texts):
+        for y0, y1 in REREAD_BANDS:
+            top_px, bottom_px = int(y0 * h), int(y1 * h)
+            if bottom_px - top_px < 8:
+                continue
+            band = warped[top_px:bottom_px, :]
+            band = cv2.resize(
+                band, None, fx=REREAD_SCALE, fy=REREAD_SCALE, interpolation=cv2.INTER_CUBIC
+            )
+            texts.extend(_band_to_card_texts(_run(band), y0, h, w, REREAD_SCALE))
 
     collector = None
     for t in texts:

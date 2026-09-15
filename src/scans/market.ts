@@ -15,6 +15,8 @@
 // free tier alongside scan-time price lookups.
 
 import { demandedCards } from "./demand.js";
+import { isSportCard, isSportGame } from "./sports.js";
+import { isCatalogueOnlyCard } from "./editions.js";
 import { TtlCache } from "./ttlcache.js";
 import { feedMatches } from "./feedmatch.js";
 
@@ -30,6 +32,11 @@ export type PulseCard = {
   low7: number | null;
   high7: number | null;
   spark: number[]; // recent price points, oldest -> newest
+  /** Which variant the price is for, as the feed names it ("Near Mint",
+   *  "Holofoil"). The pulse picks the most-traded variant, so without these a
+   *  screen cannot say what the number describes and must not guess. */
+  condition?: string | null;
+  printing?: string | null;
   /** filled from our own catalogue, so the app can show the card rather than
    *  a row in a table */
   imageUrl?: string | null;
@@ -101,6 +108,12 @@ export async function cardTrend(a: {
 }): Promise<CardTrend | null> {
   const key = process.env.JUSTTCG_API_KEY;
   if (!key || !a.name) return null;
+  // A sports entry is a player within a set — every printing of him at once —
+  // and the feed would answer the player's NAME with somebody's card. A trend
+  // line is a price drawn over time; the same rule as `/market/price` applies.
+  // Nor for a catalogue-only card (editions.ts): the feed answers a name, and
+  // the name of a Japanese or Korean print is the English card's.
+  if (isSportCard(a.catalogId) || isSportGame(a.game) || isCatalogueOnlyCard(a.catalogId)) return null;
 
   const hit = trendCache.entry(a.catalogId);
   if (hit) return hit.v;
@@ -344,6 +357,8 @@ export async function marketPulse(): Promise<PulseCard[]> {
         low7: pct(v.minPrice7d),
         high7: pct(v.maxPrice7d),
         spark,
+        condition: typeof v.condition === "string" ? v.condition : null,
+        printing: typeof v.printing === "string" ? v.printing : null,
         imageUrl: w.imageUrl,
         // A real id every time, because it came from our own tables rather
         // than from a search that can answer with a sentinel.

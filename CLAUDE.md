@@ -177,6 +177,65 @@ Off unless `THECARDAPI_KEY` and `THECARDAPI_DAILY_ROWS` are both set.
   were `best_offer`, which is the accepted-offer price eBay's own API will not
   give us.
 
+## Sports catalogue — eBay item specifics
+
+`src/scans/sports.ts`. Browse API aspect refinements in category 261328
+(Sports Trading Card Singles): Sport -> Set -> Player/Athlete, one call per
+level, cached a day. Ids: games `sport:<slug>`, sets `sport:<slug>:<encoded
+set>`, cards `sport-<base64url(slug|set|player)>`.
+
+- **A sports "card" is a player within a set** — base, rookies, parallels and
+  1/1s at once. There are no card numbers. `/market/price`, `gradedPricesFor`,
+  `cardTrend` and the `/market/listings` summary all refuse a figure for these
+  ids (`isSportCard`/`isSportGame`). Do not remove that until a card number
+  exists to narrow on. Fixtures in `test/sportscatalogue.test.mjs`.
+- **AFL, NRL and cricket read eBay AU.** The AU Sport value is "Australian
+  Rules Football"; the US spelling is silently ignored there and returns the
+  whole category. `filterHeld()` is what catches a dropped filter.
+- **Metered as `ebay` AND `ebay-catalogue`.** Browsing stops at
+  `EBAY_CATALOGUE_DAILY_MAX` (1500) or when total eBay use reaches
+  `EBAY_BROWSE_DAILY_LIMIT - EBAY_ASKS_RESERVE` (5000 - 1500), so the asks
+  panel always has room.
+- Player search uses the US site only; an AFL-only name ("patrick
+  dangerfield") finds nothing there and falls through to the market row.
+- **Pictures are per player**, via `GET /market/sports/art?ids=` (12 max,
+  one call per uncached id, 4 at a time). A set's own call pictures ~1 in 15.
+  A null from an answered call is cached a day; a budget refusal or failed
+  call is never cached. Pick-your-card and lot photos are refused unless the
+  title names the player — three 2009 Topps soccer players once shared one.
+- **Small-sport set lists drop mis-tags** (`keepSet`): kept if the name names
+  the league, or this sport is >=25% of the set's sport tags, or a local
+  printer's set at >=5%. Costs one call per set per day — cricket is ~77 cold,
+  ~12s on the first request. A list with an unmeasured set is not cached.
+
+## Catalogue-only cards and language editions
+
+`src/scans/editions.ts`. Two card id shapes come from a set listing rather
+than a scan: `tcg-<game>-<productId>` (tcgcsv, including all of Pokémon
+Japan) and `lng-<code>-<pk|mtg>-<id>` (non-English Pokémon from TCGdex,
+non-English Magic from Scryfall).
+
+- **They are never priced by name.** Every name-matched source — the store,
+  PPT, JustTCG, The Card API, the eBay median — answers a Japanese or Korean
+  print with the English card. `gradedPricesFor`, `cardTrend`, `soldComps`,
+  `/market/price` and the `/market/listings` summary refuse them
+  (`isCatalogueOnlyCard`). The only figure allowed is the catalogue's own for
+  that product or print id, indexed when the set is read; after a restart it
+  is null until the set is opened again. Fixtures in `test/editions.test.mjs`.
+- **Asks:** Japanese and Chinese editions narrow to that language; other
+  languages, and any card without a number, get rows but no median.
+- **Editions are games**: `lang:pokemon:<tcgdex code>` and
+  `lang:mtg:<scryfall code>`, with `baseGame`, `language`, `languageName`.
+  Categories `japanese` (incl. `pokemonjp`) and `language`. Japanese Pokémon
+  stays `pokemonjp` (tcgcsv, priced) — there is no TCGdex `ja` edition.
+- **Magic language set lists** come from `lang:<l> (number:1 or number:2 or
+  number:3)` — about one card per set that exists in the language, 2–5
+  Scryfall calls a day per language (Japanese: 255 sets, 5 pages). Number 1
+  alone misses Adventures in the Forgotten Realms. An opened set with no
+  printing answers `cards: []` with a `note`, not an error.
+- No free Japanese catalogue exists here for One Piece, Yu-Gi-Oh OCG, Lorcana,
+  Digimon, Dragon Ball, Union Arena, Weiss, hololive or Gundam.
+
 ## Parse (parse.bot)
 
 Not yet wired. Intended for tcdb.com — the free sports/non-sport catalogue

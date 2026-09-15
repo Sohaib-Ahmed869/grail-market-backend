@@ -11,7 +11,7 @@ import { TtlCache } from "./ttlcache.js";
 // the authority; this is here so a seller can see what the market is currently
 // being offered at, and sanity-check our figure against real inventory.
 
-const EBAY = "https://api.ebay.com";
+export const EBAY = "https://api.ebay.com";
 const TTL_MS = 30 * 60 * 1000; // asks move slowly; half an hour is plenty
 
 export type Listing = {
@@ -99,7 +99,10 @@ const STALE_DAYS = 60;
 const cache = new TtlCache<ListingResult>(TTL_MS, Number(process.env.LISTINGS_CACHE_MAX ?? 2000));
 let token: { value: string; expires: number } | null = null;
 
-async function getToken(): Promise<string | null> {
+/** Exported for `sports.ts`, which browses the same API. One token for the
+ *  whole process — a second helper would mint a second token and hold two
+ *  expiries that drift apart. */
+export async function getToken(): Promise<string | null> {
   const id = process.env.EBAY_APP_ID;
   const secret = process.env.EBAY_CERT_ID;
   if (!id || !secret) return null;

@@ -4,7 +4,7 @@ import { storePool } from "../cards.store.js";
 import { requiredFor, tierOf, whatIsMissing, type TierInputs } from "./tiers.js";
 import { createSession, diditConfigured, verifyWebhook, type DiditStatus } from "./didit.js";
 import { callerId } from "../auth/auth.controller.js";
-import { alreadySeen, applyStatus, readStatus, recordEvent } from "./store.js";
+import { alreadySeen, applyStatus, readStatus, recordEvent, riskCodesFrom } from "./store.js";
 import { readSettings } from "../admin/settings.store.js";
 
 @Controller("identity")
@@ -146,9 +146,12 @@ export class IdentityController {
 
     if (await alreadySeen(e.event_id)) return "ok";
 
+    // The decision is read for its risk codes and then dropped on the floor.
+    // It is the identity document itself, and the client's rule is that it
+    // never touches our database — see store.ts.
     await recordEvent({
       eventId: e.event_id, userId: e.vendor_data, sessionId: e.session_id ?? null,
-      status: e.status, decision: e.decision ?? null,
+      status: e.status, reasons: riskCodesFrom(e.decision),
     });
     await applyStatus(e.vendor_data, e.status, e.session_id ?? null);
     console.log(`[identity] ${e.vendor_data} -> ${e.status}`);

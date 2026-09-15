@@ -1,6 +1,9 @@
 import type { Identification, Valuation } from "@grailcard/shared";
-import { bestAgainst } from "./similarity.js";
+import { bestAgainst, similarity } from "./similarity.js";
 import { pickPrinting } from "./printingpicker.js";
+import {
+  readLorcanaPrinting, readMtgPrinting, readYgoSetCodes, ygoPrintingFor, ygoSetPrice,
+} from "./printingproof.js";
 
 const MIN_SCORE = 0.6;
 
@@ -22,8 +25,17 @@ async function fetchJson(url: string): Promise<unknown | null> {
   }
 }
 
-/** Magic: The Gathering via Scryfall (free, no key). */
-export async function identifyScryfall(names: string[]): Promise<CatalogMatch | null> {
+/** Magic: The Gathering via Scryfall (free, no key).
+ *
+ *  The name search returns ONE default printing per card (unique=cards), and
+ *  its price is that printing's. Orcish Bowmasters has six, from US$48 to
+ *  US$193. So the printing comes from the set code and collector number read
+ *  off the card, looked up exactly; without them the card is named and not
+ *  priced. */
+export async function identifyScryfall(
+  names: string[],
+  texts: readonly string[] = [],
+): Promise<CatalogMatch | null> {
   if (names.length === 0) return null;
   const q = encodeURIComponent(names[0]);
   const body = (await fetchJson(
@@ -37,7 +49,44 @@ export async function identifyScryfall(names: string[]): Promise<CatalogMatch | 
   }
   if (!best || best.score < MIN_SCORE) return null;
 
-  const c = best.card;
+  // A set and number read off the card only count when a real card sits at
+  // that address AND carries this name — card text is full of stray numbers.
+  const proof = readMtgPrinting(texts);
+  let printed: Record<string, any> | null = null;
+  for (const set of proof.sets.slice(0, 2)) {
+    for (const num of proof.numbers.slice(0, 3)) {
+      const hit = (await fetchJson(
+        `https://api.scryfall.com/cards/${encodeURIComponent(set.toLowerCase())}/${encodeURIComponent(num)}`,
+      )) as Record<string, any> | null;
+      if (hit?.name && similarity(String(hit.name), String(best.card.name)) >= 0.85) {
+        printed = hit;
+        break;
+      }
+    }
+    if (printed) break;
+  }
+  if (!printed) {
+    const c0 = best.card;
+    return {
+      identification: {
+        cardId: `scryfall-${c0.id}`,
+        name: c0.name,
+        setId: "",
+        setName: "",
+        localId: "",
+        rarity: null,
+        imageUrl: null,
+        matchScore: Math.min(best.score, 0.9),
+        ocrName: best.name,
+        game: "mtg",
+        printingConfirmed: false,
+        unconfirmedReason: "printing-not-read",
+      },
+      valuation: null,
+    };
+  }
+
+  const c = printed;
   const identification: Identification = {
     cardId: `scryfall-${c.id}`,
     name: c.name,
@@ -49,6 +98,7 @@ export async function identifyScryfall(names: string[]): Promise<CatalogMatch | 
     matchScore: Math.min(best.score, 1),
     ocrName: best.name,
     game: "mtg",
+    printingConfirmed: true,
   };
   const usd = c.prices?.usd ? Number(c.prices.usd) : null;
   const eur = c.prices?.eur ? Number(c.prices.eur) : null;
@@ -67,8 +117,15 @@ export async function identifyScryfall(names: string[]): Promise<CatalogMatch | 
   return { identification, valuation };
 }
 
-/** Disney Lorcana via Lorcast (free, no key, includes USD prices). */
-export async function identifyLorcana(names: string[]): Promise<CatalogMatch | null> {
+/** Disney Lorcana via Lorcast (free, no key, includes USD prices).
+ *
+ *  Enchanted and promo printings share a name with the common one, so the
+ *  printing comes from the collector line ("103/204 • EN • 5"); without it the
+ *  card is named and not priced. */
+export async function identifyLorcana(
+  names: string[],
+  texts: readonly string[] = [],
+): Promise<CatalogMatch | null> {
   if (names.length === 0) return null;
   const body = (await fetchJson(
     `https://api.lorcast.com/v0/cards/search?q=${encodeURIComponent(names[0])}`,
@@ -81,7 +138,34 @@ export async function identifyLorcana(names: string[]): Promise<CatalogMatch | n
     if (!best || m.score > best.score) best = { card, score: m.score, name: m.name };
   }
   if (!best || best.score < MIN_SCORE) return null;
-  const c = best.card;
+  const proof = readLorcanaPrinting(texts);
+  const printed = proof
+    ? cards.find((card) =>
+        String(Number(card.collector_number)) === proof.number &&
+        String(card.set?.code ?? "") === proof.setCode &&
+        bestAgainst(names, [card.name, card.version].filter(Boolean).join(" ")).score >= MIN_SCORE)
+    : null;
+  if (!printed) {
+    const c0 = best.card;
+    return {
+      identification: {
+        cardId: `lorcana-${c0.id}`,
+        name: [c0.name, c0.version].filter(Boolean).join(" — "),
+        setId: "",
+        setName: "",
+        localId: "",
+        rarity: null,
+        imageUrl: null,
+        matchScore: Math.min(best.score, 0.9),
+        ocrName: best.name,
+        game: "lorcana",
+        printingConfirmed: false,
+        unconfirmedReason: "printing-not-read",
+      },
+      valuation: null,
+    };
+  }
+  const c = printed;
   const usd = c.prices?.usd ? Number(c.prices.usd) : null;
   return {
     identification: {
@@ -95,6 +179,7 @@ export async function identifyLorcana(names: string[]): Promise<CatalogMatch | n
       matchScore: Math.min(best.score, 1),
       ocrName: best.name,
       game: "lorcana",
+      printingConfirmed: true,
     },
     valuation:
       usd != null
@@ -108,8 +193,13 @@ export async function identifyLorcana(names: string[]): Promise<CatalogMatch | n
   };
 }
 
-/** Digimon Card Game via digimoncard.io (free, no key, no prices). */
-export async function identifyDigimon(names: string[]): Promise<CatalogMatch | null> {
+/** Digimon Card Game via digimoncard.io (free, no key, no prices). The card
+ *  code (BT1-001) is printed on the card; the printing counts as confirmed
+ *  only when that code was read. */
+export async function identifyDigimon(
+  names: string[],
+  texts: readonly string[] = [],
+): Promise<CatalogMatch | null> {
   if (names.length === 0) return null;
   const body = await fetchJson(
     `https://digimoncard.io/api-public/search.php?n=${encodeURIComponent(names[0])}`,
@@ -134,6 +224,8 @@ export async function identifyDigimon(names: string[]): Promise<CatalogMatch | n
       matchScore: Math.min(best.score, 1),
       ocrName: best.name,
       game: "digimon",
+      printingConfirmed: Boolean(c.id) &&
+        texts.some((t) => String(t).toUpperCase().replace(/\s+/g, "").includes(String(c.id).toUpperCase())),
     },
     valuation: null,
   };
@@ -164,19 +256,15 @@ export async function identifySwu(names: string[]): Promise<CatalogMatch | null>
       localId: String(c.Number ?? ""),
       rarity: c.Rarity ?? null,
       imageUrl: c.FrontArt ?? null,
-      matchScore: Math.min(best.score, 1),
+      matchScore: Math.min(best.score, 0.9),
       ocrName: best.name,
       game: "starwars",
+      // Hyperspace and Showcase printings share the name and differ by
+      // multiples in price, and nothing here reads which one this is.
+      printingConfirmed: false,
+      unconfirmedReason: "printing-not-read",
     },
-    valuation:
-      market != null && Number.isFinite(market)
-        ? {
-            source: "swu-db",
-            updatedAt: null,
-            tcgplayer: { unit: "USD", variant: "normal", low: null, mid: null, high: null, market },
-            cardmarket: null,
-          }
-        : null,
+    valuation: market != null && Number.isFinite(market) ? null : null,
   };
 }
 
@@ -289,6 +377,12 @@ export async function identifyOnePiece(
         `pick the artwork that matches your card.`
       : null;
 
+  // The number settles the card; the picture has to settle the printing, and
+  // an undecided pick among printings that differ in price is one we did not
+  // make. Close prices make the choice not matter, so those stay priced.
+  identification.printingConfirmed = !identificationSuspect;
+  if (identificationSuspect) identification.unconfirmedReason = "printing-not-read";
+
   const valuation: Valuation | null =
     market != null
       ? {
@@ -313,8 +407,21 @@ export async function identifyOnePiece(
   return { identification, valuation };
 }
 
-/** Yu-Gi-Oh! via YGOPRODeck (free, no key). */
-export async function identifyYgo(names: string[]): Promise<CatalogMatch | null> {
+/** Yu-Gi-Oh! via YGOPRODeck (free, no key).
+ *
+ *  A YGOPRODeck card is every printing of that card at once: Blue-Eyes White
+ *  Dragon is one entry with 78 sets. This used to take the first set in the
+ *  list as the printing and `card_prices` as its price — which is the CHEAPEST
+ *  printing's price. LOB-001 (US$62.15) came back as a 2016 tin at US$0.13,
+ *  with a match score of 1.0 because the NAME matched perfectly.
+ *
+ *  Now the printing is the set code read off the card (under the artwork), the
+ *  price is that printing's own `set_price`, and with no code read the card is
+ *  named, no set is claimed and nothing is priced. */
+export async function identifyYgo(
+  names: string[],
+  texts: readonly string[] = [],
+): Promise<CatalogMatch | null> {
   if (names.length === 0) return null;
   const q = encodeURIComponent(names[0]);
   const body = (await fetchJson(
@@ -329,31 +436,34 @@ export async function identifyYgo(names: string[]): Promise<CatalogMatch | null>
   if (!best || best.score < MIN_SCORE) return null;
 
   const c = best.card;
-  const prices = c.card_prices?.[0] ?? {};
-  const tp = prices.tcgplayer_price ? Number(prices.tcgplayer_price) : null;
-  const cm = prices.cardmarket_price ? Number(prices.cardmarket_price) : null;
+  const printing = ygoPrintingFor(c.card_sets as any[] | undefined, readYgoSetCodes(texts));
+  const price = ygoSetPrice(printing);
   const identification: Identification = {
     cardId: `ygo-${c.id}`,
     name: c.name,
-    setId: c.card_sets?.[0]?.set_code ?? "",
-    setName: c.card_sets?.[0]?.set_name ?? "",
-    localId: String(c.card_sets?.[0]?.set_code ?? ""),
-    rarity: c.card_sets?.[0]?.set_rarity ?? null,
+    setId: printing?.set_code ?? "",
+    setName: printing?.set_name ?? "",
+    localId: printing?.set_code ?? "",
+    rarity: printing?.set_rarity ?? null,
     imageUrl: c.card_images?.[0]?.image_url ?? null,
-    matchScore: Math.min(best.score, 1),
+    // A perfect name match is not a perfect printing match; below 0.93 the
+    // vision model gets a second look before anything is asserted.
+    matchScore: printing ? Math.min(best.score, 1) : Math.min(best.score, 0.9),
     ocrName: best.name,
     game: "yugioh",
+    printingConfirmed: Boolean(printing),
+    unconfirmedReason: printing ? null : "printing-not-read",
   };
   const valuation: Valuation | null =
-    tp != null || cm != null
+    printing && price != null
       ? {
           source: "ygoprodeck",
           updatedAt: null,
-          tcgplayer:
-            tp != null
-              ? { unit: "USD", variant: "normal", low: null, mid: null, high: null, market: tp }
-              : null,
-          cardmarket: cm != null ? { unit: "EUR", low: null, trend: cm, avg30: null } : null,
+          tcgplayer: {
+            unit: "USD", variant: printing.set_rarity ?? "normal",
+            low: null, mid: null, high: null, market: price,
+          },
+          cardmarket: null,
         }
       : null;
   return { identification, valuation };

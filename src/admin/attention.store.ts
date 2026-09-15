@@ -47,7 +47,7 @@ export async function attention(): Promise<Attention[]> {
     }
   };
 
-  const [overdueListings, dueSoon, breachedTickets, unclaimedCases, stuckBoosts] =
+  const [overdueListings, dueSoon, breachedTickets, unclaimedCases, stuckBoosts, contactReviews] =
     await Promise.all([
       one(
         `select count(*)::int n from listings
@@ -88,6 +88,13 @@ export async function attention(): Promise<Attention[]> {
           where applied_at is null and comped_at is null
             and purchased_at < now() - interval '2 hours'`,
       ),
+      /* Members the masking rules have caught often enough to open a review,
+         and nobody has closed it yet. */
+      one(
+        `select count(*)::int n from users
+          where contact_review_opened_at is not null
+            and (contact_review_closed_at is null or contact_review_closed_at < contact_review_opened_at)`,
+      ),
     ]);
 
   const out: Attention[] = [];
@@ -126,6 +133,16 @@ export async function attention(): Promise<Attention[]> {
       title: `${unclaimedCases} conduct case${unclaimedCases === 1 ? "" : "s"} open and unclaimed for a day`,
       count: unclaimedCases,
       href: "/admin/conflicts",
+      tone: "warn",
+    });
+  }
+
+  if (contactReviews > 0) {
+    out.push({
+      key: "contact-reviews",
+      title: `${contactReviews} member${contactReviews === 1 ? " keeps" : "s keep"} trying to share contact details`,
+      count: contactReviews,
+      href: "/admin/members?scope=market&review=contact",
       tone: "warn",
     });
   }

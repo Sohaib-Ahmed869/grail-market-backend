@@ -3,6 +3,7 @@ import { storePool } from "../cards.store.js";
 import { censor } from "../community/censor.js";
 import { weigh } from "../community/pressure.js";
 import { notify } from "../notifications/store.js";
+import { interceptEnabled, recordContactAttempt } from "../admin/contact.store.js";
 
 // Buyer and seller talking about one card.
 //
@@ -172,14 +173,24 @@ export async function say(
   const flags = [...c.hits];
   if (split.masked && !flags.includes("split-contact")) flags.push("split-contact");
 
+  // The console's "Chat interceptor" switch. Off, the text goes through as
+  // typed — but the rules still run and the attempt is still recorded against
+  // the sender, so turning masking off never turns the record off with it.
+  const intercept = await interceptEnabled();
+  const changed = intercept && (c.masked || split.masked);
+  const shown = changed ? c.text : body;
+
   const id = `m_${randomUUID().slice(0, 12)}`;
   await pool.query(
     `insert into messages (message_id, thread_id, sender_id, body, raw_body, flags, kind)
      values ($1,$2,$3,$4,$5,$6,$7)`,
     // The original is kept whenever anything was changed, because moderation
     // needs to read what was actually typed.
-    [id, threadId, senderId, c.text, (c.masked || split.masked) ? body : null, flags, kind],
+    [id, threadId, senderId, shown, changed ? body : null, flags, kind],
   );
+  void recordContactAttempt({
+    userId: senderId, source: "message", ref: id, context: threadId, flags, masked: changed,
+  });
   await pool.query("update threads set last_at = now() where thread_id = $1", [threadId]);
 
   const to = thread.buyer_id === senderId ? thread.seller_id : thread.buyer_id;
@@ -187,11 +198,11 @@ export async function say(
   await notify({
     userId: to, kind: "message", actorId: senderId,
     title: `${who.rows[0]?.name ?? "Someone"} sent you a message`,
-    body: c.text.slice(0, 140),
+    body: shown.slice(0, 140),
     href: `/messages/${threadId}`,
   });
 
-  return { messageId: id, masked: c.masked || split.masked };
+  return { messageId: id, masked: changed };
 }
 
 /** An event in the deal, written into the conversation by the system. */

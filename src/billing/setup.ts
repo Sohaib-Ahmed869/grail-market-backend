@@ -2,9 +2,13 @@
 //
 //   npm run stripe:setup
 //
-// Written as a script rather than done by hand so the three plans are
+// Written as a script rather than done by hand so the plans are
 // reproducible: a second Stripe account (live, when test is done with) gets an
 // identical set from one command instead of three careful form-fills.
+//
+// Creates, for Collector and Dealer, a monthly AND a yearly price at the
+// amounts in PRICING (plans.ts), and makes the monthly price the product
+// default. Free has no Stripe product. Starter is retired and left alone.
 //
 // Safe to re-run. It looks for a product carrying the same `grailmarket_plan`
 // metadata before creating one, so running it twice does not leave six
@@ -14,7 +18,7 @@
 import { loadEnvFile } from "../env.js";
 loadEnvFile();
 
-import { PLANS } from "./plans.js";
+import { PAID_PLANS } from "./plans.js";
 
 const API = "https://api.stripe.com/v1";
 const KEY = process.env.STRIPE_SECRET_KEY;
@@ -51,7 +55,7 @@ console.log(`[stripe] ${live ? "LIVE" : "test"} mode\n`);
 const existing = await stripe<{ data: Product[] }>("/products?limit=100&active=true");
 const out: Record<string, string> = {};
 
-for (const plan of PLANS) {
+for (const plan of PAID_PLANS) {
   // find by our own marker, not by name — names are for humans and get edited
   let product = existing.data.find((p) => p.metadata?.grailmarket_plan === plan.id);
 
@@ -69,27 +73,38 @@ for (const plan of PLANS) {
   const prices = await stripe<{ data: Price[] }>(
     `/prices?product=${product.id}&active=true&limit=100`,
   );
-  let price = prices.data.find(
-    (p) =>
-      p.unit_amount === plan.amountCents &&
-      p.currency === "aud" &&
-      p.recurring?.interval === "month",
-  );
 
-  if (price) {
-    console.log(`  ${" ".repeat(10)} price exists    ${price.id}`);
-  } else {
-    price = await stripe<Price>("/prices", {
-      product: product.id,
-      unit_amount: plan.amountCents,
-      currency: "aud",
-      "recurring[interval]": "month",
-      "metadata[grailmarket_plan]": plan.id,
-    });
-    console.log(`  ${" ".repeat(10)} price created   ${price.id}`);
+  const intervals: { interval: "month" | "year"; cents: number | null; env: string }[] = [
+    { interval: "month", cents: plan.amountCents, env: plan.priceEnv },
+    { interval: "year", cents: plan.annualCents, env: plan.annualPriceEnv },
+  ];
+  for (const { interval, cents, env } of intervals) {
+    if (cents == null || !env) continue;
+    let price = prices.data.find(
+      (p) => p.unit_amount === cents && p.currency === "aud" && p.recurring?.interval === interval,
+    );
+    if (price) {
+      console.log(`  ${" ".repeat(10)} ${interval.padEnd(5)} price exists    ${price.id}`);
+    } else {
+      price = await stripe<Price>("/prices", {
+        product: product.id,
+        unit_amount: cents,
+        currency: "aud",
+        "recurring[interval]": interval,
+        "metadata[grailmarket_plan]": plan.id,
+      });
+      console.log(`  ${" ".repeat(10)} ${interval.padEnd(5)} price created   ${price.id}`);
+    }
+    out[env] = price.id;
+    // The monthly price becomes the product's default, which is what the app
+    // resolves the monthly plan price from. An older monthly price left
+    // active beside it (A$10 for Collector) is then unambiguous — and it is
+    // deliberately NOT archived here: existing subscriptions were created
+    // against it and keep billing on it until each is migrated.
+    if (interval === "month") {
+      await stripe(`/products/${product.id}`, { default_price: price.id });
+    }
   }
-
-  out[plan.priceEnv] = price.id;
 }
 
 console.log("\nPut these in .env and in Render:\n");

@@ -6,6 +6,7 @@ import {
   listCommunities, reactTo, setMembership, vote,
 } from "./store.js";
 import { censor } from "./censor.js";
+import { interceptEnabled } from "../admin/contact.store.js";
 
 @Controller("community")
 export class CommunityController {
@@ -75,11 +76,13 @@ export class CommunityController {
     if (!id) return { error: "no-community", message: "That community does not exist." };
     // Say what was taken out. A post that quietly comes back different is
     // worse than one that was refused.
-    const c = censor(`${title} ${b.body ?? ""}`);
+    // Only say something was removed when something was: with masking
+    // switched off in the console the post went up as typed.
+    const masked = censor(`${title} ${b.body ?? ""}`).masked && (await interceptEnabled());
     return {
       postId: id,
-      masked: c.masked,
-      notice: c.masked
+      masked,
+      notice: masked
         ? "Contact details were removed. Keep the deal on GrailMarket — off-platform trades have no ID check, no record and no way to dispute."
         : null,
     };
@@ -95,11 +98,11 @@ export class CommunityController {
       postId, authorId: me, body: body.slice(0, 8000), parentId: b?.parentId ?? null,
     });
     if (!id) return { error: "no-store" };
-    const c = censor(body);
+    const masked = censor(body).masked && (await interceptEnabled());
     return {
       commentId: id,
-      masked: c.masked,
-      notice: c.masked
+      masked,
+      notice: masked
         ? "Contact details were removed from your reply."
         : null,
     };

@@ -7,11 +7,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // service and gets back a single-use token — the key never leaves the server
 // and never reaches a bundle someone can unzip.
 
-const BASE = "https://verification.didit.me";
+const BASE = process.env.DIDIT_BASE_URL ?? "https://verification.didit.me";
 
-/** Which modules run, and their thresholds. Configuration, not a secret — it
- *  is chosen per session and belongs in code where it can be reviewed. */
-export const WORKFLOW_ID = "bf3b831d-c410-4f36-82aa-64bea6e3307c";
+/** Which modules run, and their thresholds. Configuration, not a secret.
+ *
+ *  The default is the sandbox workflow the client was shown on 8 September.
+ *  Moving to the paid account is a new API key plus that account's workflow
+ *  id in `DIDIT_WORKFLOW_ID` — an environment change, not a code change. */
+export const WORKFLOW_ID = process.env.DIDIT_WORKFLOW_ID ?? "bf3b831d-c410-4f36-82aa-64bea6e3307c";
 
 export type SessionOut = { sessionId: string; token: string; url: string };
 

@@ -35,6 +35,34 @@ export const WANTED = 3;
 const QUICK = 0.88;
 const PATIENT = 1.12;
 
+/** How far from the middle of recent sales one sale may sit before it is set
+ *  aside. GM001-59: "never let one bad listing move a figure". A sale three
+ *  times the others — or a third of them — is a different printing, a
+ *  mislabelled slab or a fake, not the market. Three, not two, because a hot
+ *  card genuinely doubles in a month and that is exactly what the seller
+ *  needs to see. */
+export const OUTLIER_FACTOR = 3;
+
+/** How many recent sales the outlier check looks across. */
+const LOOKBACK = 7;
+
+/** The key a guidance request is for, or null when it names none.
+ *
+ *  RAW means ungraded and nothing else. A request with no grader used to be
+ *  read as "any grader" by the ledger query, so an ungraded card's range
+ *  could average PSA 10 sales into it — invariant 1, broken by an omitted
+ *  parameter. Now no grader is not a key at all. */
+export function guidanceKey(
+  grader: string | null | undefined, grade: string | null | undefined,
+): { grader: string | null; grade: string | null; rawOnly: boolean } | null {
+  const g = (grader ?? "").trim().toUpperCase();
+  if (!g) return null;
+  if (g === "RAW") return { grader: null, grade: null, rawOnly: true };
+  const gr = String(grade ?? "").trim().replace(/\.0$/, "");
+  if (!gr) return null;
+  return { grader: g, grade: gr, rawOnly: false };
+}
+
 export type Guidance = {
   quick: number;
   market: number;
@@ -48,6 +76,8 @@ export type Guidance = {
   spreadDays: number;
   confidence: "high" | "medium" | "low";
   sales: { price: number; soldAt: string; source: string }[];
+  /** recent sales set aside as outliers before the three were chosen */
+  excluded: number;
 };
 
 export type NoGuidance = {
@@ -67,13 +97,34 @@ const days = (a: string | Date, b: string | Date) =>
  *  Mixed currencies are not hypothetical: the sold-comp feed writes AUD, USD
  *  and GBP rows into the same ledger for the same card. Averaging those as
  *  bare numbers would produce a figure in no currency at all. */
-function inCurrency(s: Sale, to: string, fx: FxRates): number | null {
+export function inCurrency(s: Pick<Sale, "price" | "currency">, to: string, fx: FxRates): number | null {
   const from = (s.currency || "USD").toUpperCase();
   if (from === to) return s.price;
   const a = fx.rates[to];
   const b = fx.rates[from];
   if (!a || !b) return null;
   return s.price * (a / b);
+}
+
+/** The middle of a list of prices. */
+export function medianOf(prices: number[]): number {
+  const sorted = [...prices].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (!n) return NaN;
+  return n % 2 ? sorted[(n - 1) / 2]! : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2;
+}
+
+/** Items whose price sits within OUTLIER_FACTOR of the group's median, and
+ *  how many were set aside. Shared with the price windows in
+ *  history/windows.ts, so "an outlier" means one thing across the product. */
+export function setAsideOutliers<T>(items: T[], priceOf: (x: T) => number): { kept: T[]; excluded: number } {
+  if (!items.length) return { kept: [], excluded: 0 };
+  const mid = medianOf(items.map(priceOf));
+  const kept = items.filter((x) => {
+    const p = priceOf(x);
+    return p <= mid * OUTLIER_FACTOR && p >= mid / OUTLIER_FACTOR;
+  });
+  return { kept, excluded: items.length - kept.length };
 }
 
 /** The three-point listing range for one exact (card, grader, grade).
@@ -118,14 +169,20 @@ export function listingGuidance(
     };
   }
 
-  const used = converted.slice(0, WANTED);
+  // Outliers first, measured against the middle of the recent sales rather
+  // than their mean — a mean is exactly the thing one freak sale drags.
+  const recent = converted.slice(0, LOOKBACK);
+  const { kept, excluded } = setAsideOutliers(recent, (x) => x.price);
+
+  const used = kept.slice(0, WANTED);
 
   if (used.length < WANTED) {
     return {
       reason: "too-few",
       message:
-        `Only ${used.length} settled sale${used.length === 1 ? "" : "s"} on record. ` +
-        `A recommended range needs ${WANTED}.`,
+        `Only ${used.length} settled sale${used.length === 1 ? "" : "s"} on record` +
+        (excluded ? ` after setting aside ${excluded} far from the rest` : "") +
+        `. A recommended range needs ${WANTED}.`,
       sampleSize: used.length,
       lastSaleAt: newest,
     };
@@ -169,6 +226,7 @@ export function listingGuidance(
       soldAt: x.s.soldAt,
       source: x.s.source,
     })),
+    excluded,
   };
 }
 

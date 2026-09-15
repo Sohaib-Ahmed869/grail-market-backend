@@ -1,4 +1,5 @@
-import { Controller, Get, Header, Param } from "@nestjs/common";
+import { Controller, Get, Header, Param, Res } from "@nestjs/common";
+import type { Response } from "express";
 import { fxRates } from "../scans/fx.js";
 import { sharedView } from "./view.js";
 
@@ -23,8 +24,11 @@ export class SharePageController {
   // Shared links are passed around; a proxy holding a stale copy would report
   // a collection that has since changed, or one that has been turned off.
   @Header("cache-control", "no-store")
-  async page(@Param("token") token: string): Promise<string> {
+  async page(@Param("token") token: string, @Res({ passthrough: true }) res: Response): Promise<string> {
     const view = await sharedView(String(token));
+    // A 404 as well as the friendly page: a link that was turned off must
+    // read as gone to anything that checks, not as a page that exists.
+    if (!view) res.status(404);
     if (!view) return shell("Link turned off", `
       <div class="gone">
         <h1>This link is off</h1>

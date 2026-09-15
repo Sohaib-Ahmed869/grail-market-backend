@@ -2,6 +2,7 @@
 VisionAnalyzeResponse (camelCase, mirrors packages/shared)."""
 
 import base64
+import re
 from dataclasses import asdict
 
 import cv2
@@ -46,6 +47,25 @@ def _room_for_a_label(card_fill: float | None, headroom: float | None) -> bool:
     if headroom is not None and headroom > 0.06:
         return True
     return False
+
+
+# Words only a grading label prints. "TAG" is deliberately absent: Pokemon
+# prints TAG TEAM on the card face.
+LABEL_WORDS_RE = re.compile(
+    r"\b(PSA|BGS|BECKETT|CGC|SGC|GEM\s*-?\s*MT|NM\s*-?\s*MT|MINT\s*\d{1,2}|PRISTINE)\b",
+    re.IGNORECASE,
+)
+
+
+def _label_evidence(texts) -> bool:
+    """Did the full-frame read see a grading label at all?
+
+    Room above the card is a reason to LOOK for a label, and looking is cheap.
+    It is not evidence that one is there: a raw card photographed on a table,
+    or cropped with a margin, has room above it too. Declining a scan as an
+    unreadable slab needs the label itself to have shown up, even if too
+    badly to parse."""
+    return any(LABEL_WORDS_RE.search(str(t)) for t in (texts or []))
 
 
 def _quality_dict(q) -> dict:
@@ -93,6 +113,7 @@ def run_pipeline(
             # how far down the frame the card starts, as a fraction of height
             headroom = float(det.quad[:, 1].min()) / float(frame_h)
     room_for_a_label = _room_for_a_label(card_fill, headroom)
+    label_evidence = False
 
     if (
         ocr is not None
@@ -100,6 +121,7 @@ def run_pipeline(
         and (gate.rejection is not None or gate.quality.low_detail or room_for_a_label)
     ):
         full_reading = read_card_text(image)
+        label_evidence = _label_evidence(full_reading.get("texts"))
         if full_reading.get("slab"):
             ocr = {**ocr, "slab": full_reading["slab"]}
             # the label also carries the collector number and set, which the
@@ -132,7 +154,12 @@ def run_pipeline(
     # matching, which is what put a Legendary Collection Charizard in Dragon
     # Frontiers. If the photo looks like a slab but no label came back, decline
     # and ask for a better one rather than guessing at four figures.
-    if not slab_read and room_for_a_label and (
+    #
+    # "Looks like a slab" used to mean only that the card had room above it,
+    # which every loosely framed raw card has. Four raw cards were declined as
+    # unreadable slabs that way. It now also needs a grading label to have
+    # shown up in the full-frame read.
+    if not slab_read and room_for_a_label and label_evidence and (
         gate.quality.glare_pct >= 2.0 or gate.quality.blur_score < 80.0
     ):
         return {

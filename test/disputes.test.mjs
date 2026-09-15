@@ -106,10 +106,18 @@ test("only the person who raised it may withdraw it", () => {
 });
 
 test("neither party decides their own dispute", () => {
-  assert.ok(!canResolve("buyer", d()), "the raiser cannot rule for themselves");
-  assert.ok(!canResolve("seller", d()), "nor can the accused");
-  assert.ok(canResolve("staff", d()), "somebody outside it can");
-  assert.ok(!canResolve("staff", d({ status: "resolved" })), "and not twice");
+  assert.ok(!canResolve("buyer", d(), true), "the raiser cannot rule for themselves, even as staff");
+  assert.ok(!canResolve("seller", d(), true), "nor can the accused");
+  assert.ok(canResolve("staff", d(), true), "staff outside it can");
+  assert.ok(!canResolve("staff", d({ status: "resolved" }), true), "and not twice");
+});
+
+// The hole this closes: the rule used to be "anyone who is not a party", and
+// the route only checked for a signed-in user — so any member at all could
+// settle a stranger's dispute and pick who keeps the money.
+test("a member who is not staff cannot decide a stranger's dispute", () => {
+  assert.ok(!canResolve("nosey", d(), false));
+  assert.ok(!canResolve("nosey", d()), "not staff is the default, never the assumption");
 });
 
 test("an invented outcome is not an outcome", () => {

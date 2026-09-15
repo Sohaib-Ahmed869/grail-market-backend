@@ -6,7 +6,8 @@ import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
 import { denied, requireCapability } from "../admin/guard.js";
 import { activePlanId, readSubscription } from "../billing/store.js";
-import { findPlan, PLANS } from "../billing/plans.js";
+import { PLANS } from "../billing/plans.js";
+import { canCreateListing, entitlementFor } from "../billing/entitlement.js";
 import { ANGLES, photosConfigured, signAll, signDownload, signUpload, type Angle, putPhoto } from "../photos/s3.js";
 import {
   browseListings, bumpView, createListing, editListing, getListing, listingsBySeller,
@@ -21,6 +22,11 @@ import { note } from "../messages/store.js";
 import { notify } from "../notifications/store.js";
 import { censor } from "../community/censor.js";
 import { readSettings } from "../admin/settings.store.js";
+import { readStatus as readIdentity } from "../identity/store.js";
+import { autoPublish } from "./autopublish.js";
+import { publicListing } from "./publicshape.js";
+import { fillListingPoints, locateListing, parseNear, parseWithin } from "./nearby.js";
+import { storePool } from "../cards.store.js";
 
 const need = (req: Request) => callerId(req);
 
@@ -40,9 +46,26 @@ export class ListingsController {
     @Query("variant") variant?: string,
     @Query("grade") grade?: string,
     @Query("q") q?: string,
+    @Query("language") language?: string,
+    @Query("offset") offset?: string,
+    @Query("limit") limit?: string,
+    // The viewer's own point, for "how far away". Rounded on the way in and
+    // never stored — see listings/nearby.ts.
+    @Query("lat") lat?: string,
+    @Query("lon") lon?: string,
+    @Query("within") within?: string,
     @Req() req?: Request,
   ) {
-    const rows = await browseListings({
+    const lim = Math.min(Math.max(Number(limit) || 50, 1), 100);
+    const off = Math.max(Number(offset) || 0, 0);
+    const lang = language === "en" || language === "ja" || language === "other" ? language : null;
+    const near = parseNear(lat, lon);
+    // Listings not yet placed on the map get placed a few at a time by the
+    // requests that want distances, without holding this one up.
+    if (near) void fillListingPoints();
+    // One row more than the page, so whether another page exists is known
+    // without a count query.
+    const fetched = await browseListings({
       game: game ?? null, grader: grader ?? null, catalogId: catalogId ?? null,
       setName: setName ?? null, cardNumber: cardNumber ?? null,
       variant: variant ?? null, grade: grade ?? null, q: q ?? null,
@@ -50,8 +73,16 @@ export class ListingsController {
       graded: graded === "true" ? true : graded === "false" ? false : null,
       min: min ? Number(min) : null, max: max ? Number(max) : null,
       sort: sort ?? null,
+      language: lang, offset: off, limit: lim + 1,
+      near, withinKm: near ? parseWithin(within) : null,
     });
-    return { listings: await signPreviews(rows.map(publicShape)), sort: sort ?? "featured" };
+    const more = fetched.length > lim;
+    const rows = more ? fetched.slice(0, lim) : fetched;
+    return {
+      listings: await signPreviews(rows.map(publicShape)),
+      sort: sort ?? "featured",
+      next: more ? off + lim : null,
+    };
   }
 
   @Get("mine")
@@ -62,14 +93,16 @@ export class ListingsController {
     // screen is the ceiling that will actually be enforced. Reading plan_id
     // here and the paying plan there is how "1 of 10 live" sits above a
     // refusal to publish.
-    const [rows, planId] = await Promise.all([listingsBySeller(me), activePlanId(me)]);
-    const plan = findPlan(planId ?? "");
+    const [rows, planId, identity] = await Promise.all([
+      listingsBySeller(me), activePlanId(me), readIdentity(me),
+    ]);
+    const { plan } = entitlementFor({ paidPlanId: planId, identityApproved: identity?.status === "Approved" });
     const live = rows.filter((r) => ["live", "in_review"].includes(r.status)).length;
     return {
       listings: await signPreviews(rows.map(sellerShape)),
       // The ceiling is reported with the listings rather than discovered at
       // the moment of publishing, so hitting it is never a surprise.
-      quota: { plan: plan?.name ?? null, limit: plan?.listings ?? null, used: live },
+      quota: { plan: plan?.name ?? null, limit: plan?.listings ?? null, used: live, free: Boolean(plan?.free) },
     };
   }
 
@@ -127,15 +160,17 @@ export class ListingsController {
     // which keeps its plan_id, because Stripe does not blank it — still bought
     // the right to list. The scan path already guarded this; both now ask the
     // same function so one subscription cannot mean two different things.
-    const plan = findPlan((await activePlanId(me)) ?? "");
-    if (!plan) {
-      return { error: "no-plan", message: "Choose a plan before listing.", plans: PLANS.map((p) => p.id) };
-    }
-    if (plan.listings != null && (await liveCount(me)) >= plan.listings) {
-      return {
-        error: "quota", message:
-          `${plan.name} allows ${plan.listings} live listing${plan.listings === 1 ? "" : "s"}. Upgrade to list more.`,
-      };
+    //
+    // With no paid plan, a seller whose identity check passed still gets one
+    // free active listing (GM001-32). The rule lives in billing/entitlement.ts
+    // so this and /mine cannot disagree about it.
+    const [paidPlanId, identity] = await Promise.all([activePlanId(me), readIdentity(me)]);
+    const entitlement = entitlementFor({ paidPlanId, identityApproved: identity?.status === "Approved" });
+    const allowed = canCreateListing(entitlement, entitlement.plan?.listings != null ? await liveCount(me) : 0);
+    if (!allowed.ok) {
+      return allowed.error === "no-plan"
+        ? { error: "no-plan", message: allowed.message, plans: PLANS.map((p) => p.id) }
+        : { error: "quota", message: allowed.message };
     }
     if (!b?.cardName || !(Number(b?.price) > 0)) {
       return { error: "invalid", message: "A card and a price are required." };
@@ -155,6 +190,8 @@ export class ListingsController {
       marketValue: b.marketValue != null ? Number(b.marketValue) : null,
       strategy: b.strategy ?? null, delivery: b.delivery ?? [], suburb: b.suburb ?? null,
     });
+    // Place the suburb now rather than on the first browse that wants it.
+    if (id && b.suburb) void locateListing(id);
     return id ? { listingId: id, angles: ANGLES } : { error: "no-store" };
   }
 
@@ -274,8 +311,53 @@ export class ListingsController {
       };
     }
 
+    const identity = await readIdentity(me);
+    const identityApproved = identity?.status === "Approved";
+
+    // Tier 3: selling at or above the high-value floor needs a passed identity
+    // check. The tier ladder has always said so and nothing enforced it at
+    // the one moment it matters, which is here.
+    if (Number(l.price) >= settings.highValueFloor && !identityApproved) {
+      return {
+        error: "identity-required",
+        message:
+          `Listings at A$${settings.highValueFloor.toLocaleString()} or more need a verified identity. ` +
+          "Verify once, then submit again.",
+      };
+    }
+
     const r = await moveListing(id, "in_review", { sellerId: me });
-    return r.ok ? { status: "in_review" } : { error: r.why };
+    if (!r.ok) return { error: r.why };
+
+    // Every listing is checked; the ones that pass every check under the
+    // auto-publish value go straight up. The rest wait for a person, with the
+    // reasons attached — see autopublish.ts for exactly what is tested.
+    const pool = storePool();
+    const standing = pool
+      ? (await pool.query("select standing from users where user_id = $1", [me])).rows[0]?.standing ?? null
+      : null;
+    const decision = autoPublish({
+      price: Number(l.price),
+      marketValue: l.market_value != null ? Number(l.market_value) : null,
+      catalogId: l.catalog_id ?? null,
+      photoVerified: Boolean(l.photo_verified),
+      graded: Boolean(l.grader) && !l.is_raw,
+      certNumber: l.cert_number ?? null,
+      sellerStanding: standing,
+      identityApproved,
+    }, { enabled: settings.autoClear, below: settings.autoPublishBelow });
+
+    if (decision.publish) {
+      const live = await moveListing(id, "live", { reason: "Passed every automatic check" });
+      if (live.ok) {
+        await notify({
+          userId: me, kind: "listing",
+          title: `${l.card_name} is live on the market`, body: null, href: `/listing/${id}`,
+        });
+        return { status: "live", automatic: true };
+      }
+    }
+    return { status: "in_review", held: settings.autoClear ? decision.held : [] };
   }
 
   /** Admin. Nothing reaches a buyer without passing through here.
@@ -324,6 +406,8 @@ export class ListingsController {
       suburb: b?.suburb ?? undefined,
     });
     if (!r.ok) return { error: r.why };
+    // A moved suburb must not keep the old one's distance.
+    if (b?.suburb != null && b.suburb !== before?.suburb) void locateListing(id);
 
     // Anyone with an open offer has a stake in the price changing — they are
     // negotiating against a number that just moved, and finding out by
@@ -516,13 +600,11 @@ async function signPreviews<T extends { photos?: unknown }>(rows: T[]): Promise<
   );
 }
 
-function publicShape(l: any) {
-  // seller_id stays: it is an opaque handle, and without it a buyer cannot
-  // open the page of the person they are about to send money to. Views and
-  // saves are still the seller's own business — same number, opposite use.
-  const { views, saves, reject_reason, ...rest } = l;
-  return { ...rest, featured: l.featured_until != null && new Date(l.featured_until) > new Date() };
-}
+// seller_id stays public: it is an opaque handle, and without it a buyer
+// cannot open the page of the person they are about to pay. Everything else
+// that is not on the allowlist in publicshape.ts — views, saves, moderation
+// notes, who reviewed it — stays with the seller and the console.
+const publicShape = (l: any) => publicListing(l);
 const sellerShape = (l: any) => ({
   ...l, featured: l.featured_until != null && new Date(l.featured_until) > new Date(),
 });

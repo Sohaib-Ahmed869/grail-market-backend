@@ -1,6 +1,14 @@
 import { Controller, Get, Query } from "@nestjs/common";
-import { countSales, recentSales } from "./ledger.js";
-import { hasGuidance, listingGuidance } from "./guidance.js";
+import { countSales, recentSales, salesSince } from "./ledger.js";
+import { salesWindows, type SalesWindows } from "../history/windows.js";
+import { dailyPricesFor } from "../history/store.js";
+import { TtlCache } from "../scans/ttlcache.js";
+
+/** Windows per key, briefly. A card page asks again on every grade switch and
+ *  a sale lands at most a few times a day, so five minutes costs nothing in
+ *  freshness and saves two queries per tap. */
+const windowCache = new TtlCache<SalesWindows>(5 * 60_000, 2_000);
+import { guidanceKey, hasGuidance, listingGuidance } from "./guidance.js";
 import { fxRates } from "../scans/fx.js";
 import { gradedPricesFor } from "../scans/pricing.js";
 
@@ -104,6 +112,38 @@ export class SalesController {
    *  Keyed on (card, grader, grade) in full, per invariant 1. There is no
    *  grade-only guidance because there is no grade-only price.
    */
+  /** Last sale, 7-day and 30-day figures for one exact card, grader and
+   *  grade, from our own sales ledger and daily prices — GM001-28.
+   *
+   *  `grader=RAW` means ungraded only; a missing grader or grade is refused,
+   *  the same key rule as `/market/guidance`. Every figure carries its count
+   *  and confidence; a window without enough sales says so instead of
+   *  printing a number. See history/windows.ts for the rules. */
+  @Get("windows")
+  async windows(
+    @Query("cardId") cardId?: string,
+    @Query("grader") grader?: string,
+    @Query("grade") grade?: string,
+  ) {
+    if (!cardId) return { error: "invalid", message: "cardId required" };
+    const key = guidanceKey(grader, grade);
+    if (!key) return { error: "invalid", message: "grader and grade required, or grader=RAW" };
+    const cacheKey = `${cardId}|${key.rawOnly ? "RAW" : `${key.grader}|${key.grade}`}`;
+    const hit = windowCache.get(cacheKey);
+    if (hit) return { key: { cardId, grader: key.rawOnly ? "RAW" : key.grader, grade: key.grade }, windows: hit };
+
+    // 60 days of sales: the 30-day window and the 30 days before it, which
+    // its change is measured against. 45 days of prices for daily30.
+    const [sales, points, fx] = await Promise.all([
+      salesSince(cardId, key.grader, key.grade, 60, { rawOnly: key.rawOnly }),
+      dailyPricesFor(cardId, key, 45),
+      fxRates(),
+    ]);
+    const out = salesWindows(sales, points, fx);
+    windowCache.set(cacheKey, out);
+    return { key: { cardId, grader: key.rawOnly ? "RAW" : key.grader, grade: key.grade }, windows: out };
+  }
+
   @Get("guidance")
   async guidance(
     @Query("cardId") cardId?: string,
@@ -112,12 +152,14 @@ export class SalesController {
     @Query("currency") currency?: string,
   ) {
     if (!cardId) return { error: "invalid", message: "cardId required" };
-    const g = grader ? grader.toUpperCase() : null;
-    const gr = grade ? String(grade).replace(/\.0$/, "") : null;
+    // A grader and grade, or RAW. Nothing else is a key — see guidanceKey.
+    const key = guidanceKey(grader, grade);
+    if (!key) return { error: "invalid", message: "grader and grade required, or grader=RAW" };
 
     // Asked for more than the three the rule uses, so that a set rejected for
-    // being too spread can still report what was there.
-    const sales = await recentSales(cardId, g, gr, 10);
+    // being too spread can still report what was there, and so the outlier
+    // check has something to compare against.
+    const sales = await recentSales(cardId, key.grader, key.grade, 10, { rawOnly: key.rawOnly });
     const fx = await fxRates();
     const out = listingGuidance(sales, fx, currency ?? "AUD");
     return hasGuidance(out) ? { guidance: out } : { guidance: null, ...out };

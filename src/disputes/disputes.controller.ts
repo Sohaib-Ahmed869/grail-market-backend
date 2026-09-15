@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { callerId } from "../auth/auth.controller.js";
+import { denied, requireCapability } from "../admin/guard.js";
 import { photosConfigured, signUpload } from "../photos/s3.js";
 import { REASONS } from "./rules.js";
 import {
@@ -88,8 +89,13 @@ export class DisputesController {
     return r.ok ? { ok: true } : { error: "refused", message: r.message };
   }
 
-  /** Settling one. Neither party can reach this — `canResolve` refuses both —
-   *  so in practice it is staff, once an admin role exists to name them. */
+  /** Settling one: staff holding `conduct.decide`, and never a party.
+   *
+   *  This checked only for a signed-in user, and the rule underneath refused
+   *  just the two parties — so every other member on the platform could settle
+   *  the dispute. The staff check is the same guard the console's own
+   *  decision route uses, and a refusal here looks like "not found" to a
+   *  member so the route cannot be used to probe dispute ids. */
   @Post(":id/resolve")
   async resolve(
     @Param("id") id: string, @Req() req: Request,
@@ -97,8 +103,11 @@ export class DisputesController {
   ) {
     const me = callerId(req);
     if (!me) return { error: "unauthenticated" };
+    const staff = await requireCapability(req, "conduct.decide");
+    if (denied(staff)) return { error: "not-found", message: "That dispute doesn't exist." };
     const r = await resolveDispute({
       disputeId: id, byUserId: me, outcome: String(b?.outcome ?? ""), note: b?.note ?? null,
+      deciderIsStaff: true,
     });
     return r.ok ? { ok: true } : { error: "refused", message: r.message };
   }

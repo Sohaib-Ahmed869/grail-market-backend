@@ -33,7 +33,7 @@ import {
   adminBoost, adminPlans, applyBoost, billingLedger, boostLedger, BOOST_TIERS,
   cachePlan, compBoost, compPlan, planCatalog, planExists,
 } from "./commerce.store.js";
-import { findPlan, priceIdFor } from "../billing/plans.js";
+import { PAID_PLANS, findPlan, priceIdFor } from "../billing/plans.js";
 import {
   archivePrice, createPrice, getPrice, getProduct, setDefaultPrice,
   stripeConfigured, updateProduct,
@@ -43,6 +43,9 @@ import {
 } from "./pricing.store.js";
 import { isPeriod, reportsFor } from "./reports.store.js";
 import { attention } from "./attention.store.js";
+import {
+  closeContactReview, forgetInterceptSetting, interceptSummary, memberContact,
+} from "./contact.store.js";
 import { dashboard } from "./dashboard.store.js";
 import { readSettings, writeSettings } from "./settings.store.js";
 import { auditActors, auditEntries, auditTotals, isArea, writeAudit } from "./audit.store.js";
@@ -374,6 +377,7 @@ export class AdminController {
     @Query("status") status?: string,
     @Query("plan") plan?: string,
     @Query("verification") verification?: string,
+    @Query("review") review?: string,
   ) {
     const who = await requireCapability(req, "members.read");
     if (denied(who)) return who;
@@ -382,6 +386,7 @@ export class AdminController {
       status: status ?? null,
       plan: plan ?? null,
       verification: verification ?? null,
+      review: review ?? null,
     });
     return { members };
   }
@@ -394,6 +399,57 @@ export class AdminController {
     const [member, timeline] = await Promise.all([adminMember(id), memberTimeline(id)]);
     if (!member) return { error: "not-found" };
     return { member, timeline };
+  }
+
+  /**
+   * What this member has tried to take off the platform.
+   *
+   * The masked text is readable by anyone who can read the member record; the
+   * text as typed — the phone number itself — only by a role that decides
+   * conduct. A moderator reviewing a listing has no reason to hold a member's
+   * mobile number.
+   */
+  @Get("members/:id/contact")
+  async memberContactRoute(@Param("id") id: string, @Req() req: Request) {
+    const who = await requireCapability(req, "members.read");
+    if (denied(who)) return who;
+    const r = await memberContact(id, { withTyped: who.can("conduct.decide") });
+    if (!r) return { error: "not-found" };
+    return { ...r, canReadTyped: who.can("conduct.decide"), canClose: who.can("members.act") };
+  }
+
+  /** Close the contact-sharing review. Evidence was looked at; the decision
+   *  about standing, if any, is a separate action with its own reason. */
+  @Post("members/:id/contact-review/close")
+  async closeContactReviewRoute(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "members.act");
+    if (denied(who)) return who;
+    const note = typeof b?.note === "string" ? b.note.trim() : "";
+    if (note.length < 4) {
+      return { error: "no-reason", message: "Say what you found. It goes on the audit log." };
+    }
+    const ok = await closeContactReview(id, who.name);
+    if (!ok) return { error: "not-open", message: "There is no open contact review for this member." };
+    const m = await adminMember(id);
+    void writeAudit({
+      actorId: who.userId,
+      actor: who.name,
+      area: "conduct",
+      action: "Closed a contact-sharing review",
+      target: m?.handle ?? id,
+      detail: note.slice(0, 1000),
+      weight: "normal",
+    });
+    return { ok: true, ...(await memberContact(id, { withTyped: who.can("conduct.decide") })) };
+  }
+
+  /** The interceptor across the platform, for the policy page. Counts only —
+   *  no member's text leaves this endpoint. */
+  @Get("intercepts")
+  async intercepts(@Req() req: Request) {
+    const who = await requireStaff(req);
+    if (denied(who)) return who;
+    return interceptSummary();
   }
 
   /**
@@ -556,6 +612,8 @@ export class AdminController {
     if (denied(who)) return who;
 
     const changed = await writeSettings(b ?? {}, who.name);
+    // The chat path caches the masking switch; a change must land at once.
+    if (changed.includes("interceptOn")) forgetInterceptSetting();
     if (changed.length > 0) {
       void writeAudit({
         actorId: who.userId,
@@ -1092,7 +1150,10 @@ export class AdminController {
     const problems: string[] = [];
     const cat = await planCatalog();
 
-    for (const plan of ["starter", "collector", "dealer"]) {
+    // The plans on sale. Free has nothing at Stripe, and Starter is retired.
+    // Only the monthly price is cached here; the yearly price is read live
+    // by billing/liveprice.ts and shown on the plans endpoint.
+    for (const plan of PAID_PLANS.map((p) => p.id)) {
       const def = findPlan(plan);
       if (!def) continue;
       /* The price we already know about, or the one the environment names. A
@@ -1613,6 +1674,15 @@ export class AdminController {
     const who = await requireCapability(req, "catalog.write");
     if (denied(who)) return who;
     const r = await createCatalogCard(b ?? {});
+    if (r.ok) {
+      void writeAudit({
+        actorId: who.userId, actor: who.name, area: "catalog",
+        action: "Added a card to the catalogue",
+        target: r.card.catalogId,
+        detail: [r.card.name, r.card.setName, r.card.cardNumber].filter(Boolean).join(" · "),
+        weight: "normal",
+      });
+    }
     return r.ok ? { card: r.card } : { error: r.why, message: r.message };
   }
 
@@ -1620,7 +1690,24 @@ export class AdminController {
   async catalogUpdate(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
     const who = await requireCapability(req, "catalog.write");
     if (denied(who)) return who;
+    const before = await getCatalogCard(id);
     const r = await updateCatalogCard(id, b ?? {});
+    if (r.ok) {
+      // What moved, field by field. Every price hangs off this row, so "edited
+      // a card" with no before and after is not something anyone can check.
+      const fields = ["name", "setName", "cardNumber", "game", "language", "edition", "finish"] as const;
+      const moved = before
+        ? fields.filter((f) => (before as any)[f] !== (r.card as any)[f])
+            .map((f) => `${f}: ${(before as any)[f] ?? "—"} → ${(r.card as any)[f] ?? "—"}`)
+        : [];
+      void writeAudit({
+        actorId: who.userId, actor: who.name, area: "catalog",
+        action: "Corrected a catalogue card",
+        target: id,
+        detail: moved.length ? moved.join("; ") : "No field changed.",
+        weight: "high",
+      });
+    }
     return r.ok ? { card: r.card } : { error: r.why, message: r.message };
   }
 
@@ -1629,6 +1716,82 @@ export class AdminController {
     const who = await requireCapability(req, "catalog.write");
     if (denied(who)) return who;
     const r = await deleteCatalogCard(id);
+    if (r.ok) {
+      void writeAudit({
+        actorId: who.userId, actor: who.name, area: "catalog",
+        action: "Removed a card from the catalogue",
+        target: r.card.catalogId,
+        detail: [r.card.name, r.card.setName, r.card.cardNumber].filter(Boolean).join(" · "),
+        weight: "high",
+      });
+    }
     return r.ok ? { deleted: r.card.catalogId } : { error: r.why, message: r.message };
+  }
+
+  // ------------------------------------------------------------------ support
+  //
+  // The console had no support routes at all. The store has had adminTickets,
+  // ticketThread, replyToTicket and setTicket since support was built, and
+  // nothing ever exposed them - so a ticket filed from the app landed in
+  // support_tickets and no agent could see it, let alone answer it. The app
+  // side was complete and talking to a wall.
+  //
+  // Reading and replying are separate capabilities because they are separate
+  // jobs: tier-1 answers, trust-safety reads everything.
+
+  @Get("support")
+  async supportQueue(@Req() req: Request, @Query("status") status?: string) {
+    const who = await requireCapability(req, "support.read");
+    if (denied(who)) return who;
+    const [tickets, counts] = await Promise.all([
+      adminTickets({ status: status ?? null }),
+      ticketCounts(),
+    ]);
+    return { tickets, counts };
+  }
+
+  @Get("support/:id")
+  async supportOne(@Param("id") id: string, @Req() req: Request) {
+    const who = await requireCapability(req, "support.read");
+    if (denied(who)) return who;
+    const ticket = await adminTicket(id);
+    if (!ticket) return { error: "not-found" };
+    // The thread and what else this member has going, in one round trip - an
+    // agent deciding whether a complaint is fair wants the listing beside it.
+    const [thread, context] = await Promise.all([
+      ticketThread(id),
+      ticketContext(ticket.member.id),
+    ]);
+    return { ticket, thread, context };
+  }
+
+  @Post("support/:id/reply")
+  async supportReply(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "support.reply");
+    if (denied(who)) return who;
+    const body = String(b?.body ?? "").trim();
+    if (!body) return { error: "invalid", message: "Write something first." };
+    // `internal` is a note to the team, not a reply to the member. It is a
+    // different thing from a short reply and must never be sent as one.
+    const ok = await replyToTicket(id, { id: who.userId, name: who.name }, body, Boolean(b?.internal));
+    if (!ok) return { error: "not-found" };
+    return { ticket: await adminTicket(id), thread: await ticketThread(id) };
+  }
+
+  @Post("support/:id/state")
+  async supportState(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "support.reply");
+    if (denied(who)) return who;
+    const patch: { status?: string; priority?: string; tier?: string; assignee?: string | null } = {};
+    if (b?.status && isStatus(String(b.status))) patch.status = String(b.status);
+    if (b?.priority && isPriority(String(b.priority))) patch.priority = String(b.priority);
+    if (b?.tier && isTier(String(b.tier))) patch.tier = String(b.tier);
+    // "Assign to me" is the common case and the only one the console needs;
+    // an explicit null unassigns.
+    if (b?.assignee !== undefined) patch.assignee = b.assignee === null ? null : String(b.assignee);
+    if (!Object.keys(patch).length) return { error: "invalid", message: "Nothing to change." };
+    const ok = await setTicket(id, patch);
+    if (!ok) return { error: "not-found" };
+    return { ticket: await adminTicket(id) };
   }
 }

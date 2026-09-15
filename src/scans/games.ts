@@ -7,6 +7,14 @@ import {
 } from "./opensources.js";
 import { listSets as listPokemonSets, type SetDetail, type SetSummary } from "./sets.js";
 import { CATEGORY, groupsFor, setContents } from "../printings/tcgcsv.js";
+import {
+  SPORTS, isProvisional, isSportCard, isSportGame, isSportName, readSportCard, sportSetDetail,
+  sportSetId, sportSets, withSportArt,
+} from "./sports.js";
+import {
+  EDITIONS, editionFields, editionOf, editionSetDetail, editionSets, indexCatalogueCards,
+  isEditionGame, readEditionCard, readEditionSetId,
+} from "./editions.js";
 
 // Browsing, one level up.
 //
@@ -29,6 +37,12 @@ export type Game = {
   /** Artwork for the tile — the newest set's logo. A name on a coloured
    *  rectangle is a button; a set logo is the game. */
   preview?: string | null;
+  /** Language editions only (see editions.ts): the game this is an edition
+   *  of, its language code, and that language's English name for the label.
+   *  `name` stays the base game's, so "Pokémon" reads the same in every one. */
+  baseGame?: string;
+  language?: string;
+  languageName?: string;
 };
 
 export const GAMES: Game[] = [
@@ -130,7 +144,7 @@ const DAY = 24 * 3600 * 1000;
  *  back, so the first one warmed was gone by the time it was read — Pokemon
  *  reported 0 of its 218 sets, having just been fetched successfully. Sized
  *  well past the list so adding a game cannot silently blank another. */
-const cache = new TtlCache<SetSummary[]>(DAY, 64);
+const cache = new TtlCache<SetSummary[]>(DAY, 128, "set-lists");
 /** Games whose artwork is being fetched right now, so a second request while
  *  the first is still running does not start it again. */
 const enriching = new Set<string>();
@@ -383,6 +397,11 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
     // shape is theirs rather than one API per game — which is the whole
     // difference between paying for a catalogue and wiring five of them.
     : gameId.startsWith(`${CH_PREFIX}:`) ? await boughtSets(gameId.slice(CH_PREFIX.length + 1))
+    // Sports, read off eBay's item specifics. See sports.ts for what that
+    // source is and, more importantly, what it is not.
+    : isSportGame(gameId) ? await sportSets(gameId.slice("sport:".length))
+    // Non-English editions of Pokémon (TCGdex) and Magic (Scryfall).
+    : isEditionGame(gameId) ? await editionSets(gameId)
     // Every other mapped game resolves its sets from tcgcsv, which is where
     // `printings` already gets its variants and prices. The nine above keep
     // their own catalogues because those carry artwork, release dates and card
@@ -391,7 +410,17 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
 
   // Never cache an empty answer. An upstream having a bad minute would
   // otherwise leave a game looking permanently empty for a day.
-  if (sets.length) cache.set(gameId, sets);
+  // Nor one whose mis-tag check could not finish (sports.ts): the next request
+  // should measure what this one could not, not inherit its guesses for a day.
+  const settled = !isProvisional(sets);
+  if (sets.length && settled) cache.set(gameId, sets);
+  // Nothing fresh — a source down, or an allowance spent for the day. The
+  // last list we had is a better answer than an empty screen, and it is kept
+  // across restarts for exactly this.
+  if (!sets.length) {
+    const last = cache.stale(gameId);
+    if (last?.length) return last;
+  }
 
   // The two catalogues that publish no set artwork get a card instead — but
   // NOT on the request that asked for the list. Twenty-two lookups is fifteen
@@ -399,7 +428,13 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
   // seconds to see names they could have had immediately is a bad trade for
   // pictures. It runs after the answer has gone out and updates the cache, so
   // the art is there a moment later and for the rest of the day.
-  if (sets.length && !enriching.has(gameId) && (gameId === "onepiece" || gameId === "lorcana" || gameId === "pokemon" || CATEGORY[gameId])) {
+  if (sets.length && settled && !enriching.has(gameId) && isSportGame(gameId)) {
+    enriching.add(gameId);
+    void withSportArt(gameId.slice("sport:".length), sets)
+      .then((withArt) => cache.set(gameId, withArt))
+      .catch(() => {})
+      .finally(() => enriching.delete(gameId));
+  } else if (sets.length && !enriching.has(gameId) && (gameId === "onepiece" || gameId === "lorcana" || gameId === "pokemon" || CATEGORY[gameId])) {
     enriching.add(gameId);
     void withCardArt(gameId, sets)
       .then((withArt) => cache.set(gameId, withArt))
@@ -413,7 +448,9 @@ export async function setsForGame(gameId: string): Promise<SetSummary[]> {
 // A picture for the games whose set lists carry none. One card from the
 // newest set, cached for a day like everything else here — three requests a
 // day in total, and card art on a tile beats a set logo anyway.
-const previewCache = new TtlCache<string | null>(DAY, 8);
+// Sized past the whole games list. At 8 it held eight of ninety games, so every
+// games request re-fetched a preview for most of the rest.
+const previewCache = new TtlCache<string | null>(DAY, 256);
 
 async function cardPreview(gameId: string, sets: SetSummary[]): Promise<string | null> {
   const hit = previewCache.entry(gameId);
@@ -473,12 +510,41 @@ const detailCache = new TtlCache<SetDetail | null>(DAY, 120);
  *  Returns null for an id with no prefix, which is the caller's signal to use
  *  the Pokemon path it always used. */
 export async function setDetailForGame(setId: string): Promise<SetDetail | null | undefined> {
+  // A sports set carries a colon inside its encoded name as often as not, so
+  // it is answered before the prefix cut below gets to misread it.
+  if (isSportGame(setId)) return sportSetDetail(setId);
+
+  // A language edition's set: `lang:<game>:<language>:<code>`. Answered before
+  // the prefix cut, which would read "lang" as a catalogue of its own.
+  const edition = readEditionSetId(setId);
+  if (edition) {
+    const held = detailCache.entry(setId);
+    if (held) return held.v;
+    const known = cache.get(edition.edition.id) ?? (await setsForGame(edition.edition.id).catch(() => []));
+    const detail = await editionSetDetail(setId, known);
+    // Only a real answer is remembered — including "no printing in this
+    // language". A source that could not be reached is asked again next time.
+    if (detail) detailCache.set(setId, detail);
+    return detail;
+  }
   const [prefix, ...rest] = setId.split(":");
   const code = rest.join(":");
   if (!code) return undefined;   // no prefix — not ours
 
   const hit = detailCache.entry(setId);
   if (hit) return hit.v;
+
+  // The fifty-odd games whose sets come from tcgcsv: `tcg:<game>:<groupId>`.
+  //
+  // Their set LIST was wired and their set DETAIL was not, so every one of
+  // those games showed its sets and then opened each of them onto "not
+  // found" — Flesh and Blood's 105 sets, all doors to nothing. The contents
+  // are the same two tcgcsv calls `printings` already makes for these games.
+  if (prefix === "tcg") {
+    const detail = await tcgcsvSetDetail(setId);
+    if (detail) detailCache.set(setId, detail);
+    return detail;
+  }
 
   // Load the list if it is not already held. A cold instance has nothing
   // cached, and Yu-Gi-Oh cannot be queried without the set's NAME — so
@@ -633,7 +699,62 @@ export async function setDetailForGame(setId: string): Promise<SetDetail | null 
     const row = known?.find((x) => x.setId === setId);
     if (row && !row.total) row.total = cards.length;
   }
+  // Remember each card's own catalogue price by id, so the card page can
+  // show the figure the set list already showed. See `catalogueRawFor`.
+  if (cards.length) indexCatalogueCards(detail, { game: gameOfPrefix(prefix) });
   return cards.length ? detail : null;
+}
+
+/** One tcgcsv set as cards.
+ *
+ *  Only products carrying a collector number are cards; the rest of a group
+ *  is its sealed product — boxes, packs, decks — which is not a card and must
+ *  not sit in a card grid.
+ *
+ *  The price is TCGplayer's market price for that exact product id, never a
+ *  name match: the Normal printing when there is one, otherwise the only
+ *  printing that has a market price. When several finishes are priced and
+ *  none is Normal, there is no single figure for the product and it stays
+ *  null. */
+async function tcgcsvSetDetail(setId: string): Promise<SetDetail | null> {
+  const [, game, group] = setId.split(":");
+  const groupId = Number(group);
+  if (!game || !CATEGORY[game] || !Number.isFinite(groupId)) return null;
+  const { products, prices } = await setContents(game, groupId).catch(() => ({ products: [], prices: [] }));
+  const byProduct = new Map<number, typeof prices>();
+  for (const p of prices) byProduct.set(p.productId, [...(byProduct.get(p.productId) ?? []), p]);
+  const priceOf = (productId: number): number | null => {
+    const rows = (byProduct.get(productId) ?? []).filter((r) => r.marketPrice != null);
+    const normal = rows.find((r) => (r.subTypeName ?? "").toLowerCase() === "normal");
+    if (normal) return normal.marketPrice;
+    return rows.length === 1 ? rows[0]!.marketPrice : null;
+  };
+  const cards: SetDetail["cards"] = products
+    .filter((p) => p.number)
+    .map((p) => ({
+      cardId: `tcg-${game}-${p.productId}`,
+      name: p.name,
+      localId: p.number!,
+      imageUrl: p.imageUrl,
+      rawUsd: priceOf(p.productId),
+      rarity: p.rarity,
+    }));
+  if (!cards.length) return null;
+  const known = cache.get(game) ?? (await setsForGame(game).catch(() => []));
+  const summary = known.find((x) => x.setId === setId);
+  // Indexed so the card page can price and name these without asking anyone
+  // by name — see editions.ts for why a name lookup is refused for them.
+  indexCatalogueCards({ setId, name: summary?.name ?? setId, cards }, { game });
+  return {
+    setId,
+    name: summary?.name ?? setId,
+    logo: summary?.logo ?? null,
+    symbol: null,
+    total: cards.length,
+    official: cards.length,
+    releasedAt: null,
+    cards,
+  };
 }
 
 const gameOfPrefix = (p: string) =>
@@ -698,7 +819,7 @@ const GAMES_BUDGET_MS = 8_000;
  *  games, sports, and everything licensed from something else. A game with no
  *  entry is a TCG - that is what the overwhelming majority are, and defaulting
  *  the other way would put Pokemon under "other". */
-export type GameCategory = "tcg" | "sports" | "entertainment";
+export type GameCategory = "tcg" | "sports" | "entertainment" | "japanese" | "language";
 
 const ENTERTAINMENT = new Set([
   "godzilla", "palworld", "cookierun", "cyberpunk", "transformers", "bakugan",
@@ -707,26 +828,44 @@ const ENTERTAINMENT = new Set([
   "wow", "aoschampions", "munchkin", "lightseekers", "redakai", "elestrals",
 ]);
 
-/** Sports is empty on purpose, and that is the honest state of it.
- *
- *  tcgcsv carries no sports at all - every one of its 94 categories is a
- *  trading card game, checked. Sports arrives when Card Hedge is switched on
- *  or TCDB is reachable through Parse, and each of those lands its games with
- *  a category already attached rather than being guessed at here. */
-const SPORTS = new Set<string>([]);
+/** No tcgcsv game is a sport — every one of its 94 categories is a trading
+ *  card game, checked — so this stays empty. Sports arrive by prefix instead:
+ *  `sport:` from eBay's item specifics (sports.ts), and `ch:` categories whose
+ *  name is a sport when Card Hedge is switched on. */
+const SPORTS_IDS = new Set<string>([]);
 
 export const categoryOf = (id: string): GameCategory =>
-  SPORTS.has(id) ? "sports" : ENTERTAINMENT.has(id) ? "entertainment" : "tcg";
+  // Japanese editions get a shelf of their own — they are a different market
+  // at different prices, and collectors look for them as such. Every other
+  // non-English edition shares one.
+  id === "pokemonjp" || editionOf(id)?.language === "ja" ? "japanese"
+  : isEditionGame(id) ? "language"
+  : SPORTS_IDS.has(id) || isSportGame(id) ||
+  // A bought category is named by its provider; "Baseball" is a sport however
+  // it arrived, and filing it under trading card games hides it from anyone
+  // who went looking in Sports.
+  (id.startsWith(`${CH_PREFIX}:`) && isSportName(id.slice(CH_PREFIX.length + 1)))
+    ? "sports"
+    : ENTERTAINMENT.has(id) ? "entertainment" : "tcg";
 
 export const GAME_CATEGORIES: { id: GameCategory; name: string }[] = [
   { id: "tcg", name: "Trading card games" },
   { id: "entertainment", name: "Licensed & entertainment" },
   { id: "sports", name: "Sports" },
+  { id: "japanese", name: "Japanese" },
+  { id: "language", name: "Other languages" },
 ];
 
 export async function gamesWithPreviews(): Promise<Game[]> {
   const bought = await boughtGames();
-  const all = [...GAMES, ...bought];
+  // A bought sport replaces ours of the same name rather than sitting beside
+  // it: a paid checklist has card numbers, and ours is players within sets.
+  const boughtNames = new Set(bought.map((g) => g.name.toLowerCase()));
+  const sports: Game[] = SPORTS
+    .filter((s) => !boughtNames.has(s.name.toLowerCase()))
+    .map((s) => ({ id: `sport:${s.slug}`, name: s.name }));
+  const editions: Game[] = EDITIONS.map((e) => ({ id: e.id, name: e.name }));
+  const all = [...GAMES, ...bought, ...sports, ...editions];
 
   // Warm everything, but do not WAIT for everything.
   //
@@ -760,6 +899,7 @@ export async function gamesWithPreviews(): Promise<Game[]> {
       const logo = sets.find((s) => s.logo)?.logo ?? null;
       return {
         ...g,
+        ...(editionFields(g.id) ?? {}),
         category: categoryOf(g.id),
         sets: sets.length || undefined,
         preview: logo ?? (sets.length ? await cardPreview(g.id, sets) : null),
@@ -791,9 +931,16 @@ export async function gamesWithPreviews(): Promise<Game[]> {
 export function gameOfCard(cardId: string | null | undefined): string | null {
   const id = (cardId ?? "").trim();
   if (!id) return null;
+  // The only prefix whose game is not the prefix: `sport-` holds fourteen.
+  if (isSportCard(id)) {
+    const read = readSportCard(id);
+    return read ? `sport:${read.sport.slug}` : null;
+  }
   const cut = id.indexOf("-");
   const prefix = cut > 0 ? id.slice(0, cut) : "";
   if (!prefix || !PREFIXED.has(prefix)) return null;
+  if (prefix === "tcg") return id.split("-")[1] || null;
+  if (prefix === "lng") return readEditionCard(id)?.edition.id ?? null;
   return gameOfPrefix(prefix);
 }
 
@@ -813,6 +960,10 @@ export function setIdOfCard(cardId: string): string | null {
   // page falls back to asking the server who the card is, which works because
   // anything on the market is in our own tables by then.
   if (prefix === CH_PREFIX) return null;
+  if (prefix === "sport") {
+    const read = readSportCard(cardId);
+    return read ? sportSetId(read.sport.slug, read.set) : null;
+  }
   if (prefix === "optcg") {
     // `OP13-119` — the set code is everything before the card's own number.
     const last = rest.lastIndexOf("-");
@@ -823,7 +974,7 @@ export function setIdOfCard(cardId: string): string | null {
 
 /** The prefixes this file mints. Kept beside `setIdOfCard` because the two
  *  have to agree about what a prefixed id looks like. */
-const PREFIXED = new Set(["mtg", "lorcana", "optcg", "ygo", "swu", "sorcery", "digimon", "gatcg", CH_PREFIX]);
+const PREFIXED = new Set(["tcg", "lng", "mtg", "lorcana", "optcg", "ygo", "swu", "sorcery", "digimon", "gatcg", CH_PREFIX, "sport"]);
 
 /** Every set inside one bought category.
  *

@@ -225,3 +225,28 @@ export async function closesFor(
     grader,
   };
 }
+
+/** Daily prices for one exact key over the last `days`, oldest first.
+ *
+ *  Raw has no grading company, and the feed stores it as grader 'MARKET',
+ *  grade 0 — so an ungraded key reads that series and nothing else. A graded
+ *  key reads its own grader and grade only (invariant 1). */
+export async function dailyPricesFor(
+  catalogId: string, key: { grader: string | null; grade: string | null; rawOnly: boolean }, days: number,
+): Promise<{ day: string; price: number }[]> {
+  const pool = storePool();
+  if (!pool) return [];
+  const grader = key.rawOnly ? "MARKET" : key.grader;
+  const grade = key.rawOnly ? 0 : Number(key.grade);
+  if (!grader || !Number.isFinite(grade)) return [];
+  const r = await pool.query(
+    `select to_char(day, 'YYYY-MM-DD') as day, price
+       from price_points
+      where catalog_id = $1 and grader = $2 and grade = $3
+        and qualifier = '' and label_variant = ''
+        and day >= current_date - ($4::int)
+      order by day`,
+    [catalogId, grader, grade, Math.min(Math.max(days, 1), 120)],
+  );
+  return r.rows.map((x: any) => ({ day: x.day, price: Number(x.price) }));
+}

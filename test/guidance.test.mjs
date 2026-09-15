@@ -128,3 +128,36 @@ test("the evidence comes back with the answer", () => {
   assert.equal(g.sales.length, 3);
   assert.ok(g.sales.every((s) => s.soldAt && s.source));
 });
+
+// GM001-59: "never let one bad listing move a figure". A sale ten times the
+// others is a different printing, a mislabel or a fake, not the market.
+test("one freak sale does not move the figure", () => {
+  const g = listingGuidance([sale(1000, 1), sale(9500, 2), sale(1000, 3), sale(1050, 4)], FX);
+  assert.ok(hasGuidance(g));
+  assert.equal(g.market, 1016.67);
+  assert.equal(g.excluded, 1);
+  assert.ok(g.sales.every((s) => s.price < 2000));
+});
+
+test("a cheap freak is dropped the same way", () => {
+  const g = listingGuidance([sale(1000, 1), sale(90, 2), sale(1000, 3), sale(950, 4)], FX);
+  assert.ok(hasGuidance(g));
+  assert.equal(g.excluded, 1);
+  assert.equal(g.market, 983.33);
+});
+
+test("dropping an outlier can leave too few, and then there is no range", () => {
+  const g = listingGuidance([sale(1000, 1), sale(9500, 2), sale(1000, 3)], FX);
+  assert.ok(!hasGuidance(g));
+  assert.equal(g.reason, "too-few");
+  assert.match(g.message, /setting aside 1/);
+});
+
+import { guidanceKey } from "../src/sales/guidance.js";
+
+test("raw means ungraded only, and a missing grader is refused rather than read as any grader", () => {
+  assert.deepEqual(guidanceKey("RAW", null), { grader: null, grade: null, rawOnly: true });
+  assert.deepEqual(guidanceKey("psa", "10.0"), { grader: "PSA", grade: "10", rawOnly: false });
+  assert.equal(guidanceKey(undefined, "10"), null);
+  assert.equal(guidanceKey("PSA", undefined), null);
+});

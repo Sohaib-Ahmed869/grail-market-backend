@@ -82,10 +82,14 @@ export function certUrl(grader: string, cert: string): string | null {
     case "BGS": return `https://www.beckett.com/grading/card-lookup?item_number=${cert}`;
     case "CGC": return `https://www.cgccards.com/certlookup/${cert}/`;
     case "SGC": return `https://gosgc.com/card/${cert}`;
+    // Checked 2026-09-14: acegrading.com/cert/1234567 answers with that one
+    // certificate's own page ("Cert #1234567 - 2023 - Rayquaza VMAX - Crown
+    // Zenith - Grade 10"). The www. host redirects here.
+    case "ACE": return `https://acegrading.com/cert/${cert}`;
     default: return null;
   }
 }
 
 /** Every register worth offering when the company is unknown. */
 export const certLinks = (cert: string) =>
-  ["PSA", "BGS", "CGC", "SGC"].map((g) => ({ grader: g, url: certUrl(g, cert)! }));
+  ["PSA", "BGS", "CGC", "SGC", "ACE"].map((g) => ({ grader: g, url: certUrl(g, cert)! }));

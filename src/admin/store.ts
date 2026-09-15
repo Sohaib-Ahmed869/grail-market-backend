@@ -6,6 +6,7 @@ import { COMMERCE_SCHEMA } from "./commerce.store.js";
 import { CONDUCT_SCHEMA } from "./conduct.store.js";
 import { PRICING_SCHEMA } from "./pricing.store.js";
 import { MEMBERS_SCHEMA } from "./members.store.js";
+import { CONTACT_SCHEMA, backfillContactAttempts } from "./contact.store.js";
 import { SUPPORT_SCHEMA } from "./support.store.js";
 import { roleOf, type Role } from "./roles.js";
 
@@ -118,6 +119,10 @@ export async function initAdmin(): Promise<void> {
   await pool.query(AUDIT_SCHEMA);
   await pool.query(ANNOUNCE_SCHEMA);
   await pool.query(SETTINGS_SCHEMA);
+  await pool.query(CONTACT_SCHEMA);
+  // Masked text written before the record existed. Not awaited in a way that
+  // can fail boot — see the function.
+  await backfillContactAttempts();
   /* Last, and separately: these index tables the blocks above have just
      created, and one that fails must not take the schema with it. An index is
      a speed-up, not a correctness requirement — a console that will not boot

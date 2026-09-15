@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
+import { distanceSql } from "./nearby.js";
 
 // Listings, offers, and the collection.
 //
@@ -73,6 +74,14 @@ ALTER TABLE listings ADD COLUMN IF NOT EXISTS label_grade text;
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS moderator_flags jsonb NOT NULL DEFAULT '[]';
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS moderator_note text;
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS info_requested_at timestamptz;
+-- Where the listing's SUBURB is, as a point, so a buyer can be told how far
+-- away it is — see listings/nearby.ts. The suburb centre only, never an
+-- address, and never sent to a client. "suburb_geocoded" is the suburb the
+-- point was made from, so an edited suburb reads as unplaced.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS suburb_lat double precision;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS suburb_lon double precision;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS suburb_geocoded text;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS suburb_checked_at timestamptz;
 
 -- The queue is read in submission order on every load of the console.
 CREATE INDEX IF NOT EXISTS listings_review ON listings (status, submitted_at);
@@ -128,10 +137,44 @@ ALTER TABLE collection ADD COLUMN IF NOT EXISTS variant text;
 ALTER TABLE collection ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 1;
 `;
 
+/** The text a listing is searched by: name, set and number in one string.
+ *  The index below is built on exactly this expression, and the query must
+ *  spell it identically or Postgres will not use the index. */
+export const SEARCH_TEXT_SQL =
+  "(card_name || ' ' || coalesce(set_name, '') || ' ' || coalesce(card_number, ''))";
+
+/** The words of a search, each matched on its own.
+ *
+ *  Lower-cased, `#` dropped (a buyer types "#4"), LIKE wildcards escaped so a
+ *  typed "%" is a character, at most six words of at most sixty characters —
+ *  a search box is not a place to send the database a novel. */
+export function searchTerms(q: string): string[] {
+  return q
+    .toLowerCase()
+    .replace(/#/g, " ")
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter(Boolean)
+    .slice(0, 6)
+    .map((w) => w.slice(0, 60).replace(/[\\%_]/g, (c) => `\\${c}`));
+}
+
 export async function initListings(): Promise<void> {
   const pool = storePool();
   if (!pool) return;
   await pool.query(LISTINGS_SCHEMA);
+  // A trigram index over the search text, so "contains this word" is an index
+  // lookup rather than a scan of every listing. pg_trgm ships with Postgres
+  // and Neon; if the role cannot create it the search still works, only
+  // slower, so a refusal here must not stop the service starting.
+  try {
+    await pool.query("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS listings_search_trgm ON listings USING gin ((lower(${SEARCH_TEXT_SQL})) gin_trgm_ops)`,
+    );
+  } catch (e) {
+    console.warn("[listings] search index not created:", (e as Error).message);
+  }
 }
 
 /** Where a listing can go from where it is.
@@ -297,6 +340,30 @@ export async function moveListing(
 
 /** The market. Featured first, then newest — the order asked for, and stated
  *  on screen so nobody thinks it is arbitrary. */
+/** Which language edition a listing is, read off the card it was listed
+ *  against rather than asked for twice.
+ *
+ *  The catalogue already separates editions by id: a Japanese Pokémon card
+ *  is `tcg-pokemonjp-…` under the game `pokemonjp`, a Japanese Magic print is
+ *  `lng-ja-…`, and every other language edition is `lng-<code>-…`. A card
+ *  listed against one of those IS that edition, so the filter reads the id —
+ *  no new column, nothing for a seller to keep in step with the card they
+ *  picked. Anything else is the English catalogue. */
+export type ListingLanguage = "en" | "ja" | "other";
+
+export const LANGUAGE_SQL: Record<ListingLanguage, string> = {
+  ja: "(coalesce(game,'') = 'pokemonjp' or coalesce(catalog_id,'') like 'tcg-pokemonjp-%' or coalesce(catalog_id,'') like 'lng-ja-%')",
+  other: "(coalesce(catalog_id,'') like 'lng-%' and coalesce(catalog_id,'') not like 'lng-ja-%')",
+  en: "(coalesce(game,'') <> 'pokemonjp' and coalesce(catalog_id,'') not like 'tcg-pokemonjp-%' and coalesce(catalog_id,'') not like 'lng-%')",
+};
+
+export function languageOfListing(catalogId: string | null | undefined, game: string | null | undefined): ListingLanguage {
+  const id = catalogId ?? "";
+  if (game === "pokemonjp" || id.startsWith("tcg-pokemonjp-") || id.startsWith("lng-ja-")) return "ja";
+  if (id.startsWith("lng-")) return "other";
+  return "en";
+}
+
 export async function browseListings(q: {
   game?: string | null; grader?: string | null; graded?: boolean | null;
   catalogId?: string | null; excludeSeller?: string | null;
@@ -305,11 +372,26 @@ export async function browseListings(q: {
   setName?: string | null; cardNumber?: string | null; variant?: string | null;
   grade?: string | null; q?: string | null;
   min?: number | null; max?: number | null; sort?: string | null; limit?: number;
+  language?: ListingLanguage | null;
+  /** Rows to skip — the page after the one already shown. */
+  offset?: number | null;
+  /** The viewer's own point, already rounded — see listings/nearby.ts. With
+   *  it, every row carries `distance_km`; `sort: "nearest"` orders by it and
+   *  `withinKm` drops anything further. */
+  near?: { lat: number; lon: number } | null;
+  withinKm?: number | null;
 }): Promise<Listing[]> {
   const pool = storePool();
   if (!pool) return [];
   const where: string[] = ["status = 'live'"];
   const args: any[] = [];
+  // The point goes in first, so its two parameters are $1 and $2 whatever
+  // filters follow.
+  const distance = q.near ? (args.push(q.near.lat, q.near.lon), distanceSql(1, 2)) : null;
+  if (distance && q.withinKm != null) {
+    args.push(q.withinKm);
+    where.push(`${distance} <= $${args.length}`);
+  }
   const add = (sql: string, v: any) => {
     // one value, however many times the clause names it
     args.push(v);
@@ -346,18 +428,31 @@ export async function browseListings(q: {
   // models them separately — see the note in the scope gap list.
   if (q.variant) add("variant = ?", q.variant);
   if (q.grade) add("grade = ?", q.grade);
-  // A free-text box over the two fields people actually remember.
-  if (q.q) add("(card_name ilike '%' || ? || '%' or set_name ilike '%' || ? || '%')", q.q);
+  if (q.language && LANGUAGE_SQL[q.language]) where.push(LANGUAGE_SQL[q.language]);
+  // Free text over name, set and number, one word at a time and in any
+  // order: "charizard base" must find Charizard in Base Set, which a single
+  // phrase match against either field alone never could.
+  if (q.q) {
+    for (const term of searchTerms(q.q)) add(`lower(${SEARCH_TEXT_SQL}) like '%' || ? || '%'`, term);
+  }
 
   const order =
     q.sort === "price_desc" ? "price desc"
     : q.sort === "price_asc" ? "price asc"
     : q.sort === "newest" ? "live_at desc"
+    // A listing we cannot place yet goes after every one we can, rather than
+    // being ranked as if it were next door.
+    : q.sort === "nearest" && distance ? "distance_km asc nulls last, live_at desc"
     : "(featured_until > now()) desc nulls last, live_at desc";
 
-  args.push(Math.min(q.limit ?? 50, 100));
+  args.push(Math.min(q.limit ?? 50, 101));
+  const limitAt = args.length;
+  args.push(Math.max(0, Math.floor(q.offset ?? 0)));
+  // listing_id last in every order, so two listings with the same price or
+  // the same live_at keep one order between pages — without it a page
+  // boundary can show a card twice and skip another.
   const r = await pool.query(
-    `select * from listings where ${where.join(" and ")} order by ${order} limit $${args.length}`,
+    `select *${distance ? `, ${distance} as distance_km` : ""} from listings where ${where.join(" and ")} order by ${order}, listing_id limit $${limitAt} offset $${args.length}`,
     args,
   );
   return r.rows;

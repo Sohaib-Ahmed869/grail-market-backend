@@ -1,5 +1,6 @@
 import type { Identification, OcrReading, Valuation } from "@grailcard/shared";
 import { normaliseVisionUrl } from "./visionurl.js";
+import { pokemonNumberMatches } from "./printingproof.js";
 
 const TCGDEX = process.env.TCGDEX_URL ?? "https://api.tcgdex.net/v2/en";
 const MIN_MATCH_SCORE = 0.6;
@@ -92,6 +93,12 @@ export async function identifyCard(
   const collectorLocalId = ocr.collectorNumber
     ? String(Number(ocr.collectorNumber.split("/")[0]))
     : null;
+  // The "/102" half of a collector number names the set's size, which is what
+  // tells Base Set's 4/102 from Crystal Guardians' 4/100 — see
+  // pokemonNumberMatches. Only fetched when a total was actually read.
+  const setCounts = ocr.collectorNumber?.includes("/") ? await setPrintedCounts() : null;
+  const numberMatches = (card: TcgdexBrief) =>
+    pokemonNumberMatches(card, ocr.collectorNumber, setCounts);
 
   const candidates = new Map<string, { card: TcgdexBrief; score: number; ocrName: string }>();
   for (const seed of querySeeds(ocr)) {
@@ -110,7 +117,7 @@ export async function identifyCard(
           matchedName = n;
         }
       }
-      if (collectorLocalId && String(Number(card.localId)) === collectorLocalId) {
+      if (collectorLocalId && numberMatches(card)) {
         score += 0.2;
       }
       const prev = candidates.get(card.id);
@@ -123,8 +130,18 @@ export async function identifyCard(
   // tie-break equal scores toward the more specific (longer) card name —
   // "Charizard" exact-matches dozens of cards; "Mega Charizard X ex" is
   // nearly unique
+  //
+  // But a name that is EXACTLY what was read beats a longer one first. The
+  // similarity score strips symbols, so "Charizard ☆ δ" (a four-figure Gold
+  // Star) ties "Charizard" at 1.0 — and the longer-name rule then named a
+  // plain Charizard as the Gold Star.
+  const readExactly = (n: string) =>
+    names.some((x) => x.trim().toLowerCase() === n.trim().toLowerCase()) ? 1 : 0;
   let ranked = [...candidates.values()]
-    .sort((a, b) => b.score - a.score || b.card.name.length - a.card.name.length)
+    .sort((a, b) =>
+      b.score - a.score ||
+      readExactly(b.card.name) - readExactly(a.card.name) ||
+      b.card.name.length - a.card.name.length)
     .slice(0, 5);
 
   // visual cross-check: dHash the scan against the top candidates' images.
@@ -155,8 +172,43 @@ export async function identifyCard(
   // cap the score so the LLM arbitration downstream gets a look
   if (bestVisual == null) best.score = Math.min(best.score, 0.85);
 
-  return buildFromCardId(best.card.id, best.ocrName, Math.min(best.score, 1), best.card);
+  /* Which printing — proven by the card, not by the name.
+   *
+   * "Charizard" matches dozens of TCGdex cards. With no collector number read
+   * and no picture check, a Base Set Charizard resolved to the 2024 McDonald's
+   * promo and was priced as it. A printing is confirmed only by:
+   *   - the collector number read off the card matching this card's number,
+   *   - a name with exactly one printing in the catalogue, or
+   *   - a picture comparison that saw every same-name printing and won clearly.
+   * Anything else still names the card but asserts no set, number or price. */
+  const sameName = [...candidates.values()].filter(
+    (r) => similarity(r.card.name, best.card.name) >= 0.95,
+  );
+  const numberProof = collectorLocalId != null && numberMatches(best.card);
+  const onlyPrinting = sameName.length === 1;
+  const comparedRivals = ranked
+    .filter((r) => r.card.id !== best.card.id && similarity(r.card.name, best.card.name) >= 0.95)
+    .map((r) => (r as any).visual as number | undefined);
+  const everyRivalSeen = comparedRivals.length === sameName.length - 1 && comparedRivals.every((v) => v != null);
+  const rivalBest = comparedRivals.length ? Math.max(...comparedRivals.map((v) => v ?? 0)) : 0;
+  const pictureProof =
+    bestVisual != null && bestVisual >= PICTURE_PROOF && everyRivalSeen && bestVisual - rivalBest >= PICTURE_MARGIN;
+  const confirmed = numberProof || onlyPrinting || pictureProof;
+
+  return buildFromCardId(
+    best.card.id,
+    best.ocrName,
+    confirmed ? Math.min(best.score, 1) : Math.min(best.score, 0.85),
+    best.card,
+    confirmed,
+  );
 }
+
+/** A picture win counts as proof of the printing above this similarity, and
+ *  only by this margin over every same-name rival — the same margin the
+ *  printing picker requires, below which dHash is noise (see printingpicker). */
+const PICTURE_PROOF = 0.8;
+const PICTURE_MARGIN = 0.05;
 
 /** Fetch a catalog card by id and shape it into our identification +
  *  valuation contract. Shared by the name-match path and the slab-label path. */
@@ -165,7 +217,23 @@ async function buildFromCardId(
   ocrName: string,
   matchScore: number,
   brief?: TcgdexBrief,
+  /** False when the name matched but nothing proved this printing. The card is
+   *  then named with no set, number, picture or price — see identifyCard. The
+   *  slab-label path passes nothing: set + number is proof by construction. */
+  printingConfirmed = true,
 ): Promise<{ identification: Identification; valuation: Valuation | null } | null> {
+  if (!printingConfirmed) {
+    const name = brief?.name;
+    if (!name) return null;
+    return {
+      identification: {
+        cardId, name, setId: "", setName: "", localId: "", rarity: null, imageUrl: null,
+        matchScore, ocrName, game: "pokemon",
+        printingConfirmed: false, unconfirmedReason: "printing-not-read",
+      },
+      valuation: null,
+    };
+  }
   const detail = (await fetchJson(`${TCGDEX}/cards/${cardId}`)) as {
     name?: string;
     set?: { id: string; name: string };
@@ -199,6 +267,7 @@ async function buildFromCardId(
     matchScore,
     ocrName,
     game: "pokemon",
+    printingConfirmed: true,
   };
 
   let valuation: Valuation | null = null;
@@ -254,7 +323,17 @@ async function buildFromCardId(
 // "Charizard VSTAR" (Brilliant Stars #018, a $13 card).
 // ---------------------------------------------------------------------------
 
-type TcgdexSet = { id: string; name: string; cardCount?: { total?: number } };
+type TcgdexSet = { id: string; name: string; cardCount?: { total?: number; official?: number } };
+
+/** Each set's printed counts (official and total), for checking the "/102"
+ *  half of a collector number. Null when the set list is unavailable. */
+async function setPrintedCounts(): Promise<Map<string, number[]> | null> {
+  const sets = await allSets();
+  if (!sets.length) return null;
+  return new Map(
+    sets.map((s) => [s.id, [s.cardCount?.official, s.cardCount?.total].filter((n): n is number => typeof n === "number")]),
+  );
+}
 
 let setsCache: { at: number; sets: TcgdexSet[] } | null = null;
 const SETS_TTL_MS = 24 * 3600 * 1000;

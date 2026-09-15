@@ -119,7 +119,7 @@ export const CATEGORY: Record<string, number> = {
   rushofikorr: 94,
 };
 
-export type TcgGroup = { groupId: number; name: string; abbreviation: string | null };
+export type TcgGroup = { groupId: number; name: string; abbreviation: string | null; publishedOn?: string | null };
 
 export type TcgProduct = {
   productId: number;
@@ -182,6 +182,7 @@ export async function groupsFor(game: string): Promise<TcgGroup[]> {
     groupId: Number(g.groupId),
     name: String(g.name ?? ""),
     abbreviation: g.abbreviation ? String(g.abbreviation) : null,
+    publishedOn: g.publishedOn ? String(g.publishedOn).slice(0, 10) : null,
   }));
   if (out.length) groupCache.set(game, out);
   return out;

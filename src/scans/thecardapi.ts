@@ -1,4 +1,6 @@
 import { TtlCache } from "./ttlcache.js";
+import { isCatalogueOnlyCard } from "./editions.js";
+import { isSportCard } from "./sports.js";
 import { recordUsage, usedToday } from "./usage.js";
 import {
   NOT_ONE_CARD, isDesignationListing, labelFromTitle, mentionsCard,
@@ -54,14 +56,14 @@ const AUTH_HEADER = "x-market-api-key";
 // the plan grants a number of sales rows per UTC day (5,000 on free) and one
 // request may return up to 1,000 of them. A cap counted in requests would be
 // meaningless — a single careless `limit=1000` is a fifth of the day.
-const DAILY_ROWS = Number(process.env.THECARDAPI_DAILY_ROWS ?? 0);
+const dailyRows = (): number => Number(process.env.THECARDAPI_DAILY_ROWS ?? 0);
 
 /** Most rows a single request may ask for, whatever the caller wants.
  *  Their ceiling is 1,000; ours is far lower because a comp set of more than
  *  a few dozen sales is not a better median, it is just a bigger bill. */
 const MAX_PAGE = 60;
 
-const enabled = () => Boolean(process.env.THECARDAPI_KEY) && DAILY_ROWS > 0;
+const enabled = () => Boolean(process.env.THECARDAPI_KEY) && dailyRows() > 0;
 
 /** A completed sale moves slower than an ask and much slower than a
  *  catalogue: yesterday's sales are yesterday's sales forever. Six hours is
@@ -115,9 +117,9 @@ async function call<T>(path: string, params: Record<string, string | number | un
   if (!enabled()) return null;
 
   const spent = usedToday("thecardapi");
-  if (spent + want > DAILY_ROWS) {
+  if (spent + want > dailyRows()) {
     console.warn(
-      `[thecardapi] row budget would be exceeded (${spent}+${want}/${DAILY_ROWS}) — ` +
+      `[thecardapi] row budget would be exceeded (${spent}+${want}/${dailyRows()}) — ` +
         `skipping, card falls back to asks`,
     );
     return null;
@@ -491,6 +493,12 @@ export type CompResult = {
 export async function soldComps(want: CompTarget, opts: { limit?: number; sinceDays?: number } = {}): Promise<CompResult> {
   const empty: CompResult = { sales: [], examined: 0, rejected: 0, total: null };
   if (!enabled()) return empty;
+  // Searched by name, and written into an append-only ledger under OUR id.
+  // A sports entry is every card of a player; a catalogue-only card is a
+  // specific product — often a Japanese or Korean print — whose name finds
+  // the English card. Sales found that way would be permanent evidence for
+  // the wrong object, so these ids are never looked up.
+  if (isSportCard(want.catalogId) || isCatalogueOnlyCard(want.catalogId)) return empty;
 
   const limit = Math.min(opts.limit ?? 25, MAX_PAGE);
   const key = `${want.name}|${want.setName ?? ""}|${want.number ?? ""}|${limit}|${opts.sinceDays ?? ""}`;
@@ -563,7 +571,7 @@ export async function coverage(): Promise<{ platform: string; lastSaleDate: stri
 export function theCardApiStatus() {
   return {
     hasKey: Boolean(process.env.THECARDAPI_KEY),
-    dailyRows: DAILY_ROWS,
+    dailyRows: dailyRows(),
     enabled: enabled(),
     rowsUsedToday: usedToday("thecardapi"),
     /** the provider's own figures, null until the first call of the day */

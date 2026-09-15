@@ -17,6 +17,7 @@ import { findInversions, soldVsAsk, gradeIsInverted } from "./ladder.js";
 import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, readOnePieceCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
+import { isPriceable, nameOnCard } from "./printingproof.js";
 import { recordScan, recordWeakResult, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
 import { labelTokens, rawGradedDivergence } from "./labeltokens.js";
@@ -402,16 +403,18 @@ export class ScansService {
         : (
         await Promise.all([
           identifyCard(frontRes.ocr, frontRes.warpedImageB64),
-          identifyScryfall(names),
-          identifyYgo(names),
+          // the card's own text carries the set code / collector line that
+          // settles WHICH printing — without it these name a card, not a print
+          identifyScryfall(names, frontRes.ocr.texts ?? []),
+          identifyYgo(names, frontRes.ocr.texts ?? []),
           identifyOnePiece(
             // vision's setCode reader is Pokemon-Japanese; the One Piece number
             // is on the card face and needs its own, O-for-zero tolerant read
             frontRes.ocr.setCode ?? readOnePieceCode(frontRes.ocr.texts ?? []),
             frontRes.warpedImageB64,
           ),
-          identifyLorcana(names),
-          identifyDigimon(names),
+          identifyLorcana(names, frontRes.ocr.texts ?? []),
+          identifyDigimon(names, frontRes.ocr.texts ?? []),
           identifySwu(names),
           identifyApiTcg(names),
         ])
@@ -443,7 +446,67 @@ export class ScansService {
             matchScore: 0.6,
             ocrName: names[0] ?? "(from image)",
             game: opinion.game,
+            printingConfirmed: false,
+            unconfirmedReason: nameOnCard(opinion.name, frontRes.ocr.texts ?? [])
+              ? "printing-not-read"
+              : "name-not-on-card",
           };
+        } else if (
+          opinion &&
+          opinion.game === match.identification.game &&
+          match.identification.printingConfirmed === false
+        ) {
+          // The catalogue named the card but could not prove the printing, so
+          // it asserts no set. The model's own reading usually carries more: a
+          // fuller name ("Umbreon V" where OCR caught "Umbreon") and the set it
+          // sees. The set check below cannot use that — it needs a catalogue
+          // set to compare against, and an unconfirmed match has none — so this
+          // handles it: try the catalogue again with the model's name, keep
+          // that if it proves a printing, and otherwise show the model's name
+          // and set, marked unconfirmed and unpriced.
+          const texts = frontRes.ocr.texts ?? [];
+          const differentName = similarity(opinion.name, match.identification.name) < 0.999;
+          const redo = differentName
+            ? opinion.game === "pokemon"
+              ? await identifyCard(
+                  {
+                    nameCandidates: [opinion.name],
+                    collectorNumber: frontRes.ocr.collectorNumber ?? null,
+                    setCode: frontRes.ocr.setCode ?? null,
+                    texts,
+                    language: (frontRes.ocr.language ?? "unknown") as "en" | "ja" | "unknown",
+                    japaneseTextDetected: frontRes.ocr.japaneseTextDetected ?? false,
+                  },
+                  frontRes.warpedImageB64,
+                )
+              : opinion.game === "mtg"
+                ? await identifyScryfall([opinion.name], texts)
+                : opinion.game === "yugioh"
+                  ? await identifyYgo([opinion.name], texts)
+                  : opinion.game === "lorcana"
+                    ? await identifyLorcana([opinion.name], texts)
+                    : null
+            : null;
+          if (redo && redo.identification.printingConfirmed !== false) {
+            match = redo;
+          } else if (differentName || opinion.setName) {
+            match = undefined as unknown as typeof match;
+            scan.identification = {
+              cardId: "llm",
+              name: opinion.name,
+              setId: "",
+              setName:
+                [opinion.setName, opinion.edition].filter(Boolean).join(" · ") || "Unknown set",
+              localId: "",
+              rarity: null,
+              imageUrl: null,
+              matchScore: 0.6,
+              ocrName: names[0] ?? "(from image)",
+              game: opinion.game,
+              printingConfirmed: false,
+              unconfirmedReason: nameOnCard(opinion.name, texts) ? "printing-not-read" : "name-not-on-card",
+            };
+          }
         } else if (
           opinion &&
           opinion.game === match.identification.game &&
@@ -469,6 +532,10 @@ export class ScansService {
             matchScore: 0.6,
             ocrName: names[0] ?? "(from image)",
             game: opinion.game,
+            printingConfirmed: false,
+            unconfirmedReason: nameOnCard(opinion.name, frontRes.ocr.texts ?? [])
+              ? "printing-not-read"
+              : "name-not-on-card",
           };
         } else if (
           opinion &&
@@ -490,11 +557,11 @@ export class ScansService {
             opinion.game === "pokemon"
               ? await identifyCard(redoOcr, frontRes.warpedImageB64)
               : opinion.game === "mtg"
-                ? await identifyScryfall([opinion.name])
+                ? await identifyScryfall([opinion.name], frontRes.ocr.texts ?? [])
                 : opinion.game === "yugioh"
-                  ? await identifyYgo([opinion.name])
+                  ? await identifyYgo([opinion.name], frontRes.ocr.texts ?? [])
                   : opinion.game === "lorcana"
-                    ? await identifyLorcana([opinion.name])
+                    ? await identifyLorcana([opinion.name], frontRes.ocr.texts ?? [])
                     : null;
           if (redo) match = redo;
         } else if (!opinion && match.identification.matchScore < 0.72) {
@@ -540,13 +607,13 @@ export class ScansService {
             llm.game === "pokemon"
               ? await identifyCard(pseudoOcr, frontRes.warpedImageB64)
               : llm.game === "mtg"
-                ? await identifyScryfall([llm.name])
+                ? await identifyScryfall([llm.name], frontRes.ocr.texts ?? [])
                 : llm.game === "yugioh"
-                  ? await identifyYgo([llm.name])
+                  ? await identifyYgo([llm.name], frontRes.ocr.texts ?? [])
                   : llm.game === "lorcana"
-                    ? await identifyLorcana([llm.name])
+                    ? await identifyLorcana([llm.name], frontRes.ocr.texts ?? [])
                     : llm.game === "digimon"
-                      ? await identifyDigimon([llm.name])
+                      ? await identifyDigimon([llm.name], frontRes.ocr.texts ?? [])
                       : llm.game === "starwars"
                         ? await identifySwu([llm.name])
                         : null;
@@ -554,6 +621,11 @@ export class ScansService {
             scan.identification = verified.identification;
             scan.valuation = verified.valuation;
           } else {
+            // Named by the vision model with no catalogue behind it — every
+            // sports card lands here. The name is only as good as the model's
+            // look at the picture, so it is checked against the text actually
+            // read off the card: it called a Stephen Curry "Trayce
+            // Jackson-Davis" while the card said SELECT and nothing else.
             scan.identification = {
               cardId: "llm",
               name: llm.name,
@@ -565,6 +637,10 @@ export class ScansService {
               matchScore: 0.6,
               ocrName: names[0] ?? "(from image)",
               game: llm.game,
+              printingConfirmed: false,
+              unconfirmedReason: nameOnCard(llm.name, frontRes.ocr.texts ?? [])
+                ? "printing-not-read"
+                : "name-not-on-card",
             };
           }
         }
@@ -593,8 +669,18 @@ export class ScansService {
           matchScore: 0,
           ocrName: names[0],
           game: "other",
+          printingConfirmed: false,
+          unconfirmedReason: "printing-not-read",
         };
       }
+    }
+
+    // A printing nobody proved carries no price — not the catalogue's, not
+    // any fallback's. Whatever a name-only matcher attached is dropped here, in
+    // one place, so a matcher added later cannot bring the defect back.
+    // See printingproof.ts.
+    if (scan.identification && !isPriceable(scan.identification)) {
+      scan.valuation = null;
     }
 
     // PPT graded + raw prices for the identification that actually survived.
@@ -661,6 +747,11 @@ export class ScansService {
     let pptByGrade: Record<string, GradePoint> | null = null;
     let pptByGrader: Record<string, Record<string, GradePoint>> | null = null;
     const ident = scan.identification;
+    // Every price source below asks by this identity. An AI-named card, a
+    // text-described one, or a catalogue row whose printing was not proven is
+    // asked about by NAME, and a name answers with some other printing's price
+    // — Base Set Charizard came back at US$504 that way.
+    const priceable = isPriceable(ident);
 
     // Register the card before pricing it, for EVERY game rather than just the
     // one we can price today. The refresh job's work list is this table, so a
@@ -680,8 +771,7 @@ export class ScansService {
     if (
       ident &&
       ident.game === "pokemon" &&
-      ident.cardId !== "llm" &&
-      ident.cardId !== "described"
+      priceable
     ) {
       // Prices are READ from our own store first, and bought only when the
       // store cannot answer. The order lives in pricing.ts because the search
@@ -726,7 +816,7 @@ export class ScansService {
 
     // price gap-fill: catalogs without prices (Digimon, Union Arena...) get
     // them from JustTCG when its free key is present
-    if (scan.identification && !scan.valuation?.tcgplayer && !scan.valuation?.cardmarket) {
+    if (priceable && scan.identification && !scan.valuation?.tcgplayer && !scan.valuation?.cardmarket) {
       const filled = await fetchJustTcgPrice(
         scan.identification.name,
         scan.identification.game,
@@ -739,7 +829,7 @@ export class ScansService {
     // market module (their eBay comps; costs a credit) -> multiplier
     // estimate from raw (always available, clearly labeled estimated).
     // Every card gets SOME graded picture, with its provenance stated.
-    if (scan.identification && !scan.valuation?.graded) {
+    if (priceable && !scan.valuation?.graded) {
       const backup = await fetchCardGraderMarket(
         front.buffer.toString("base64"),
         `gc-market-${id}`,
@@ -754,8 +844,8 @@ export class ScansService {
     // the page it cites before we keep it. Our own reading, not a price feed —
     // so it lands as `estimated` with its sources attached.
     if (
+      priceable &&
       scan.identification &&
-      scan.identification.cardId !== "described" &&
       !scan.valuation?.graded
     ) {
       const web = await fetchWebPrices(scan.identification);

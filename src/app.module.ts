@@ -16,6 +16,7 @@ import { SalesController } from "./sales/sales.controller.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { BillingController } from "./billing/billing.controller.js";
 import { IdentityController } from "./identity/identity.controller.js";
+import { MeetupsController } from "./meetups/meetups.controller.js";
 import { Module } from "@nestjs/common";
 import { EbayController } from "./ebay/ebay.controller.js";
 import { MarketController } from "./scans/market.controller.js";
@@ -23,7 +24,7 @@ import { ScansController } from "./scans/scans.controller.js";
 import { ScansService } from "./scans/scans.service.js";
 
 @Module({
-  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, DealsController, CollectionController, SharePageController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController],
+  controllers: [AdminController, ScansController, MarketController, EbayController, IdentityController, BillingController, AuthController, SalesController, ListingsController, DealsController, CollectionController, SharePageController, SellersController, CommunityController, WatchlistController, RatingsController, DisputesController, HistoryController, MessagesController, NotificationsController, SupportController, MeetupsController],
   providers: [ScansService],
 })
 export class AppModule {}

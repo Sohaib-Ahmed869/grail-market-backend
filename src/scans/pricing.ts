@@ -2,6 +2,8 @@ import {
   extrasFromStore, fetchGradedPrices, gradePointsFromStore,
   type GradePoint, type Printings, type SalesVelocity,
 } from "./gradedprices.js";
+import { isSportCard } from "./sports.js";
+import { indexedCard, isCatalogueOnlyCard } from "./editions.js";
 import { readGradePrices, readRawPrice, writeRawPrice } from "../cards.store.js";
 import { priceForGrade, sanityCheck, gradeIsInverted, type LadderResult } from "./ladder.js";
 import { estimateFromListings, isRefusal } from "./estimate.js";
@@ -55,6 +57,22 @@ export async function gradedPricesFor(card: {
     card.catalogId && card.catalogId !== "llm" && card.catalogId !== "described"
       ? card.catalogId
       : null;
+
+  // Sports entries have no single price to find (see sports.ts), and this is
+  // the one function the price route, the sales panel and collection value all
+  // go through — so the refusal lives here, before the store is read and
+  // before the provider is asked the player's name and answers with a card.
+  if (isSportCard(catalogId)) {
+    return { byGrader: null, byGrade: null, rawUsd: null, source: "none" };
+  }
+
+  // A card read from a set listing — tcgcsv's, or a language edition's — has
+  // exactly one price of its own, the catalogue's figure for that product.
+  // The store and the provider both find cards by NAME, and a Japanese
+  // Pikachu found by name is the English Pikachu. See editions.ts.
+  if (isCatalogueOnlyCard(catalogId)) {
+    return { byGrader: null, byGrade: null, rawUsd: indexedCard(catalogId!)?.rawUsd ?? null, source: "none" };
+  }
 
   if (catalogId) {
     const held = await readGradePrices(catalogId, STORE_TTL_MS);

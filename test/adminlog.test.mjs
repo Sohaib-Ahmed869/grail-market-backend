@@ -21,7 +21,7 @@ test("every area the console draws an icon for is an area the API accepts", () =
   // The console has a label and an icon per area; an area it can render and
   // the API rejects is a filter that silently returns nothing.
   for (const a of [
-    "listing", "member", "conduct", "support", "billing", "pricing", "settings", "staff",
+    "listing", "member", "conduct", "support", "billing", "pricing", "catalog", "settings", "staff",
   ]) {
     assert.ok(isArea(a), `${a} should be an audit area`);
     assert.ok(AREAS.includes(a));

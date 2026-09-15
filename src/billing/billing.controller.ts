@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
-import { PLANS, findPlan, type PlanId } from "./plans.js";
+import { PLANS, PRICING, findPlan, type PlanId } from "./plans.js";
+import { BOOST_TIERS } from "../admin/commerce.store.js";
 import { livePrices } from "./liveprice.js";
 import { createCheckout, stripeConfigured, verifyStripe } from "./stripe.js";
 import { callerId } from "../auth/auth.controller.js";
@@ -26,17 +27,45 @@ export class BillingController {
     const live = await livePrices();
     return {
       configured: stripeConfigured(),
-      plans: PLANS.map(({ priceEnv, ...rest }) => {
+      plans: PLANS.map(({ priceEnv, annualPriceEnv, legacy, ...rest }) => {
+        // Free is not sold, so it is always available — to a verified seller,
+        // which the app checks against the identity status it already reads.
+        if (rest.free) {
+          return {
+            ...rest, amountCents: 0, annualCents: null, currency: "AUD",
+            available: true, availableAnnual: false, driftedFrom: null,
+          };
+        }
         const l = live.get(rest.id);
         return {
           ...rest,
           amountCents: l?.amountCents ?? rest.amountCents,
+          // The yearly figure is Stripe's when Stripe sells one, and the
+          // configured figure otherwise — shown, but not for sale.
+          annualCents: l?.annual?.amountCents ?? rest.annualCents,
           currency: l?.currency ?? "AUD",
           // A plan Stripe will not sell is shown as unavailable rather than
           // offered at a price the checkout would then refuse.
           available: l != null,
+          availableAnnual: l?.annual != null,
+          // Stripe still charging something other than the client's
+          // confirmed figure. Not shown to members; there so it is visible.
+          driftedFrom: l?.driftedFrom ?? null,
         };
       }),
+      extraListing: {
+        amountCents: PRICING.extraListingCents, currency: "AUD",
+        // Blocked on the client: is a paid slot single-use, or reusable when
+        // that listing closes? Priced, not sold.
+        available: false,
+      },
+      boosts: BOOST_TIERS.map(({ key, name, amountCents, hours, featured, spotlight, detail }) => ({
+        key, name, amountCents, hours, featured, spotlight: Boolean(spotlight), detail,
+        // No member purchase flow exists yet; boosts arrive with store billing.
+        available: false,
+      })),
+      commission: false,
+      freeTrial: false,
     };
   }
 
@@ -48,7 +77,7 @@ export class BillingController {
 
   /** Start Checkout. Returns a URL for the app to open. */
   @Post("checkout")
-  async checkout(@Req() req: Request, @Body() body: { planId?: string; userId?: string }) {
+  async checkout(@Req() req: Request, @Body() body: { planId?: string; userId?: string; interval?: string }) {
     if (!stripeConfigured()) {
       return { error: "billing-unconfigured", message: "STRIPE_SECRET_KEY is not set" };
     }
@@ -56,13 +85,19 @@ export class BillingController {
     // anyone could subscribe, or verify, as anyone.
     const userId = callerId(req);
     if (!userId) return { error: "unauthenticated", message: "Sign in first." };
-    if (!findPlan(String(body?.planId))) {
+    const plan = findPlan(String(body?.planId));
+    if (!plan || plan.legacy) {
       return { error: "bad-plan", message: "Unknown plan." };
     }
+    if (plan.free) {
+      return { error: "free-plan", message: "The free listing needs no checkout — verify your identity to use it." };
+    }
+    const interval = body?.interval === "year" ? "year" : "month";
     try {
       const s = await createCheckout({
         userId,
-        planId: String(body!.planId),
+        planId: plan.id,
+        interval,
         returnBase: RETURN,
         /* Stripe's current price for this plan, which is not the environment
            variable once the console has edited one — a Stripe price is

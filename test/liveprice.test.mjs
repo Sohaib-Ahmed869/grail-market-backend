@@ -12,7 +12,8 @@
 //
 // Starter and Dealer are in the fixture too, untouched and with no
 // default_price on the product, because the resolver must not break the plans
-// that were fine.
+// that were fine. Starter has since been retired (GM001-32): it is still in
+// Stripe but no longer offered, so it is no longer resolved.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -72,12 +73,15 @@ test("an archived pinned price still finds its product's live price", async () =
 
 test("the plans that were never broken keep working", async () => {
   const { out } = await resolve(REAL);
-  // No default_price on either product: exactly one active price is
+  // No default_price on the product: exactly one active price is
   // unambiguous, so it is used.
-  assert.equal(out.get("starter").priceId, "price_1UAlLoETuJs3mqsFrtbAOY8x");
-  assert.equal(out.get("starter").amountCents, 500);
   assert.equal(out.get("dealer").priceId, "price_1UAlLrETuJs3mqsFqxIAAxrD");
   assert.equal(out.get("dealer").amountCents, 2000);
+  // Still the old A$20 Stripe holds, and reported as drifted from the A$69.99
+  // the client confirmed — Stripe is the truth until its prices are recreated.
+  assert.equal(out.get("dealer").driftedFrom, 6999);
+  // Retired, so not offered even though Stripe still holds a price for it.
+  assert.equal(out.has("starter"), false);
 });
 
 test("a real price change reaches the app", async () => {
@@ -88,8 +92,9 @@ test("a real price change reaches the app", async () => {
   ];
   const { out } = await resolve(raised);
   assert.equal(out.get("collector").amountCents, 1100);
-  // plans.ts still says 1000, and the difference is reported rather than lost.
-  assert.equal(out.get("collector").driftedFrom, 1000);
+  // plans.ts says the confirmed 1999, and the difference is reported rather
+  // than lost.
+  assert.equal(out.get("collector").driftedFrom, 1999);
 });
 
 test("two active prices and no default is not guessed at", async () => {
@@ -128,4 +133,57 @@ test("one Stripe request serves every plan", async () => {
   const { calls } = await resolve(REAL);
   assert.equal(calls.length, 1);
   assert.ok(calls[0].includes("expand[]=data.product"));
+});
+
+// ---- monthly and yearly on one product (GM001-32) -----------------------------
+
+const yearly = (id, product, cents, active, defaultPrice = null) => ({
+  id, active, unit_amount: cents, currency: "aud", recurring: { interval: "year" },
+  product: { id: product, default_price: defaultPrice },
+});
+
+test("a product with a monthly and a yearly price offers both, not neither", async () => {
+  // What `npm run stripe:setup` leaves behind: the old A$10 still active, the
+  // new A$19.99 monthly as the product default, and one A$199.99 yearly.
+  const both = [
+    price("price_old10", COLLECTOR, 1000, true, "price_new1999"),
+    price("price_new1999", COLLECTOR, 1999, true, "price_new1999"),
+    yearly("price_year19999", COLLECTOR, 19999, true, "price_new1999"),
+  ];
+  const { out } = await resolve(both, {
+    STRIPE_PRICE_COLLECTOR: "price_old10",
+    STRIPE_PRICE_COLLECTOR_ANNUAL: "price_year19999",
+  });
+  const c = out.get("collector");
+  assert.equal(c.priceId, "price_new1999");
+  assert.equal(c.amountCents, 1999);
+  assert.equal(c.driftedFrom, null);
+  assert.equal(c.annual.priceId, "price_year19999");
+  assert.equal(c.annual.amountCents, 19999);
+  assert.equal(c.annual.driftedFrom, null);
+});
+
+test("a yearly price with no pin is used when it is the only one", async () => {
+  const both = [
+    price("price_new1999", COLLECTOR, 1999, true, "price_new1999"),
+    yearly("price_year19999", COLLECTOR, 19999, true, "price_new1999"),
+  ];
+  const { out } = await resolve(both, { STRIPE_PRICE_COLLECTOR: "price_new1999" });
+  assert.equal(out.get("collector").annual.priceId, "price_year19999");
+});
+
+test("two yearly prices and nothing saying which leaves monthly on sale and yearly off", async () => {
+  const messy = [
+    price("price_new1999", COLLECTOR, 1999, true, "price_new1999"),
+    yearly("price_year_a", COLLECTOR, 19999, true, "price_new1999"),
+    yearly("price_year_b", COLLECTOR, 18999, true, "price_new1999"),
+  ];
+  const { out } = await resolve(messy, { STRIPE_PRICE_COLLECTOR: "price_new1999" });
+  assert.equal(out.get("collector").amountCents, 1999);
+  assert.equal(out.get("collector").annual, null);
+});
+
+test("no yearly price yet is no yearly offer, and monthly is untouched", async () => {
+  const { out } = await resolve(REAL);
+  assert.equal(out.get("collector").annual, null);
 });

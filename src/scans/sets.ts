@@ -21,6 +21,11 @@ const setCache = new TtlCache<SetDetail | null>(DAY, 200);
 export type SetSummary = {
   setId: string; name: string; logo: string | null; symbol: string | null;
   total: number; official: number; releasedAt: string | null;
+  /** How many listings carry this set, where the source is a marketplace
+   *  rather than a checklist — the sports catalogue in `sports.ts`. It is NOT
+   *  a card count and must never be shown as one: `total` stays 0 there,
+   *  because nothing we can read says how many cards the set holds. */
+  listed?: number;
 };
 
 export type SetCard = {
@@ -77,7 +82,7 @@ export async function overlayStorePrices(cards: SetCard[]): Promise<SetCard[]> {
  *  and leaves the same dash on the other three. */
 const priceCache = new TtlCache<{ rawUsd: number | null; rarity: string | null }>(DAY, 20_000);
 
-const marketOf = (t: any): number | null => {
+export const marketOf = (t: any): number | null => {
   // The primary printing's market price. A holofoil-only card has no
   // "normal"; the first printing that carries a figure is its price.
   for (const k of ["normal", "holofoil", "reverse-holofoil"]) {

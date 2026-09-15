@@ -52,6 +52,11 @@ export type AdminMember = {
   volume: number;
   rating: number;
   strikes: number;
+  /** Contact details caught by the masking rules in the last 30 days. What
+   *  was caught, never a claim about what was tried. */
+  contactAttempts: number;
+  /** A contact-sharing review is open on this member. */
+  contactReview: boolean;
   verifiedSeller: boolean;
   tags: string[];
   note?: string;
@@ -114,7 +119,10 @@ const MEMBER_SQL = `
     l.listed, l.live, l.sold, l.volume, l.last_listed,
     o.purchases,
     r.reviews, r.rating,
-    coalesce(cc.n, 0) as strikes
+    coalesce(cc.n, 0) as strikes,
+    coalesce(ca.n, 0) as contact_attempts,
+    (u.contact_review_opened_at is not null
+      and (u.contact_review_closed_at is null or u.contact_review_closed_at < u.contact_review_opened_at)) as contact_review
   from users u
   left join subscriptions s on s.user_id = u.user_id
   left join identity_status idn on idn.user_id = u.user_id
@@ -142,6 +150,12 @@ const MEMBER_SQL = `
      where c.against_id = u.user_id
        and c.outcome is not null and c.outcome <> 'none'
   ) cc on true
+  -- Masked contact details, from the record contact.store.ts writes. Its own
+  -- table, so this is one index read rather than a scan of every message.
+  left join lateral (
+    select count(*)::int n from contact_attempts a
+     where a.user_id = u.user_id and a.contact and a.at > now() - interval '30 days'
+  ) ca on true
   where u.role = 'member'
 `;
 
@@ -150,6 +164,8 @@ export async function adminMembers(q: {
   status?: string | null;
   plan?: string | null;
   verification?: string | null;
+  /** "contact": only members with an open contact-sharing review. */
+  review?: string | null;
   limit?: number;
 }): Promise<AdminMember[]> {
   const pool = storePool();
@@ -175,6 +191,11 @@ export async function adminMembers(q: {
     if (level === "id-verified") where.push("idn.status = 'Approved'");
     else if (level === "id-submitted") where.push("idn.status is not null and idn.status <> 'Approved'");
     else where.push("idn.status is null");
+  }
+
+  if (q.review === "contact") {
+    where.push(`u.contact_review_opened_at is not null
+      and (u.contact_review_closed_at is null or u.contact_review_closed_at < u.contact_review_opened_at)`);
   }
 
   args.push(Math.min(q.limit ?? 200, 500));
@@ -386,6 +407,8 @@ function shapeMember(r: any): AdminMember {
     volume: Number(r.volume ?? 0),
     rating: r.rating != null ? Number(r.rating) : 0,
     strikes: Number(r.strikes ?? 0),
+    contactAttempts: Number(r.contact_attempts ?? 0),
+    contactReview: Boolean(r.contact_review),
     verifiedSeller: r.identity === "Approved" && sales > 0,
     tags: Array.isArray(r.admin_tags) ? r.admin_tags : [],
     note: r.admin_note ?? undefined,

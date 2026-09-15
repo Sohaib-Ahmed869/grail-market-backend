@@ -43,9 +43,13 @@ export async function identifyApiTcg(names: string[]): Promise<CatalogMatch | nu
           localId: String(c.code ?? c.id ?? ""),
           rarity: c.rarity ?? null,
           imageUrl: c.images?.large ?? c.images?.small ?? null,
-          matchScore: Math.min(best.score, 1),
+          matchScore: Math.min(best.score, 0.9),
           ocrName: best.name,
           game,
+          // matched on the name alone; nothing read off the card says which
+          // printing, so none is asserted as proven
+          printingConfirmed: false,
+          unconfirmedReason: "printing-not-read",
         };
         return { identification, valuation: null };
       }

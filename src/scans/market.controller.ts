@@ -9,6 +9,7 @@ import { searchCards } from "./search.js";
 import { cardMeta } from "./demand.js";
 import { cardHedgerStatus } from "./cardhedger.js";
 import { getSet, listSets } from "./sets.js";
+import { sealedPage } from "./sealed.js";
 import { gameOfCard, gamesWithPreviews, setDetailForGame, setIdOfCard, setsForGame } from "./games.js";
 import { interestIn } from "./interest.js";
 import { gradedPricesFor, priceForSlab } from "./pricing.js";
@@ -18,6 +19,34 @@ import { readPrinting } from "./printing.js";
 import { printingsFor, priceIsAmbiguous } from "../printings/store.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
 import { identifyBySetCode } from "./setcode.js";
+import { MAX_ART_IDS, isSportCard, isSportGame, noFigure, sportArt, sportCardMeta } from "./sports.js";
+import { catalogueFigure, indexedCard, isCatalogueOnlyCard, listingPolicy } from "./editions.js";
+
+/** A card's price as its own catalogue lists it, found by card id.
+ *
+ *  From the index filled whenever a set is read; if the index has forgotten
+ *  (a restart) and the caller says which set the card came from, that set is
+ *  read again — it is cached for a day, so this is almost always free.
+ *
+ *  Yu-Gi-Oh is excluded on purpose: YGOPRODeck's figure belongs to the card
+ *  NAME across every set it was printed in, not to this printing, and a
+ *  Starlight Rare priced at its common reprint is the defect this file exists
+ *  to prevent. */
+async function catalogueRawFor(cardId?: string | null, setId?: string | null): Promise<number | null> {
+  if (!cardId || cardId.startsWith("ygo-")) return null;
+  const held = indexedCard(cardId);
+  if (held) return held.rawUsd;
+  const from = (setId ?? "").trim();
+  if (!from) return null;
+  try {
+    const other = await setDetailForGame(from);
+    const set = other !== undefined ? other : await getSet(from);
+    const c = set?.cards.find((x: { cardId: string }) => x.cardId === cardId);
+    return c?.rawUsd ?? null;
+  } catch {
+    return null;
+  }
+}
 
 @Controller("market")
 export class MarketController {
@@ -70,6 +99,7 @@ export class MarketController {
     @Query("ja") ja?: string,
     @Query("lang") lang?: string,
     @Query("game") game?: string,
+    @Query("cardId") cardId?: string,
   ) {
     const empty = {
       listings: [], total: 0, matched: 0, trimmed: 0, query: name ?? "",
@@ -80,7 +110,12 @@ export class MarketController {
     };
     if (!name) return empty;
     const g = grade != null && grade !== "" ? Number(grade) : null;
-    return (
+    // A catalogue-only card (editions.ts): narrowed to its language where eBay
+    // titles can say it, and with no median where they cannot or where there
+    // is no card number to tell one product from another.
+    const policy = listingPolicy(cardId, number);
+    if (policy?.language) { lang = policy.language; if (policy.language === "ja") ja = "1"; }
+    const result =
       (await fetchListings({
         name,
         setName: set ?? null,
@@ -94,8 +129,17 @@ export class MarketController {
         printingHint: printing ?? null,
         japanese: ja === "1" || ja === "true",
         language: lang === "en" || lang === "ja" || lang === "zh" ? lang : null,
-      })) ?? empty
-    );
+      })) ?? empty;
+    // The rows are real asks and worth showing. The summary over them is not,
+    // for a sports entry: a median across a player's base cards, parallels and
+    // 1/1s is a number that describes none of them.
+    if (isSportGame(game) || isSportCard(cardId)) {
+      return { ...result, medianAsk: null, askLow: null, askHigh: null, unpriceable: "player-in-set" };
+    }
+    if (policy?.blankMedian) {
+      return { ...result, medianAsk: null, askLow: null, askHigh: null, unpriceable: "catalogue-price-only" };
+    }
+    return result;
   }
 
   /** Every set, newest first.
@@ -139,6 +183,29 @@ export class MarketController {
     const id = (catalogId ?? "").trim();
     if (!id) return { error: "no-id", message: "A catalogue id is required." };
 
+    // A sports id is its own record: sport, set and player are inside it.
+    if (isSportCard(id)) {
+      const meta = sportCardMeta(id);
+      if (!meta) return { error: "not-found", cardId: id };
+      // A card page opened straight from a deep link or a search has no set
+      // detail behind it, so the picture is asked for here: one call at most,
+      // and none when the art cache already knows.
+      const imageUrl = meta.imageUrl ?? (await sportArt([id]))[id] ?? null;
+      return { ...meta, imageUrl, source: "id" };
+    }
+
+    // A card read from a set listing is named by that listing, which was
+    // indexed when the set was read — no set needed, no store read.
+    if (isCatalogueOnlyCard(id)) {
+      const c = indexedCard(id);
+      if (c) {
+        return {
+          cardId: id, name: c.name, setName: c.setName, number: c.number,
+          game: c.game, imageUrl: c.imageUrl, source: "catalogue",
+        };
+      }
+    }
+
     const held = await cardMeta(id);
     if (held) {
       return {
@@ -176,6 +243,33 @@ export class MarketController {
       imageUrl: c.imageUrl ?? null,
       source: "set",
     };
+  }
+
+  /** Pictures for sports cards, for the ones on screen.
+   *
+   *  A sports set lists every player tagged in it, and the set's own call can
+   *  picture about one in fifteen. The page asks for the rest as they scroll
+   *  into view, up to twelve ids a request; anything past twelve is ignored
+   *  rather than refused, so a client that over-asks still gets its first
+   *  screenful. A null is either "eBay has no picture of this player in this
+   *  set" or "not asked right now" — the page draws a blank for both and may
+   *  ask again later. */
+  @Get("sports/art")
+  async sportsArt(@Query("ids") ids?: string) {
+    const list = String(ids ?? "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, MAX_ART_IDS);
+    return { art: await sportArt(list) };
+  }
+
+  /** A game's sealed product — boxes, tins, collections — newest set first,
+   *  a few sets a page. `supported: false` means this game (or language
+   *  edition) has no sealed catalogue, which the app says rather than showing
+   *  an empty grid. */
+  @Get("sealed")
+  async sealed(@Query("game") game?: string, @Query("cursor") cursor?: string) {
+    const g = (game ?? "").trim();
+    if (!g) return { groups: [], next: null, supported: false };
+    const c = Number(cursor);
+    return sealedPage(g, Number.isFinite(c) && c >= 0 ? Math.floor(c) : 0);
   }
 
   /** One set and the cards in it. */
@@ -326,10 +420,26 @@ export class MarketController {
     @Query("lang") lang?: string,
     // which game, so the franchise stays out of the eBay search terms
     @Query("game") game?: string,
+    // The set the card page was opened from. Only used to read that set's
+    // own price for this exact card id when nothing else priced it.
+    @Query("setId") setId?: string,
   ) {
     if (!name) return { error: "name required" };
     const g = grade != null && grade !== "" ? Number(grade) : null;
     const grade_ = Number.isFinite(g) ? (g as number) : null;
+
+    // Before anything is fetched: no store read, no provider, no eBay. A
+    // sports entry is a player within a set and has no single figure — see
+    // sports.ts — so this answers every price field null, in the normal shape.
+    if (isSportCard(cardId) || isSportGame(game)) {
+      return noFigure({ name, setName, number, grader, grade: grade_ });
+    }
+
+    // Same refusal for a catalogue-only card, with one difference: the
+    // catalogue's own figure for that exact product is allowed through.
+    if (isCatalogueOnlyCard(cardId)) {
+      return catalogueFigure({ name, setName, number, grader, grade: grade_ }, cardId!);
+    }
 
     // Same lookup the scan path uses — our store first, the provider only on a
     // miss. Calling the provider directly here is how a search came to quote a
@@ -351,7 +461,13 @@ export class MarketController {
     // raw market price already answers the question, and asks are only right
     // when the copy is a printing that price does not cover — the same rule
     // the scan path follows, so the two agree.
-    const raw = ppt.rawUsd ?? null;
+    // The set list showed a price for this card and the card page showed a
+    // dash: the chain here asks the feeds by name and number, and for most
+    // games none of them answered, while the catalogue that drew the set had
+    // the figure for this exact card id all along. Read by ID, never by name,
+    // so it cannot be another card's price.
+    const catalogueRaw = ppt.rawUsd == null ? await catalogueRawFor(cardId, setId) : null;
+    const raw = ppt.rawUsd ?? catalogueRaw;
     const specialPrinting = Boolean(printing && readPrinting(printing).family);
     // A recorded sale normally means we do not need the asking market. It is
     // not enough when that sale contradicts its own grade ladder — a BGS 8.5
@@ -427,6 +543,7 @@ export class MarketController {
       grader: grader ?? null,
       grade: grade_,
       rawUsd: ambiguous ? null : raw,
+      rawSource: ambiguous || raw == null ? null : ppt.rawUsd != null ? "market" : "catalogue",
       variants,
       variantsAmbiguous: ambiguous,
       byGrader: ppt.byGrader ?? null,

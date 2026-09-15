@@ -121,10 +121,17 @@ export function canWithdraw(userId: string, d: Dispute): boolean {
   return userId === d.raisedBy && (d.status === "open" || d.status === "answered");
 }
 
-/** Neither party. A dispute decided by one of the two people arguing is not a
- *  decision, and the caller is expected to have checked for staff — this
- *  states the half of the rule that does not depend on who is staff. */
-export function canResolve(userId: string, d: Dispute): boolean {
+/** Staff who may decide conduct, and neither party.
+ *
+ *  This used to state only the second half and trust the caller to check the
+ *  first. The caller did not: the member route checked for a signed-in user,
+ *  so any account at all could settle a stranger's dispute and choose who
+ *  keeps the money. Staff standing is now an argument the rule cannot be
+ *  called without, and it defaults to "not staff". A staff member who is a
+ *  party is still refused — a role does not make someone neutral about their
+ *  own trade. */
+export function canResolve(userId: string, d: Dispute, deciderIsStaff = false): boolean {
+  if (!deciderIsStaff) return false;
   if (d.status === "resolved" || d.status === "withdrawn") return false;
   return userId !== d.raisedBy && userId !== d.against;
 }

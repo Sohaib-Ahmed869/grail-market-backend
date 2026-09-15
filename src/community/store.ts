@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
 import { censor } from "./censor.js";
+import { interceptEnabled, recordContactAttempt } from "../admin/contact.store.js";
 
 // Communities, posts, comments, votes.
 //
@@ -323,16 +324,25 @@ export async function createPost(p: {
   const t = censor(p.title);
   const b = censor(p.body ?? "");
   const flags = [...new Set([...t.hits, ...b.hits])];
+  // Masking can be switched off in the console; recording cannot.
+  const intercept = await interceptEnabled();
+  const titleMasked = intercept && t.masked;
+  const bodyMasked = intercept && b.masked;
 
   const id = `p_${randomUUID().slice(0, 12)}`;
   await pool.query(
     `insert into posts (post_id, community_id, author_id, title, body, image_url,
                         catalog_id, listing_id, score, raw_title, raw_body, flags)
      values ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,$10,$11)`,
-    [id, communityId, p.authorId, t.text, b.text || null, p.imageUrl ?? null,
+    [id, communityId, p.authorId, titleMasked ? t.text : p.title,
+     (bodyMasked ? b.text : p.body) || null, p.imageUrl ?? null,
      p.catalogId ?? null, p.listingId ?? null,
-     t.masked ? p.title : null, b.masked ? p.body : null, flags],
+     titleMasked ? p.title : null, bodyMasked ? p.body : null, flags],
   );
+  void recordContactAttempt({
+    userId: p.authorId, source: "post", ref: id, context: id, flags,
+    masked: titleMasked || bodyMasked,
+  });
   // Posting is an upvote. It keeps a new post off the bottom of hot, and it
   // means the score never starts at zero, which reads as "nobody liked this"
   // rather than "nobody has seen it".
@@ -348,13 +358,17 @@ export async function addComment(c: {
   const pool = storePool();
   if (!pool) return null;
   const r = censor(c.body);
+  const masked = r.masked && (await interceptEnabled());
   const id = `k_${randomUUID().slice(0, 12)}`;
   await pool.query(
     `insert into comments (comment_id, post_id, parent_id, author_id, body, score, raw_body, flags)
      values ($1,$2,$3,$4,$5,1,$6,$7)`,
-    [id, c.postId, c.parentId ?? null, c.authorId, r.text,
-     r.masked ? c.body : null, r.hits],
+    [id, c.postId, c.parentId ?? null, c.authorId, masked ? r.text : c.body,
+     masked ? c.body : null, r.hits],
   );
+  void recordContactAttempt({
+    userId: c.authorId, source: "comment", ref: id, context: c.postId, flags: r.hits, masked,
+  });
   await pool.query(
     `insert into votes (target_kind, target_id, user_id, value) values ('comment',$1,$2,1)
      on conflict do nothing`, [id, c.authorId]);

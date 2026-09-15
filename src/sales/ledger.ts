@@ -119,6 +119,9 @@ export async function recentSales(
   grader: string | null,
   grade: string | null,
   limit = 5,
+  /** Ungraded sales only. Without it a null grader means "any grader", which
+   *  is right for a sales list and wrong for a price. */
+  opts: { rawOnly?: boolean } = {},
 ): Promise<Sale[]> {
   const pool = storePool();
   if (!pool) return [];
@@ -129,13 +132,47 @@ export async function recentSales(
       where catalog_id = $1
         and ($2::text is null or grader = $2)
         and ($3::text is null or grade  = $3)
+        and ($5::boolean is not true or grader is null)
       order by sold_at desc
       limit $4`,
-    [catalogId, grader, grade, Math.min(limit, 50)],
+    [catalogId, grader, grade, Math.min(limit, 50), Boolean(opts.rawOnly)],
   );
   return r.rows.map((x: any) => ({
     saleId: x.sale_id, catalogId: x.catalog_id, grader: x.grader, grade: x.grade,
     price: x.price, currency: x.currency, soldAt: x.sold_at,
+    source: x.source, sourceUrl: x.source_url, rawTitle: x.raw_title,
+  }));
+}
+
+/** Every sale for one exact key in the last `days`, newest first — the
+ *  evidence for the 7 and 30-day windows. Read only; the ledger is never
+ *  changed here. `rawOnly` means ungraded sales, as in `recentSales`. */
+export async function salesSince(
+  catalogId: string,
+  grader: string | null,
+  grade: string | null,
+  days: number,
+  opts: { rawOnly?: boolean } = {},
+): Promise<Sale[]> {
+  const pool = storePool();
+  if (!pool) return [];
+  const r = await pool.query(
+    `select sale_id, catalog_id, grader, grade, price::float, currency,
+            sold_at, source, source_url, raw_title
+       from sales_ledger
+      where catalog_id = $1
+        and ($2::text is null or grader = $2)
+        and ($3::text is null or grade  = $3)
+        and ($5::boolean is not true or grader is null)
+        and sold_at >= now() - ($4::int * interval '1 day')
+      order by sold_at desc
+      limit 500`,
+    [catalogId, grader, grade, Math.min(Math.max(days, 1), 120), Boolean(opts.rawOnly)],
+  );
+  return r.rows.map((x: any) => ({
+    saleId: x.sale_id, catalogId: x.catalog_id, grader: x.grader, grade: x.grade,
+    price: x.price, currency: x.currency,
+    soldAt: x.sold_at instanceof Date ? x.sold_at.toISOString() : String(x.sold_at),
     source: x.source, sourceUrl: x.source_url, rawTitle: x.raw_title,
   }));
 }

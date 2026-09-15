@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { storePool } from "../cards.store.js";
-import { PLANS, findPlan, priceIdFor, type PlanId } from "../billing/plans.js";
+import { PAID_PLANS, PRICING, findPlan, priceIdFor, type PlanId } from "../billing/plans.js";
 
 // Subscriptions and boosts, as the console reads them.
 //
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS listing_boosts (
   boost_id     text PRIMARY KEY,
   listing_id   text NOT NULL,
   user_id      text NOT NULL,
-  -- 'day' | 'week' | 'month'
+  -- 'priority' | 'featured' | 'spotlight' (older rows: 'day' | 'week' | 'month')
   tier         text NOT NULL,
   amount_cents integer NOT NULL,
   currency     text NOT NULL DEFAULT 'AUD',
@@ -101,55 +101,86 @@ export async function initCommerce(): Promise<void> {
 }
 
 /**
- * The three boost products, from the feature set: A$4 a day, A$12 a featured
- * week, A$35 a featured month.
+ * The boost products, at the client's confirmed prices (GM001-32, pricing
+ * brief of 1 September): Priority Boost A$4.99 for 48 hours, Featured A$9.99
+ * for seven days, Spotlight A$19.99 for seven days. The amounts come from
+ * PRICING in billing/plans.ts, the one place every charged figure lives.
  *
  * Held here rather than in Stripe because, unlike a plan price, these decide
- * behaviour as well as amount — `days` is how long the listing stays up and
- * `featured` is whether it reaches the rail at all. A number that changes what
- * the software does belongs in the software.
+ * behaviour as well as amount — how long the listing stays up and whether it
+ * reaches the featured rail at all. A number that changes what the software
+ * does belongs in the software.
+ *
+ * How each maps onto what the marketplace can do today. The rail orders by
+ * `listings.featured_until`, latest first, and that is the only placement
+ * lever that exists:
+ *
+ *   priority   48 hours of `featured_until`. Intended as a lift within the
+ *              listing's own category rather than the featured rail; the
+ *              marketplace has no category-only lift yet, so today it
+ *              behaves like a short featured window. `featured: false`
+ *              records the intent for when that lift exists.
+ *   featured   seven days on the featured rail.
+ *   spotlight  seven days on the featured rail, marked `spotlight`. "Top
+ *              placement" above other featured listings is not a separate
+ *              mechanism yet — flagged so it can be built without a data
+ *              change.
+ *
+ * Boost purchase by members is not built: there is no endpoint for it yet,
+ * and store billing is where it will be sold (see plans.ts).
  */
-export type BoostTierKey = "day" | "week" | "month";
+export type BoostTierKey = "priority" | "featured" | "spotlight";
+type LegacyBoostTierKey = "day" | "week" | "month";
 
 export type BoostTier = {
-  key: BoostTierKey;
+  key: BoostTierKey | LegacyBoostTierKey;
   name: string;
   /** AUD cents. */
   amountCents: number;
+  /** How long it runs. `days` is what the apply step reads, rounded up. */
+  hours: number;
   days: number;
   /** The featured rail, or only a lift within the listing's own category. */
   featured: boolean;
+  /** Top placement among featured listings — see the mapping note above. */
+  spotlight?: boolean;
+  /** Bought under the old price list; resolvable, never offered. */
+  legacy?: boolean;
   detail: string;
 };
 
+const tier = (
+  key: BoostTierKey, name: string, cfg: { cents: number; hours: number },
+  featured: boolean, detail: string, spotlight = false,
+): BoostTier => ({
+  key, name, amountCents: cfg.cents, hours: cfg.hours, days: Math.ceil(cfg.hours / 24),
+  featured, spotlight, detail,
+});
+
 export const BOOST_TIERS: BoostTier[] = [
-  {
-    key: "day",
-    name: "Daily boost",
-    amountCents: 400,
-    days: 1,
-    featured: false,
-    detail: "Lifts one listing within its own category and grade band for 24 hours.",
-  },
-  {
-    key: "week",
-    name: "Featured week",
-    amountCents: 1200,
-    days: 7,
-    featured: true,
-    detail: "Seven days on the featured rail, plus the category lift.",
-  },
-  {
-    key: "month",
-    name: "Featured month",
-    amountCents: 3500,
-    days: 30,
-    featured: true,
-    detail: "Thirty days featured. The only tier that survives a listing being edited.",
-  },
+  tier("priority", "Priority Boost", PRICING.boosts.priority, false,
+    "Lifts one listing for 48 hours."),
+  tier("featured", "Featured", PRICING.boosts.featured, true,
+    "Seven days on the featured rail."),
+  tier("spotlight", "Spotlight", PRICING.boosts.spotlight, true,
+    "Seven days on the featured rail, marked for top placement.", true),
 ];
 
-export const boostTier = (k: string) => BOOST_TIERS.find((t) => t.key === k) ?? null;
+/** The first price list, before the client's brief. One boost was bought
+ *  as `week` and must still show and still apply. */
+const LEGACY_BOOST_TIERS: BoostTier[] = [
+  { key: "day", name: "Daily boost (old)", amountCents: 400, hours: 24, days: 1, featured: false, legacy: true,
+    detail: "Old price list: 24 hours within its own category." },
+  { key: "week", name: "Featured week (old)", amountCents: 1200, hours: 168, days: 7, featured: true, legacy: true,
+    detail: "Old price list: seven days on the featured rail." },
+  { key: "month", name: "Featured month (old)", amountCents: 3500, hours: 720, days: 30, featured: true, legacy: true,
+    detail: "Old price list: thirty days featured." },
+];
+
+export const boostTier = (k: string) =>
+  BOOST_TIERS.find((t) => t.key === k) ?? LEGACY_BOOST_TIERS.find((t) => t.key === k) ?? null;
+/** Only tiers that are on sale. A legacy key resolves through `boostTier`
+ *  but is not a thing anybody can buy. */
 export const isBoostTier = (k: string): k is BoostTierKey => BOOST_TIERS.some((t) => t.key === k);
 
 /** Where a bought boost actually is. `paid-not-applied` is the one with a
@@ -158,7 +189,7 @@ export type BoostState = "active" | "scheduled" | "expired" | "paid-not-applied"
 
 export type AdminBoost = {
   id: string;
-  tier: BoostTierKey;
+  tier: BoostTier["key"];
   tierName: string;
   listingId: string;
   card: string;
@@ -206,7 +237,7 @@ export async function boostLedger(opts: { id?: string; limit?: number } = {}): P
     const name = x.name ?? "Unknown member";
     return {
       id: x.boost_id,
-      tier: x.tier as BoostTierKey,
+      tier: x.tier as BoostTier["key"],
       tierName: boostTier(x.tier)?.name ?? x.tier,
       listingId: x.listing_id,
       card: x.card_name ?? "Listing removed",
@@ -334,6 +365,10 @@ export type AdminPlan = {
   stripePriceId: string;
   /** The env var holding it, which is what an operator has to go and set. */
   stripePriceEnv: string;
+  /** The yearly price as configured (A$), and the env var holding its Stripe
+   *  price id. Null when the plan has no yearly price. */
+  annualPrice: number | null;
+  stripeAnnualPriceEnv: string;
   /** When Stripe last confirmed the figures above. Null means never: what is
    *  on screen is the code's fallback, not what anybody is charged. */
   syncedAt: string | null;
@@ -472,7 +507,9 @@ export async function adminPlans(): Promise<AdminPlan[]> {
 
   const catalog = await planCatalog();
 
-  return PLANS.map((p) => {
+  // Paid plans only: Free has no Stripe product, no subscribers and no revenue
+  // to report, and a legacy plan nobody holds is not worth a card.
+  return PAID_PLANS.map((p) => {
     const c = counts.get(p.id) ?? { active: 0, pastDue: 0, cancelled: 0 };
     const live = catalog.get(p.id);
     /* Stripe's figure wherever we have one. The catalogue's `amountCents` is
@@ -492,6 +529,8 @@ export async function adminPlans(): Promise<AdminPlan[]> {
       stripeProductId: live?.productId ?? "",
       stripePriceId: live?.priceId ?? priceIdFor(p),
       stripePriceEnv: p.priceEnv,
+      annualPrice: p.annualCents != null ? p.annualCents / 100 : null,
+      stripeAnnualPriceEnv: p.annualPriceEnv,
       syncedAt: live?.syncedAt ?? null,
       subscribers: c.active,
       pastDue: c.pastDue,

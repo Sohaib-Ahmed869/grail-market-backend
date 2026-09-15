@@ -12,6 +12,9 @@
 import { similarity } from "./similarity.js";
 import { fetchListings } from "./ebaylistings.js";
 import { TtlCache } from "./ttlcache.js";
+import { looksLikePlayer, sportSearch } from "./sports.js";
+import { marketOf } from "./sets.js";
+import { indexCatalogueCards, indexedCard } from "./editions.js";
 
 const TCGDEX_ROOT = (process.env.TCGDEX_URL ?? "https://api.tcgdex.net/v2/en").replace(
   /\/(en|ja|fr|de|es|it|pt)$/,
@@ -31,6 +34,19 @@ export type SearchHit = {
   game: string;
   /** how well the name matched, 0..1 — shown so a weak hit reads as one */
   score: number;
+  /** The ungraded price the catalogue itself publishes for THIS card id, US$.
+   *
+   *  Only ever id-exact — the same figure the set list shows for the same
+   *  card — and null otherwise. Never a name lookup: a search result is
+   *  exactly where "Charizard" would otherwise borrow another Charizard's
+   *  price. Absent on sports rows, which have no single price at all. */
+  rawUsd?: number | null;
+};
+
+/** A published price, or null. Sources send strings, blanks and zeros. */
+const usd = (v: unknown): number | null => {
+  const n = Number(v);
+  return v != null && v !== "" && Number.isFinite(n) && n > 0 ? n : null;
 };
 
 /** Pull a pasted card title apart.
@@ -117,6 +133,8 @@ async function magic(q: string): Promise<SearchHit[]> {
     imageUrl: c.image_uris?.normal ?? c.card_faces?.[0]?.image_uris?.normal ?? null,
     game: "mtg",
     score: similarity(q, c.name ?? ""),
+    // Scryfall's price for this exact print, the field the set list reads.
+    rawUsd: usd(c.prices?.usd),
   }));
 }
 
@@ -169,6 +187,8 @@ async function buildOnePieceIndex(): Promise<SearchHit[]> {
         imageUrl: c.card_image ?? null,
         game: "onepiece",
         score: 0,
+        // Per card_image_id, so a parallel never carries its base card's price.
+        rawUsd: usd(c.market_price),
       });
     }
   }
@@ -222,6 +242,9 @@ async function yugioh(q: string): Promise<SearchHit[]> {
       imageUrl: (c.card_images ?? [])[0]?.image_url ?? null,
       game: "yugioh",
       score: similarity(q, c.name ?? ""),
+      // Deliberately none. YGOPRODeck's figure belongs to the card NAME across
+      // every set it was printed in, not to this printing.
+      rawUsd: null,
     };
   });
 }
@@ -237,6 +260,9 @@ async function enrich(hits: SearchHit[], locale: "en" | "ja"): Promise<void> {
       if (!d) return;
       h.setName = d.set?.name ?? h.setId;
       h.rarity = d.rarity ?? null;
+      // TCGplayer's price for this card id, English only — the same reading
+      // the set list makes. A Japanese card never takes a price from here.
+      if (locale === "en") h.rawUsd = marketOf(d.pricing?.tcgplayer);
       if (locale === "ja" && d.name && d.name !== h.name) h.nameLocal = d.name;
     }),
   );
@@ -274,6 +300,14 @@ export async function searchCards(q: string, limit = 24): Promise<SearchHit[]> {
   const { name, code, variant } = readQuery(raw);
   const query = name || raw;
 
+  // Sports, started alongside the card games rather than after them: it is one
+  // eBay call and the slowest thing here, and waiting for five catalogues to
+  // finish before starting it would add its whole latency to every search.
+  // Never for a printed code — "OP13-119" is not a person, and that call is
+  // exactly the spend worth not making.
+  const sportsPending =
+    !code && looksLikePlayer(query) ? sportSearch(query).catch(() => []) : Promise.resolve([]);
+
   const [en, ja, mtg, op, ygo] = await Promise.all([
     pokemon(query, "en"),
     pokemon(query, "ja"),
@@ -292,6 +326,24 @@ export async function searchCards(q: string, limit = 24): Promise<SearchHit[]> {
     enrich(all.filter((h) => en.includes(h)), "en"),
     enrich(all.filter((h) => jaKept.includes(h)), "ja"),
   ]);
+
+  // Anything still unpriced may have been priced when its set was opened —
+  // the index is keyed on the card id, so it cannot be a different card.
+  // Priced hits are indexed in turn, so the card page a result opens reads
+  // the SAME figure the result showed rather than a second opinion.
+  for (const h of all) {
+    if (h.rawUsd == null && !h.cardId.startsWith("ygo-")) h.rawUsd = indexedCard(h.cardId)?.rawUsd ?? null;
+    if (h.rawUsd != null && !indexedCard(h.cardId)) {
+      indexCatalogueCards(
+        { setId: h.setId, name: h.setName, cards: [{ cardId: h.cardId, name: h.name, localId: h.localId, imageUrl: h.imageUrl, rawUsd: h.rawUsd, rarity: h.rarity }] },
+        { game: h.game },
+      );
+    }
+  }
+
+  // After the card games, never mixed in: a catalogue card is an exact card
+  // and a sports entry is a player within a set, so the exact thing leads.
+  all.push(...(await sportsPending));
 
   // No catalogue we hold covers every game — Dragon Ball Fusion World, Gundam,
   // Union Arena, sports. A card we cannot name in a catalogue can still be

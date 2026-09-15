@@ -393,9 +393,12 @@ export async function withdrawDispute(
   return { ok: true };
 }
 
-/** Settle it. Not reachable by either party — see `canResolve`. */
+/** Settle it. Staff with the conduct capability only, and never a party —
+ *  see `canResolve`. `deciderIsStaff` is established by the route from the
+ *  admin guard, not claimed by the caller. */
 export async function resolveDispute(a: {
   disputeId: string; byUserId: string; outcome: string; note?: string | null;
+  deciderIsStaff: boolean;
 }): Promise<{ ok: boolean; message?: string }> {
   const pool = storePool();
   if (!pool) return { ok: false, message: "Unavailable right now." };
@@ -407,12 +410,14 @@ export async function resolveDispute(a: {
   const row = r.rows[0];
   if (!row) return { ok: false, message: "That dispute doesn't exist." };
   const d = { raisedBy: row.raised_by, against: row.against_id, status: row.status as Status };
-  if (!canResolve(a.byUserId, d)) {
+  if (!canResolve(a.byUserId, d, a.deciderIsStaff)) {
     return {
       ok: false,
-      message: d.status === "resolved" || d.status === "withdrawn"
-        ? "This one is already settled."
-        : "A dispute can't be decided by either side of it.",
+      message: !a.deciderIsStaff
+        ? "Only Grail Market staff can settle a dispute."
+        : d.status === "resolved" || d.status === "withdrawn"
+          ? "This one is already settled."
+          : "A dispute can't be decided by either side of it.",
     };
   }
 
