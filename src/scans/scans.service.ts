@@ -632,7 +632,12 @@ export class ScansService {
               name: llm.name,
               setId: "",
               setName: [llm.setName, llm.edition].filter(Boolean).join(" · ") || "Unknown set",
-              localId: "",
+              // A sports card's number is on the back, so the front photo
+              // cannot show it, and without it "2003-04 Topps Chrome LeBron"
+              // also finds his Bowman #123 at a different price. Taken from
+              // the model for sports only: it narrows the asks search and
+              // never prices anything (printingConfirmed stays false).
+              localId: llm.game === "sports" && llm.number ? llm.number : "",
               rarity: null,
               imageUrl: null,
               matchScore: 0.6,

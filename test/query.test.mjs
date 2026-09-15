@@ -13,6 +13,7 @@ import {
   setInTitle,
   setWords,
   searchableSetName,
+  querySetName,
 } from "../src/scans/ebaylistings.js";
 
 test("a decorative glyph does not cost us the whole name", () => {
@@ -163,4 +164,36 @@ test("set words drop the franchise and the filler", () => {
   const w = setWords("One Piece x Baskin Robbins Campaign Collection Card", "onepiece");
   assert.deepEqual(w, ["BASKIN", "ROBBINS", "CAMPAIGN", "COLLECTION"]);
   assert.deepEqual(setWords("Dragon Frontiers", "pokemon"), ["DRAGON", "FRONTIERS"]);
+});
+
+// A 2003-04 Topps Chrome LeBron James rookie, scanned on the live site on
+// 2026-09-15. The vision model named it "Topps Chrome · 2003-04", the middle
+// dot failed the Japanese-set test, and the whole set was dropped: eBay was
+// asked for "LeBron James" and the page showed 2025-26 parallels. With the set
+// kept, the same search returns the #111 rookie at around US$3,500.
+test("a set joined for display is still searched on", () => {
+  assert.equal(querySetName("Topps Chrome · 2003-04"), "Topps Chrome 2003-04");
+  assert.equal(querySetName("Base Set • 1st Edition"), "Base Set 1st Edition");
+  assert.equal(querySetName("Dragon Frontiers"), "Dragon Frontiers");
+});
+
+test("a set we cannot search on is still dropped", () => {
+  assert.equal(querySetName("ポケモンカード151"), null);
+  assert.equal(querySetName("Unknown set"), null);
+  assert.equal(querySetName(""), null);
+  assert.equal(querySetName(null), null);
+});
+
+test("a card skin or sticker is not the card", async () => {
+  const { NOT_ONE_CARD } = await import("../src/scans/ebaylistings.js");
+  // listed at $8.50 among $3,500 copies of the real card
+  assert.ok(NOT_ONE_CARD.test("2003 Topps Chrome LeBron James #111 RC - Credit Card Skin w/ Chip Cutout"));
+  assert.ok(NOT_ONE_CARD.test("LeBron James rookie sticker decal"));
+  assert.ok(!NOT_ONE_CARD.test("2003-04 Topps Chrome - LeBron James #111 (RC)"));
+});
+
+test("the number filter keeps what the single-card filter removed out", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../src/scans/ebaylistings.ts", import.meta.url), "utf8");
+  // a skin and a complete set both carry #111; they must stay out once dropped
+  assert.match(src, /const sameCard = filtered\.filter\(/);
 });

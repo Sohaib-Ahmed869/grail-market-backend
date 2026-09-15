@@ -18,10 +18,13 @@ export type LlmIdentification = {
   /** the ART/PRINTING this copy is, where the card has more than one.
    *  Identification, not valuation: which product it is, never what it costs. */
   printing: string | null;
+  /** The collector number. Only used to narrow a sports search, where the
+   *  number is on the back and the front photo cannot show it. */
+  number?: string | null;
 };
 
 const PROMPT = `Identify this trading card from the photo. Respond with JSON only:
-{"name": "...", "game": "pokemon|mtg|yugioh|onepiece|lorcana|digimon|starwars|dragonball|gundam|unionarena|riftbound|sports|other", "setName": "... or null", "edition": "... or null", "language": "en|ja|other|unknown", "printing": "... or null", "confident": true|false}
+{"name": "...", "game": "pokemon|mtg|yugioh|onepiece|lorcana|digimon|starwars|dragonball|gundam|unionarena|riftbound|sports|other", "setName": "... or null", "edition": "... or null", "language": "en|ja|other|unknown", "printing": "... or null", "number": "... or null", "confident": true|false}
 Rules:
 - "name" is the card's title exactly as officially known (English official name if it exists).
 - "printing" names WHICH ART/VERSION of this card it is, when the same card
@@ -29,6 +32,9 @@ Rules:
   "alternate art", "parallel", "wanted poster SP", "full art", "reverse holo",
   "1st edition", "shadowless". Judge it from the artwork you can see. Use null
   if the card has only one printing or you cannot tell.
+- "number" is the card's collector number as printed ("111", "OP05-119", "4/102").
+  For a sports card, where it is printed on the back, give the checklist number
+  of this exact card only if you are certain of it. Otherwise null.
 - If you are not reasonably sure of a field, use null (or "confident": false).
 - Do NOT guess condition, grades, or monetary value. Identification only.`;
 
@@ -113,6 +119,12 @@ export async function identifyWithGemini(
       edition: typeof parsed.edition === "string" ? parsed.edition : null,
       language: typeof parsed.language === "string" ? parsed.language : null,
       printing: typeof parsed.printing === "string" ? parsed.printing : null,
+      number:
+        typeof parsed.number === "number"
+          ? String(parsed.number)
+          : typeof parsed.number === "string" && parsed.number.trim()
+            ? parsed.number.trim().replace(/^#\s*/, "")
+            : null,
     };
   } catch {
     return null;

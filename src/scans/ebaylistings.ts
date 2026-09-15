@@ -89,7 +89,7 @@ export type ListingResult = {
  *  what this card is worth, and they sit at both ends of the range where they
  *  do the most damage to a median. */
 export const NOT_ONE_CARD =
-  /\b(lot|lots|bundle|bulk|collection|joblot|job lot|break|breaks|random|mystery|repack|custom|proxy|proxies|reprint|orica|digital|read desc|damaged|cracked|scratched|reholder|empty|case only|sleeve|toploader|binder|playset|\d{2,}\s*cards?)\b|\b(art|complete|full|master|sequential)\s+set\b|\bsequential\b|\bset\s+of\s+\d+\b/i;
+  /\b(lot|lots|bundle|bulk|collection|joblot|job lot|break|breaks|random|mystery|repack|custom|proxy|proxies|reprint|reproduction|orica|digital|skin|skins|sticker|stickers|decal|read desc|damaged|cracked|scratched|reholder|empty|case only|sleeve|toploader|binder|playset|\d{2,}\s*cards?)\b|\b(art|complete|full|master|sequential)\s+set\b|\bsequential\b|\bset\s+of\s+\d+\b/i;
 
 /** How long an ask must stand before its failure to sell is evidence.
  *  eBay fixed-price listings renew automatically, so two full months is a
@@ -370,6 +370,20 @@ export function setWords(setName: string, game?: string | null): string[] {
     .filter((w) => w.length >= 3 && !SET_STOPWORDS.has(w));
 }
 
+/** The set name as it may be searched on, or null when it cannot be.
+ *
+ *  A set joined for display ("Topps Chrome · 2003-04") is still an English set
+ *  name. The non-ASCII test exists for Japanese set names, and run on the raw
+ *  string it threw the whole set away over the middle dot: a 2003-04 Topps
+ *  Chrome LeBron James rookie searched eBay as "LeBron James" and came back as
+ *  2025-26 parallels at $9 to $999, while the card itself lists near $3,500. */
+export function querySetName(setName?: string | null): string | null {
+  if (!setName) return null;
+  const joined = setName.replace(/\s*[\u00b7\u2022|]\s*/g, " ").trim();
+  if (!joined || /^unknown set$/i.test(joined)) return null;
+  return /[^\u0000-\u007F]/.test(joined) ? null : joined;
+}
+
 export function setInTitle(title: string, setName: string): boolean {
   const words = setName
     .toUpperCase()
@@ -546,12 +560,9 @@ export async function fetchListings(opts: {
   // an XY Flashfire Charizard EX, a Crystal Guardians 4/100 and an Italian
   // Dragon holo — every one a different card, spanning $430 to $23,302.
   const numberIsQualified = Boolean(number && /[A-Za-z]/.test(number));
-  if (
-    (!number || !numberIsQualified) &&
-    opts.setName &&
-    !/[^\u0000-\u007F]/.test(opts.setName)
-  ) {
-    parts.push(clean(searchableSetName(opts.setName, opts.game)));
+  const setForQuery = querySetName(opts.setName);
+  if ((!number || !numberIsQualified) && setForQuery) {
+    parts.push(clean(searchableSetName(setForQuery, opts.game)));
   }
   for (const t of opts.extraTokens ?? []) {
     const c = t ? clean(String(t)) : "";
@@ -630,7 +641,10 @@ export async function fetchListings(opts: {
     // number in the title, so this is a cheap and reliable way to reject the
     // wrong card from the right set — which is most of the noise.
     if (number) {
-      const sameCard = listings.filter((l) => numberInTitle(l.title, number));
+      // From what survived the single-card filter, not from everything eBay
+      // returned: starting again from `listings` let a $8.50 card skin and a
+      // $13,995 complete set back in among $3,500 LeBron rookies.
+      const sameCard = filtered.filter((l) => numberInTitle(l.title, number));
       if (sameCard.length >= 2) filtered = sameCard;
       else if (sameCard.length === 0) {
         // EVERY listing that says which card it is says a DIFFERENT one.
