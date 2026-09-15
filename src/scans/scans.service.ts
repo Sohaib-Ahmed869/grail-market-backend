@@ -18,6 +18,7 @@ import { fetchListings } from "./ebaylistings.js";
 import { readPrinting } from "./printing.js";
 import { readSetCode, readOnePieceCode, identifyBySetCode, isSealedProduct } from "./setcode.js";
 import { isPriceable, nameOnCard } from "./printingproof.js";
+import { isFurnitureName, personNameFromTexts } from "./describedname.js";
 import { recordScan, recordWeakResult, withScan } from "./ledger.js";
 import { graderTier } from "./graders.js";
 import { labelTokens, rawGradedDivergence } from "./labeltokens.js";
@@ -657,7 +658,7 @@ export class ScansService {
         // "OFFLINEREGIONALFINALISTV2"; a character name off the card face
         // comes through as an ordinary word. Preferring the short candidate is
         // what separates "Crocodile" from the product line printed above it.
-        const pick = pickDescribedName(names);
+        const pick = pickDescribedName(names, frontRes.ocr.texts ?? []);
         scan.identification = {
           cardId: "described",
           name: titleCase(pick),
@@ -1776,11 +1777,24 @@ export function classifyWeakness(
  *  printed above it — and grading furniture has already been filtered out of
  *  these by NOT_A_NAME before they get here.
  */
-export function pickDescribedName(names: string[]): string {
-  const notGlued = names.filter((n) => !/[A-Z0-9]{20,}/.test(String(n)));
-  const pool = notGlued.length ? notGlued : names;
+export function pickDescribedName(names: string[], texts: readonly string[] = []): string {
+  // Card-brand words, fragments of them and team names are not card names —
+  // see describedname.ts, and the Topps Chrome LeBron James that came back as
+  // "Pps".
+  const usable = names.filter((n) => !isFurnitureName(n));
+  const notGlued = usable.filter((n) => !/[A-Z0-9]{20,}/.test(String(n)));
+  const pool = notGlued.length ? notGlued : usable;
   const caps = pool.filter((n) => n === n.toUpperCase() && /[A-Z]{3,}/.test(n));
-  return (
-    caps.find((n) => n.trim().split(/\s+/).length >= 2) ?? caps[0] ?? pool[0] ?? names[0] ?? ""
-  );
+  const pick = caps.find((n) => n.trim().split(/\s+/).length >= 2) ?? caps[0] ?? pool[0] ?? "";
+
+  // A person's name printed as consecutive words beats a lone word that is
+  // part of it ("LEBRON" -> "LEBRON JAMES"), and beats having nothing usable.
+  const person = personNameFromTexts(texts);
+  if (person) {
+    const single = pick && pick.trim().split(/\s+/).length === 1;
+    if (!pick || (single && person.split(/\s+/).some((w) => w === pick.trim().toUpperCase()))) {
+      return person;
+    }
+  }
+  return pick || person || names[0] || "";
 }

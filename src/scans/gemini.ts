@@ -40,33 +40,60 @@ export async function identifyWithGemini(
   if (!key) return null;
 
   try {
+    // Each model gets its own attempt, and a failure moves on to the next one.
+    //
+    // This used to put one 30-second timeout on the whole call and let the
+    // timeout throw straight out of the loop. So when the primary model was
+    // overloaded — the free tier answers 503 or simply hangs under load — the
+    // fallback model was never asked at all, and the scan fell through to
+    // naming the card from stray OCR text. A clear LeBron James came back as
+    // "Pps" (the end of the Topps logo) that way. Asked directly, the same
+    // photo timed out twice in three tries on the primary and answered fine on
+    // the lite model.
+    //
+    // The primary gets a short leash; the lite model, which has spare capacity
+    // when flash does not, gets a retry on a transient failure.
     let text: string | undefined;
-    for (const model of MODELS) {
-      recordUsage("gemini");
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: PROMPT },
-                  { inline_data: { mime_type: mimeType, data: imageB64 } },
+    for (const [index, model] of MODELS.entries()) {
+      const attempts = index === 0 ? 1 : 2;
+      for (let attempt = 0; attempt < attempts && !text; attempt++) {
+        recordUsage("gemini");
+        let transient = true;
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+            {
+              method: "POST",
+              headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    parts: [
+                      { text: PROMPT },
+                      { inline_data: { mime_type: mimeType, data: imageB64 } },
+                    ],
+                  },
                 ],
-              },
-            ],
-            generationConfig: { responseMimeType: "application/json", temperature: 0 },
-          }),
-          signal: AbortSignal.timeout(30000),
-        },
-      );
-      if (res.ok) {
-        const body = (await res.json()) as Record<string, any>;
-        text = body.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) break;
+                generationConfig: { responseMimeType: "application/json", temperature: 0 },
+              }),
+              signal: AbortSignal.timeout(index === 0 ? 12_000 : 20_000),
+            },
+          );
+          if (res.ok) {
+            const body = (await res.json()) as Record<string, any>;
+            text = body.candidates?.[0]?.content?.parts?.[0]?.text;
+          } else {
+            // overloaded or rate-limited is worth another go; a bad request is not
+            transient = res.status === 503 || res.status === 429 || res.status >= 500;
+            console.warn(`[gemini] ${model} answered ${res.status}`);
+          }
+        } catch (err) {
+          console.warn(`[gemini] ${model} failed: ${(err as Error).name}`);
+        }
+        if (!transient) break;
+        if (!text && attempt + 1 < attempts) await new Promise((r) => setTimeout(r, 800));
       }
+      if (text) break;
     }
     if (!text) return null;
     const parsed = JSON.parse(text) as Record<string, unknown>;
