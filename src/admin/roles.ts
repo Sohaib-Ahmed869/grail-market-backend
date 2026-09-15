@@ -29,13 +29,16 @@ export type Capability =
   | "audit.read"
   | "announce.write"
   | "catalog.write"
-  | "settings.write";
+  | "settings.write"
+  /* Run card images through the real scan pipeline from the console and
+     record whether each answer was right — the accuracy check. */
+  | "scans.test";
 
 const ALL: Capability[] = [
   "dashboard.read", "listings.review", "members.read", "members.act", "team.read",
   "conduct.decide", "support.read", "support.reply", "id.exceptions", "billing.read",
   "pricing.read", "reports.read", "audit.read", "announce.write", "catalog.write",
-  "settings.write",
+  "settings.write", "scans.test",
 ];
 
 export const CAPABILITIES: Record<Role, Capability[]> = {
@@ -54,7 +57,9 @@ export const CAPABILITIES: Record<Role, Capability[]> = {
 
   /* Grail Market. The listing queue: approve, reject, ask for more photos.
      No billing, no ID. */
-  moderator: ["dashboard.read", "listings.review", "members.read"],
+  /* Moderators check cards all day in the listing queue, so they can also
+     check what the scanner makes of one. */
+  moderator: ["dashboard.read", "listings.review", "members.read", "scans.test"],
 
   /* Grail Market. Reports, conduct outcomes, and the ID exceptions the
      provider could not settle. */

@@ -1,5 +1,14 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, Req } from "@nestjs/common";
+import {
+  Body, Controller, Delete, Get, Inject, Param, Post, Query, Req, UploadedFiles, UseInterceptors,
+} from "@nestjs/common";
+import { FileFieldsInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ScansService } from "../scans/scans.service.js";
+import {
+  createCheck, getCheck, isVerdict, judgeCheck, listChecks, recordRerun, snapshotOf,
+} from "./scancheck.store.js";
 import { getListing, moveListing } from "../listings/store.js";
 import { resumeAutoPausedListings } from "../disputes/store.js";
 import { notify } from "../notifications/store.js";
@@ -64,6 +73,101 @@ import {
 
 @Controller("admin")
 export class AdminController {
+  // explicit token: tsx/esbuild doesn't emit design:paramtypes for Nest DI
+  constructor(@Inject(ScansService) private readonly scans: ScansService) {}
+
+  /* ---- scan checker ----------------------------------------------------------
+   *
+   * Card photos through the SAME pipeline the app uses — not a copy of it, or
+   * the checker would be measuring something the app does not do. Each answer
+   * is kept with the image it came from, so a person can mark it right or
+   * wrong and the whole labelled set can be re-run after any pipeline change.
+   * See scancheck.store.ts for how answers are scored.
+   *
+   * Not charged against a scan quota: this is staff measuring the scanner,
+   * not a member using it. */
+
+  @Post("scans")
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [{ name: "front", maxCount: 1 }, { name: "back", maxCount: 1 }],
+      { limits: { fileSize: 25 * 1024 * 1024 } },
+    ),
+  )
+  async scanCheck(
+    @Req() req: Request,
+    @UploadedFiles() files?: { front?: Express.Multer.File[]; back?: Express.Multer.File[] },
+  ) {
+    const who = await requireCapability(req, "scans.test");
+    if (denied(who)) return who;
+    const front = files?.front?.[0];
+    if (!front) return { error: "invalid", message: "Attach a card image as `front`." };
+    let scan: any;
+    try {
+      scan = await this.scans.createFromUpload(front, files?.back?.[0]);
+    } catch (err) {
+      return { error: "scan-failed", message: (err as Error).message };
+    }
+    const check = await createCheck({
+      scanId: scan.id, actorId: who.userId, actorName: who.name, snapshot: snapshotOf(scan),
+    });
+    if (!check) return { error: "no-store", message: "The scan ran but the check could not be saved." };
+    return { check, scan };
+  }
+
+  @Get("scans")
+  async scanChecks(@Req() req: Request, @Query("limit") limit?: string, @Query("offset") offset?: string) {
+    const who = await requireCapability(req, "scans.test");
+    if (denied(who)) return who;
+    return listChecks({ limit: Number(limit), offset: Number(offset) });
+  }
+
+  @Post("scans/:id/verdict")
+  async scanVerdict(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
+    const who = await requireCapability(req, "scans.test");
+    if (denied(who)) return who;
+    if (!isVerdict(b?.verdict)) {
+      return { error: "invalid", message: "verdict must be correct, wrong or bad-photo." };
+    }
+    // A "wrong" with no actual card named is a verdict nobody can learn from.
+    if (b.verdict === "wrong" && !(typeof b.name === "string" && b.name.trim())) {
+      return { error: "invalid", message: "Say what the card actually is." };
+    }
+    const check = await judgeCheck(
+      id,
+      { verdict: b.verdict, name: b.name, set: b.set, number: b.number, catalogId: b.catalogId, note: b.note },
+      who.name ?? who.userId,
+    );
+    return check ? { check } : { error: "not-found" };
+  }
+
+  /** The same photo through the current pipeline. The verdict stays: the card
+   *  in the picture has not changed, only what the scanner says about it. */
+  @Post("scans/:id/rerun")
+  async scanRerun(@Param("id") id: string, @Req() req: Request) {
+    const who = await requireCapability(req, "scans.test");
+    if (denied(who)) return who;
+    const before = await getCheck(id);
+    if (!before) return { error: "not-found" };
+    const path = join(process.cwd(), "storage", before.sourceScanId, "front.jpg");
+    if (!existsSync(path)) {
+      return { error: "image-missing", message: "The original photo is no longer stored on this server." };
+    }
+    const buffer = readFileSync(path);
+    const file = {
+      fieldname: "front", originalname: "front.jpg", encoding: "7bit", mimetype: "image/jpeg",
+      size: buffer.length, buffer,
+    } as Express.Multer.File;
+    let scan: any;
+    try {
+      scan = await this.scans.createFromUpload(file);
+    } catch (err) {
+      return { error: "scan-failed", message: (err as Error).message };
+    }
+    const check = await recordRerun(id, scan.id, snapshotOf(scan));
+    return check ? { check, before } : { error: "not-found" };
+  }
+
   /**
    * Who is signed in, and what that opens.
    *
