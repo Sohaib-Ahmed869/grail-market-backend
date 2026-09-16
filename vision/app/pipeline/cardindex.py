@@ -81,6 +81,19 @@ def load(force: bool = False) -> "CardIndex | None":
         if not (os.path.exists(vec_path) and os.path.exists(meta_path)):
             return None
         vectors = np.load(vec_path, mmap_mode="r")
+        # An index built by the other embedder is not searchable by this one:
+        # the widths differ, and where they did not the scores would be
+        # meaningless rather than wrong-looking. Refuse it like a missing index.
+        from . import embed
+
+        if vectors.ndim != 2 or vectors.shape[1] != embed.dims():
+            print(
+                f"[cardindex] index is {getattr(vectors, 'shape', None)} but the "
+                f"{embed.backend()} embedder produces {embed.dims()} dims — rebuild it "
+                "with scripts/build_index.py",
+                flush=True,
+            )
+            return None
         with open(meta_path, encoding="utf-8") as f:
             meta = [json.loads(line) for line in f if line.strip()]
         n = min(len(meta), vectors.shape[0])

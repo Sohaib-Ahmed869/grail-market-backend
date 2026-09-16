@@ -2,6 +2,7 @@ import { TtlCache } from "./ttlcache.js";
 import { isCatalogueOnlyCard } from "./editions.js";
 import { isSportCard } from "./sports.js";
 import { recordUsage, usedToday } from "./usage.js";
+import { GRADER_ALTERNATION } from "./graders.js";
 import {
   NOT_ONE_CARD, isDesignationListing, labelFromTitle, mentionsCard,
   numberInTitle, sameForm, searchableSetName, setInTitle, setWords,
@@ -204,7 +205,10 @@ const NOT_ACTUALLY_GRADED = [
   /\bCOMES?\s+BACK\b/,
 ] as const;
 
-const GRADE_RE = /\b(PSA|BGS|BECKETT|BVG|BCCG|CGC|SGC|TAG|ACE|HGA|RCR|BRCR)\s*[-:]?\s*(\d{1,3}(?:\.5)?)\b/i;
+// Built from the one grader list (graders.ts) so a company known to the asks
+// path is known here too, plus RCR/BRCR — not a slab, but it has to be matched
+// before it can be rejected as one (invariant 3, handled below).
+const GRADE_RE = new RegExp(`\\b(${GRADER_ALTERNATION}|RCR|BRCR)\\s*[-:]?\\s*(\\d{1,3}(?:\\.5)?)\\b`, "i");
 /** PSA's qualifiers, written after the number. They mean the grade is
  *  conditional and the card trades below a clean one at the same rung, so
  *  they belong in the price key rather than being dropped. */

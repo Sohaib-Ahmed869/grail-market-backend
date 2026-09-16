@@ -7,3 +7,5 @@
 # the download and build_index.py commands.
 models/
 index/
+# index-hash/ and any other side-by-side index built to compare embedders
+index-*/

@@ -38,7 +38,11 @@ VISION = os.path.dirname(HERE)
 INDEX = os.environ.get("CARD_INDEX_DIR", os.path.join(VISION, "index"))
 SHARDS = os.path.join(INDEX, "shards")
 UA = {"User-Agent": "GrailMarket-card-index/1.0", "Accept": "*/*"}
-DIMS = 768
+
+def dims() -> int:
+    """Vector width, from whichever embedder EMBED_BACKEND selects — the two
+    backends produce different lengths and must not land in one index."""
+    return _load_embed_module().dims()
 
 
 def get(url: str, timeout: float = 60) -> bytes:
@@ -170,19 +174,27 @@ def decode(data: bytes) -> np.ndarray | None:
         return None
 
 
-_embed_batch = None
+_embed_mod = None
 
 
-def _load_embedder():
+def _load_embed_module():
     """The embed module by file path, so a worker does not import the whole
-    pipeline package — that would load the OCR models into every process."""
-    global _embed_batch
-    if _embed_batch is None:
+    pipeline package — that would load the OCR models into every process.
+
+    embed.py falls back to a path import of match.py when it is loaded this
+    way, because a file-path module has no package for `from .match` to
+    resolve against."""
+    global _embed_mod
+    if _embed_mod is None:
         spec = importlib.util.spec_from_file_location("embed", os.path.join(VISION, "app", "pipeline", "embed.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _embed_batch = mod.embed_batch
-    return _embed_batch
+        _embed_mod = mod
+    return _embed_mod
+
+
+def _load_embedder():
+    return _load_embed_module().embed_batch
 
 
 def _work(chunk):
@@ -201,7 +213,7 @@ def _work(chunk):
     with ThreadPoolExecutor(12) as ex:
         got = [(img, m) for img, m in ex.map(fetch, chunk) if img is not None]
     vecs = [embed_batch([g[0] for g in got[i:i + 16]]) for i in range(0, len(got), 16)]
-    v = np.concatenate(vecs) if vecs else np.zeros((0, DIMS), np.float32)
+    v = np.concatenate(vecs) if vecs else np.zeros((0, dims()), np.float32)
     return v.astype(np.float16), [g[1] for g in got], len(chunk) - len(got)
 
 
@@ -234,7 +246,7 @@ def build_source(name: str, workers: int, limit: int | None, force: bool) -> Non
             rate = done / max(1e-6, time.time() - t0)
             print(f"[{name}] {done}/{len(items)}  {rate:.0f} img/s  {missed} failed", flush=True)
 
-    V = np.concatenate(vecs) if vecs else np.zeros((0, DIMS), np.float16)
+    V = np.concatenate(vecs) if vecs else np.zeros((0, dims()), np.float16)
     np.save(vec_path + ".tmp.npy", V)
     os.replace(vec_path + ".tmp.npy", vec_path)
     with open(meta_path + ".tmp", "w", encoding="utf-8") as f:
@@ -257,7 +269,7 @@ def merge() -> None:
         vecs.append(v[:n])
         metas.extend(m[:n])
         print(f"[merge] {name}: {n}", flush=True)
-    V = np.concatenate(vecs).astype(np.float16) if vecs else np.zeros((0, DIMS), np.float16)
+    V = np.concatenate(vecs).astype(np.float16) if vecs else np.zeros((0, dims()), np.float16)
     tmp = os.path.join(INDEX, "vectors.tmp.npy")
     np.save(tmp, V)
     os.replace(tmp, os.path.join(INDEX, "vectors.npy"))
