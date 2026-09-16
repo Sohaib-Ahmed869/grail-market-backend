@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
-from .pipeline import run_pipeline
+from .pipeline import cardindex, embed, run_pipeline
 from .pipeline.match import (
     combined_similarity, dhash, fetch_image, hue_signature, hue_similarity,
     similarity,
@@ -72,6 +72,50 @@ async def analyze(
     del raw, data
     # card text (name, collector number) is printed on the front only
     return run_pipeline(image, include_images=include_images, read_text=kind == "front")
+
+
+@app.post("/recognize")
+async def recognize(
+    file: UploadFile | None = File(None),
+    imageB64: str | None = Form(None),
+    games: str | None = Form(None),  # comma-separated; empty searches every game
+    k: int = Form(8),
+) -> dict:
+    """Which catalogue card is this? Image recognition, not text.
+
+    Send the FLATTENED card (the `warpedImageB64` /analyze returns), as a file.
+    It is embedded with DINOv2 and compared against every card render in the
+    index; the nearest come back with their catalogue ids, names, sets and
+    numbers, best first.
+
+    `margin` is the gap between the best match and the best match that is a
+    DIFFERENT CARD (see cardindex.card_key: printings of one card are one card). Printings of one card share artwork and sit close together
+    by design — that is the number and the stamp's job — so what this answers
+    with confidence is which card, and the margin is how sure it is.
+    """
+    if not embed.available():
+        return {"available": False, "reason": "model-missing", "matches": []}
+    index = cardindex.load()
+    if index is None:
+        return {"available": False, "reason": "index-missing", "matches": []}
+    if file is not None:
+        raw = np.frombuffer(await file.read(), np.uint8)
+    elif imageB64:
+        raw = np.frombuffer(base64.b64decode(imageB64), np.uint8)
+    else:
+        raise HTTPException(status_code=422, detail="send the card as `file`")
+    img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=422, detail="could not decode image")
+
+    wanted = {g.strip() for g in (games or "").split(",") if g.strip()} or None
+    matches = index.search(embed.embed(img), k=max(1, min(int(k), 25)), games=wanted)
+    margin = None
+    if matches:
+        top = matches[0]
+        rival = next((m for m in matches[1:] if cardindex.card_key(m) != cardindex.card_key(top)), None)
+        margin = round(top["score"] - rival["score"], 4) if rival else None
+    return {"available": True, "indexSize": index.size, "matches": matches, "margin": margin}
 
 
 @app.post("/similarity")

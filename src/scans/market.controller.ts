@@ -19,7 +19,7 @@ import { readPrinting } from "./printing.js";
 import { printingsFor, priceIsAmbiguous } from "../printings/store.js";
 import { certLinks, certUrl, parseCode } from "./lookupcode.js";
 import { identifyBySetCode } from "./setcode.js";
-import { MAX_ART_IDS, isSportCard, isSportGame, noFigure, sportArt, sportCardMeta } from "./sports.js";
+import { MAX_ART_IDS, isSportCard, isSportGame, noFigure, sportArt, sportAsks, sportCardMeta } from "./sports.js";
 import { catalogueFigure, indexedCard, isCatalogueOnlyCard, listingPolicy } from "./editions.js";
 
 /** A card's price as its own catalogue lists it, found by card id.
@@ -257,7 +257,10 @@ export class MarketController {
   @Get("sports/art")
   async sportsArt(@Query("ids") ids?: string) {
     const list = String(ids ?? "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, MAX_ART_IDS);
-    return { art: await sportArt(list) };
+    // The same per-player lookup learns the cheapest copy listed, so asks
+    // ride along with the pictures at no extra eBay call.
+    const found = await sportArt(list);
+    return { art: found, asks: sportAsks(list) };
   }
 
   /** A game's sealed product — boxes, tins, collections — newest set first,

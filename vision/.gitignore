@@ -1,0 +1,9 @@
+# Paths are relative to THIS file, which already lives in vision/ — so the
+# patterns must not repeat that prefix. Written as "vision/models/" they
+# resolved to vision/vision/models/ and matched nothing, and a `git add -A`
+# would have committed the 108 MB ONNX model and the built index.
+#
+# Both are built, never committed: see the DINOv2 section in ../CLAUDE.md for
+# the download and build_index.py commands.
+models/
+index/

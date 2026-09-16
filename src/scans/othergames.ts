@@ -274,6 +274,11 @@ export async function identifySwu(names: string[]): Promise<CatalogMatch | null>
 export async function identifyOnePiece(
   setCode: string | null | undefined,
   warpedImageB64?: string | null,
+  /** The printing image recognition matched (a card_image_id such as
+   *  "OP07-085_p2"), when it was sure of it. Taken over the pairwise picker:
+   *  recognition compared the card against every printing in the catalogue at
+   *  once, where the picker only guesses between thumbnails. */
+  pictured?: { imageId: string; lead: number | null } | null,
 ): Promise<CatalogMatch | null> {
   if (!setCode || !/^(OP|ST|EB|PRB)\d{2}-\d{3}$/i.test(setCode)) return null;
   const list = (await fetchJson(
@@ -287,14 +292,24 @@ export async function identifyOnePiece(
   // and the Alternate Art resolved to whichever the API happened to list first
   // — the base, at $1.81, against about $10 for the card actually photographed.
   type OpPrinting = Record<string, any> & { imageUrl: string | null; label: string };
-  const choice = await pickPrinting<OpPrinting>(
-    printings.map((x) => ({
-      ...x,
-      imageUrl: (x.card_image as string | undefined) ?? null,
-      label: String(x.card_name ?? ""),
-    })),
-    warpedImageB64,
-  );
+  const candidates: OpPrinting[] = printings.map((x) => ({
+    ...x,
+    imageUrl: (x.card_image as string | undefined) ?? null,
+    label: String(x.card_name ?? ""),
+  }));
+  const picturedPick = pictured
+    ? candidates.find((x) => String(x.card_image_id ?? x.card_set_id).toUpperCase() === pictured.imageId.toUpperCase())
+    : undefined;
+  const choice = picturedPick
+    ? {
+        pick: picturedPick,
+        ranked: [picturedPick, ...candidates.filter((x) => x !== picturedPick)].map((x) => ({
+          candidate: x, score: x === picturedPick ? 1 : null, imageUrl: x.imageUrl,
+        })),
+        method: "visual" as const,
+        margin: pictured?.lead ?? null,
+      }
+    : await pickPrinting<OpPrinting>(candidates, warpedImageB64);
   const c: Record<string, any> = choice?.pick ?? printings[0];
 
   /* The ranking, carried rather than dropped.

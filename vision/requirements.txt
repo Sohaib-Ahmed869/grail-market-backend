@@ -6,3 +6,8 @@ rapidocr-onnxruntime==1.4.*
 numpy>=1.26,<3
 pydantic==2.*
 pytest==8.*
+
+# image recognition (app/pipeline/embed.py): DINOv2-small via onnxruntime,
+# Pillow decodes the AVIF renders scripts/build_index.py downloads
+onnxruntime>=1.18
+pillow>=11.2
