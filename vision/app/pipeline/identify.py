@@ -15,7 +15,7 @@ import re
 import cv2
 import numpy as np
 
-from .slab import extract as extract_slab
+from .slab import company_pattern, extract as extract_slab
 
 _ENGINE = None
 
@@ -30,7 +30,10 @@ SET_CODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SLAB_COMPANIES = re.compile(r"\b(PSA|BGS|BECKETT|CGC|SGC|TAG|AGS)\b", re.IGNORECASE)
+# Built from slab.TIERS, not written out again: this gate decides whether a
+# label's company is reported at all, and the hand-written copy here knew
+# neither GMG nor half the companies slab.py already tiered.
+_SLAB_COMPANIES = re.compile(r"\b(" + company_pattern() + r")\b", re.IGNORECASE)
 _COMPANY_ALIAS = {"BECKETT": "BGS"}
 # The full PSA/BGS wording ladder. The old pattern stopped at EX-MT, so a
 # genuine "EX 5" label matched nothing — and with the PSA logo unread too,
@@ -57,7 +60,7 @@ _LEADING_NUM_RE = re.compile(r"^(\d{1,3})(?=[A-Za-z])")
 _ORDINAL_RE = re.compile(r"^\d{1,3}(ST|ND|RD|TH)\b", re.IGNORECASE)
 # grading-company furniture that is never part of the card or set name
 _LABEL_NOISE = re.compile(
-    r"\b(PSA|BGS|BECKETT|CGC|SGC|TAG|AGS|GEM|MINT|MT|NM|EX[-\s]?MT|PRISTINE|"
+    r"\b(" + company_pattern() + r"|GEM|MINT|MT|NM|EX[-\s]?MT|PRISTINE|"
     r"AUTHENTIC|GRADE|POP|CERT|EDITION|1ST|UNLIMITED|SHADOWLESS)\b",
     re.IGNORECASE,
 )

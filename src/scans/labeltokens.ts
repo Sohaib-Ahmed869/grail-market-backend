@@ -25,6 +25,11 @@
 /** Words that appear on every label and therefore distinguish nothing. */
 const FURNITURE = new Set([
   "PSA", "BGS", "BECKETT", "CGC", "SGC", "TAG", "ACE", "BVG", "BCCG", "HGA", "GMA",
+  // the newer slabbers, same list as vision/app/pipeline/slab.py TIERS. A
+  // company missing here is a company whose name is treated as part of the
+  // card's printing, so two GMG slabs of different cards look alike.
+  "AGS", "MNT", "KSA", "CSG", "GMG", "ISA", "PGI", "WCG", "CGA",
+  "ARENACLUB", "RAREEDITION",
   "GEM", "GEMMT", "MINT", "MT", "NM", "PRISTINE", "UNIVERSAL", "GRADE", "GRADED",
   "AUTHENTIC", "QUALIFIER", "CERT", "POP", "LABEL", "CENTERING", "CORNERS",
   "EDGES", "SURFACE", "TRADING", "CARD", "CARDS", "GAME", "TCG", "CCG",
