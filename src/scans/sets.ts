@@ -38,6 +38,11 @@ export type SetCard = {
    *  page that printed 0 would be claiming every unpriced card is worthless. */
   rawUsd: number | null;
   rarity: string | null;
+  /** Sports only: the cheapest single copy of this player in this set on sale
+   *  right now, when it is already known. A LISTING, shown as one — never a
+   *  value, never summed into a collection, never a sell-flow seed. See
+   *  `lowestAsk` in sports.ts. */
+  askFrom?: { price: number; currency: string; count?: number | null } | null;
 };
 
 export type SetDetail = SetSummary & { cards: SetCard[] };

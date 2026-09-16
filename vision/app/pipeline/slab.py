@@ -25,9 +25,39 @@ TIERS: dict[str, str] = {
     "PSA": "premium", "BGS": "premium", "BVG": "premium",
     "CGC": "premium", "SGC": "premium",
     "TAG": "emerging", "ACE": "emerging", "AGS": "emerging", "MNT": "emerging",
+    "GMG": "emerging", "ARENA CLUB": "emerging", "RARE EDITION": "emerging",
     "BCCG": "discount", "GMA": "discount", "KSA": "discount",
-    "HGA": "discount", "CSG": "discount",
+    "HGA": "discount", "CSG": "discount", "ISA": "discount",
+    "PGI": "discount", "WCG": "discount", "CGA": "discount",
 }
+
+# THIS TABLE IS THE LIST. Every pattern below is built from it, because the
+# three that were written out by hand had already drifted apart: the fallback
+# on line ~170 never knew MNT, GMA, KSA, HGA or CSG even though the tiers here
+# did, and none of them knew GMG. A GMG 10 Josue De Paula therefore read as a
+# raw card, was priced against loose copies at A$1.39-A$7.71, and the slab it
+# is actually in was never seen. Add a company here and nowhere else.
+_ALIASES = {"BECKETT": "BGS"}
+# Companies with their own cascade rule above; the rest fall to _emerging.
+_OWN_RULES = ("PSA", "BGS", "BECKETT", "BVG", "BCCG", "CGC", "SGC")
+
+
+def _company_alternation(names) -> str:
+    """Longest first, so ARENA CLUB is not consumed as a stray word and
+    BECKETT is never shadowed. Spaces in a name are allowed to be any run of
+    whitespace, which is what OCR gives back."""
+    parts = sorted(names, key=len, reverse=True)
+    return "|".join(re.escape(p).replace(r"\ ", r"\s+") for p in parts)
+
+
+def company_pattern(extra=()) -> str:
+    """Every company we know, as regex alternation.
+
+    For the modules that gate on a label BEFORE this one parses it — see
+    identify.py — so that a company known here is known there too. That gate
+    is how a GMG slab reached the catalogue lookup as a raw card even when
+    its label was perfectly legible."""
+    return _company_alternation(list(TIERS) + list(_ALIASES) + list(extra))
 
 # PSA's grade word and grade number are the same fact printed twice: the scale
 # is published and fixed, so MINT is always 9 and GEM MT is always 10. That
@@ -167,7 +197,9 @@ def extract(text: str) -> SlabRead:
             got.is_slab = True
             return got
 
-    named = re.search(r"\b(PSA|BGS|BECKETT|BVG|BCCG|CGC|SGC|TAG|ACE|AGS)\b", U)
+    named = re.search(
+        r"\b(" + _company_alternation(list(TIERS) + list(_ALIASES)) + r")\b", U
+    )
     if named or cert_s:
         grader = named.group(1).upper() if named else None
         if grader == "BECKETT":
@@ -409,11 +441,36 @@ def _sgc(U: str) -> SlabRead | None:
 
 
 def _emerging(U: str) -> SlabRead | None:
-    m = re.search(r"\b(TAG|ACE|AGS|MNT|HGA|GMA|KSA|CSG)\s*" + _NUM, U)
+    others = [g for g in TIERS if g not in _OWN_RULES]
+    m = re.search(r"\b(" + _company_alternation(others) + r")\s*" + _NUM, U)
     if not m:
         return None
     g = _f(m.group(2))
-    return SlabRead(grader=m.group(1).upper(), grade=g) if _valid(g) else None
+    grader = re.sub(r"\s+", " ", m.group(1).upper())
+    return SlabRead(grader=grader, grade=g) if _valid(g) else None
+
+
+def _named_wording(U: str) -> SlabRead | None:
+    """A company we know, with its grade printed as words further along.
+
+    The rule above wants the number against the company name. A real label
+    rarely obliges: "GMG 2023 BOWMAN JOSUE DE PAULA ROOKIE #BP83 GEM MINT 10"
+    puts the YEAR there, so the grade went unread and the holder came back
+    gradeless — which stops everything downstream from pricing it as the 10 it
+    plainly is.
+
+    Only the grading WORDING is trusted, never the first loose number: a label
+    is full of numerals that are not grades (the year, the card number, the
+    cert), and guessing one of those as a grade is the expensive mistake.
+    """
+    others = [g for g in TIERS if g not in _OWN_RULES]
+    m = re.search(r"\b(" + _company_alternation(others) + r")\b", U)
+    if not m:
+        return None
+    g = _wording_grade(U)
+    if not _valid(g):
+        return None
+    return SlabRead(grader=re.sub(r"\s+", " ", m.group(1).upper()), grade=g)
 
 
 def _first_plausible_grade(s: str) -> float | None:
@@ -484,5 +541,7 @@ _CASCADE = [
     _cgc,
     _sgc,
     _emerging,
+    _named_wording,   # after _emerging: the number beside the name wins over
+                      # wording printed elsewhere on the same label
     _by_cert_shape,   # last: only when no grader name was readable
 ]

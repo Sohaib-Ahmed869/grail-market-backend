@@ -177,6 +177,81 @@ Off unless `THECARDAPI_KEY` and `THECARDAPI_DAILY_ROWS` are both set.
   were `best_offer`, which is the accepted-offer price eBay's own API will not
   give us.
 
+## Image recognition — DINOv2 card index
+
+The card by its PICTURE, not its text. `vision/app/pipeline/embed.py` embeds
+the flattened card with DINOv2-small (Meta, Apache-2.0, ONNX via onnxruntime —
+no PyTorch); `cardindex.py` holds every catalogue render as vectors and answers
+`POST /recognize` with the nearest cards and their backend card ids.
+`src/scans/imagematch.ts` calls it from the identification chain BEFORE Gemini.
+
+- **The index is built, not committed.** `vision/models/` and `vision/index/`
+  are gitignored. On a fresh box:
+  `curl -L -o vision/models/dinov2-small/model.onnx https://huggingface.co/onnx-community/dinov2-small/resolve/main/onnx/model.onnx`
+  then `vision/.venv/bin/python vision/scripts/build_index.py --sources pokemon,onepiece,lorcana,yugioh`
+  (`--sources all` adds Japanese Pokémon and Magic). Resumable per source;
+  `--merge-only` rebuilds the merged index from shards. Re-run when sets release.
+- **Without model or index, recognition returns nothing** and the text chain
+  runs exactly as before. It is an addition, never a dependency.
+- **`VISION_URL=off` runs the API with no vision service at all** — no OCR, no
+  DINOv2, no `/similarity`. For a machine that has not got the 1.2 GB.
+  `analyze()` returns `blankAnalysis()` (see `visionurl.ts`), every catalogue
+  lookup declines an empty name list, and the scan falls through to the Gemini
+  step that already existed at the end of the chain. Gemini alone then names
+  the card, and the catalogue re-verifies that name, so a confirmed printing
+  and a price still come out — measured on `samples/mega_slowbro_ex.jpg`.
+  In that mode `identifyWithGemini` is called with `allowUnsure`, because an
+  answer flagged `confident: false` is the only answer there will be; it is
+  dropped everywhere else. Do NOT set this on the AWS box: without OCR there
+  is no slab label, so no grade is read, and a graded card prices as raw.
+- **The picture names the card; the printing still needs proof.** Printings
+  share artwork. `pictureProvesPrinting` only lets the picture settle the
+  printing with a lead over every other printing of that name; Yu-Gi-Oh never
+  (one artwork per card). 1st Edition vs Unlimited is a stamp, not artwork — the
+  embedding cannot see it.
+- **Thresholds are env-tunable and measured**, never guessed:
+  `RECOGNIZE_MIN_SCORE`, `RECOGNIZE_MIN_MARGIN`, `RECOGNIZE_MIN_PRINTING_LEAD`.
+  Measure with `vision/.venv/bin/python vision/scripts/eval_index.py` against
+  stored confirmed scans before changing them.
+- **Memory:** the ONNX session is ~250 MB and the index ~80 MB per 50k cards,
+  inside the vision unit's `MemoryMax=1200M` alongside RapidOCR, but close on a
+  2 GB box. `EMBED_THREADS` (default 2) caps CPU per scan.
+- **`EMBED_BACKEND=hash` is the no-model fallback**, for a box that cannot
+  afford the session at all: dHash for structure and match.py's glare-stripped
+  hue signature for colour, packed into one 496-dim unit vector so the index
+  search, the scores and the `/recognize` contract are unchanged. Nothing to
+  download, 23 ms a card. An index belongs to the backend that built it —
+  `cardindex.load()` compares the stored width against `embed.dims()` and
+  refuses a mismatch rather than scoring nonsense.
+
+### Do not go looking for a lighter embedder again
+
+Measured 2026-09-16 on the same 57 stored One Piece scans (`eval_index.py`),
+against DINOv2-small fp32 at **90% raw / 73% slab top-1, 43 of 57 named with
+0 wrong** at `score>=0.65 margin>=0.03`:
+
+| option | weight | result |
+| --- | --- | --- |
+| `hash` (no model) | 0 MB | 74% raw, **0% slab**, 21/57 named, 0 wrong |
+| DINOv2 fp16 | 42 MB | vectors identical (cosine 0.9997) but **323 MB RSS vs 261** |
+| DINOv2 int8 / q4 | 23 / 16 MB | 2x slower, cosine 0.90-0.98, needs its own index |
+| MobileNetV4-small | 14 MB | export emits `logits` only; as an embedding two unrelated cards score 0.998 |
+| CLIP ViT-B/32 (MIT) | 87 MB | no lighter than what we run |
+
+- **The slab number is why the hash backend is not the default.** A slab photo
+  is mostly holder and label, so a whole-image gradient and hue histogram
+  describe the case, not the card. It is never WRONG — 0 wrong at every
+  threshold — it just goes quiet, and quiet on slabs is the half of the
+  catalogue where the money is.
+- **fp16 costs more memory, not less**: onnxruntime's CPU provider has no
+  native fp16 compute and inserts casts, so both copies are resident. Halving
+  the file does not halve the process.
+- Untested and licence-blocked: MobileCLIP-S0 (11-43 MB) is built for
+  retrieval and might clear the bar, but it ships under Apple's ml-mobileclip
+  terms rather than an open licence. Ask before adopting it.
+- Every scan logs a `[recognize]` line: top card, score, margin, printing lead
+  and what the text chain said. That log is how the thresholds get tuned.
+
 ## Sports catalogue — eBay item specifics
 
 `src/scans/sports.ts`. Browse API aspect refinements in category 261328
@@ -189,6 +264,12 @@ set>`, cards `sport-<base64url(slug|set|player)>`.
   `cardTrend` and the `/market/listings` summary all refuse a figure for these
   ids (`isSportCard`/`isSportGame`). Do not remove that until a card number
   exists to narrow on. Fixtures in `test/sportscatalogue.test.mjs`.
+- **"Listed from" is the one sports figure shown** (`lowestAsk`, `sportAsks`,
+  `SetCard.askFrom`): the cheapest single copy of a player in a set for sale
+  now, read from the per-player picture call sorted by price — no extra eBay
+  call. It is labelled as a listing on tiles and is NOT a value: never feed it
+  to a valuation, collection total or the sell flow. Fixtures in
+  `test/sportasks.test.mjs`.
 - **AFL, NRL and cricket read eBay AU.** The AU Sport value is "Australian
   Rules Football"; the US spelling is silently ignored there and returns the
   whole category. `filterHeld()` is what catches a dropped filter.

@@ -550,3 +550,17 @@ export async function identifyFromSlabLabel(label: {
   }
   return built;
 }
+
+/** A Pokémon card by its TCGdex id, for a match made by picture rather than by
+ *  reading. `printingConfirmed` is the caller's verdict on whether the picture
+ *  also settled the printing — without it the card is named but not priced,
+ *  exactly as for an unproven text match. */
+export function pokemonById(
+  cardId: string,
+  name: string | null,
+  matchScore: number,
+  printingConfirmed: boolean,
+) {
+  const brief = name ? ({ id: cardId, localId: cardId.split("-").pop() ?? "", name } as TcgdexBrief) : undefined;
+  return buildFromCardId(cardId, "(image)", matchScore, brief, printingConfirmed);
+}

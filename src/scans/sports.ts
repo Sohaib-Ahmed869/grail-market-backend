@@ -419,7 +419,7 @@ export function catalogueMayCall(): boolean {
 const esc = (v: string) => v.replace(/([\\,|{}])/g, "\\$1");
 
 async function browse(sport: Sport, opts: {
-  q?: string; set?: string; player?: string; limit: number;
+  q?: string; set?: string; player?: string; limit: number; sort?: "price";
 }): Promise<any | null> {
   if (!catalogueMayCall()) return null;
   const tok = await getToken();
@@ -437,6 +437,7 @@ async function browse(sport: Sport, opts: {
     aspect_filter: filter.join(","),
   });
   if (opts.q) p.set("q", opts.q);
+  if (opts.sort) p.set("sort", opts.sort);
   return call(p, sport.marketplace, tok);
 }
 
@@ -649,7 +650,11 @@ export async function sportSetDetail(setId: string): Promise<SetDetail | null> {
     // otherwise reopening the set shows the blanks the page just filled.
     return {
       ...hit,
-      cards: hit.cards.map((c) => (c.imageUrl ? c : { ...c, imageUrl: pictures.get(c.cardId) })),
+      cards: hit.cards.map((c) => ({
+        ...c,
+        imageUrl: c.imageUrl ?? pictures.get(c.cardId),
+        askFrom: c.askFrom ?? asks.get(c.cardId) ?? null,
+      })),
     };
   }
   const read = readSportSetId(setId);
@@ -685,6 +690,10 @@ export async function sportSetDetail(setId: string): Promise<SetDetail | null> {
       // Never a price. See the header of this file.
       rawUsd: null,
       rarity: null,
+      // A live ask already learned for this player, if any. The set's own
+      // 200 listings are not used for it: they are a sample, and the lowest
+      // among a sample is not "listed from".
+      askFrom: asks.get(cardId) ?? null,
     };
   });
   if (!cards.length) return null;
@@ -703,6 +712,58 @@ export async function sportSetDetail(setId: string): Promise<SetDetail | null> {
   };
   detailCache.set(setId, detail);
   return detail;
+}
+
+// ---- live asks -------------------------------------------------------------------
+
+/** The cheapest single copy of a player in a set for sale right now.
+ *
+ *  Not a price for the card: a player-in-set spans base cards, parallels and
+ *  one-of-ones, and nothing here can say which copy is in your hand. It is a
+ *  fact about the live market — "one of these can be bought from $X today" —
+ *  shown labelled as a listing. It must never feed a valuation, a collection
+ *  total or the sell flow; the refusals on `/market/price`, `gradedPricesFor`
+ *  and the listings median stand.
+ *
+ *  It costs no eBay call of its own: the per-player picture lookup asks for
+ *  the same listings, now cheapest first, and this reads their prices. */
+export type SportAsk = { price: number; currency: string; count: number | null };
+const asks = new TtlCache<SportAsk | null>(DAY, 50_000, "sport-asks");
+
+type PricedItem = Item & { price?: { value?: string | number; currency?: string } };
+
+/** Lowest single-card ask among listings whose title names every word of the
+ *  player's name. Lots, "you pick" checklists and reprints are not one card;
+ *  "Seth Curry" is not Stephen Curry; and a listing in a second currency is
+ *  skipped, because a lowest figure across two currencies compares nothing. */
+export function lowestAsk(items: PricedItem[], player: string): { price: number; currency: string } | null {
+  const words = tokens(player).filter((w) => w.length >= 3);
+  if (!words.length) return null;
+  let best: { price: number; currency: string } | null = null;
+  for (const it of items) {
+    const title = String(it.title ?? "");
+    if (NOT_ONE_CARD.test(title) || PICK_LIST.test(title)) continue;
+    const t = ` ${flat(title)} `;
+    if (!words.every((w) => t.includes(` ${w} `))) continue;
+    const price = Number(it.price?.value);
+    const currency = String(it.price?.currency ?? "");
+    if (!Number.isFinite(price) || price <= 0 || !currency) continue;
+    if (best && currency !== best.currency) continue;
+    if (!best || price < best.price) best = { price, currency };
+  }
+  return best;
+}
+
+/** Live asks already known for these ids. An id is ABSENT when it has not been
+ *  asked about (the page may ask again later) and NULL when eBay was asked and
+ *  has no single copy listed. */
+export function sportAsks(ids: string[]): Record<string, SportAsk | null> {
+  const out: Record<string, SportAsk | null> = {};
+  for (const id of ids) {
+    const e = asks.entry(id);
+    if (e) out[id] = e.v;
+  }
+  return out;
 }
 
 /** Most ids one art request may ask about. The page asks for what is on
@@ -745,13 +806,15 @@ export function pickArt(items: Item[], player: string): string | null {
 
 async function resolveArt(id: string): Promise<string | null> {
   const hit = art.entry(id);
-  if (hit) return hit.v;
+  if (hit && asks.entry(id)) return hit.v;
   const read = readSportCard(id);
-  if (!read) return null;
+  if (!read) return hit?.v ?? null;
 
-  const body = await browse(read.sport, { set: read.set, player: read.player, limit: 12 });
+  // Cheapest first, so the lowest ask is on this page. A picture taken from
+  // the cheaper listings is still a picture of this player.
+  const body = await browse(read.sport, { set: read.set, player: read.player, limit: 24, sort: "price" });
   // Refused or failed: nothing learned, nothing cached.
-  if (!body) return null;
+  if (!body) return hit?.v ?? null;
   // eBay drops a filter it cannot read rather than refusing — the answer is
   // then some other player's listings. That is a stable property of the value,
   // so it IS cached, as a miss: a wrong face is worse than no face.
@@ -759,8 +822,11 @@ async function resolveArt(id: string): Promise<string | null> {
     filterHeld(body, read.sport) &&
     distributionOf(body, "Set").length <= 1 &&
     distributionOf(body, "Player/Athlete").length <= 1;
-  const url = held ? pickArt(body.itemSummaries ?? [], read.player) : null;
-  art.set(id, url);
+  const items = body.itemSummaries ?? [];
+  const url = hit ? hit.v : held ? pickArt(items, read.player) : null;
+  if (!hit) art.set(id, url);
+  const low = held ? lowestAsk(items, read.player) : null;
+  asks.set(id, low ? { ...low, count: Number(body.total) || null } : null);
   return url;
 }
 

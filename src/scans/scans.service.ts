@@ -7,7 +7,7 @@ import type { Identification, Scan, VisionAnalyzeResponse } from "@grailcard/sha
 import { db } from "../db.js";
 import { identifyApiTcg } from "./apitcg.js";
 import { fetchWebPrices } from "./geminiprice.js";
-import { normaliseVisionUrl } from "./visionurl.js";
+import { blankAnalysis, normaliseVisionUrl, visionDisabled } from "./visionurl.js";
 import { fetchCardGraderMarket } from "./cardgrader.js";
 import { identifyWithGemini } from "./gemini.js";
 import { fetchJustTcgPrice } from "./justtcg.js";
@@ -41,6 +41,8 @@ import {
 } from "./othergames.js";
 import { buildRecommendation } from "./recommend.js";
 import { similarity } from "./similarity.js";
+import { cardKey, confidentMatch, pictureProvesPrinting, printingLead, recognizeCard, type ImageMatch, type Recognition } from "./imagematch.js";
+import { pokemonById } from "./tcgdex.js";
 import { fetchRelated } from "./related.js";
 import { buildSummary } from "./summarize.js";
 import { identifyCard, identifyFromSlabLabel } from "./tcgdex.js";
@@ -423,6 +425,55 @@ export class ScansService {
       matches.sort((a, b) => b.identification.matchScore - a.identification.matchScore);
       let match = matches[0];
 
+      // ---- image recognition ----------------------------------------------------
+      // The card by its PICTURE, before a second opinion is bought from Gemini:
+      // DINOv2 on our own box against every catalogue render (imagematch.ts).
+      //   - text and picture name the same printing: nothing left to arbitrate
+      //   - text found nothing or something weak: a confident picture names it,
+      //     through the same catalogue code a text match uses, so printing proof
+      //     and pricing rules are unchanged
+      //   - the picture is unsure: nothing changes
+      // A slab's label already said which card, so it is not asked there.
+      if (!labelMatch) {
+        const seen = await recognizeCard(frontRes.warpedImageB64);
+        const pictured = confidentMatch(seen);
+        if (seen?.matches[0]) {
+          const t = seen.matches[0];
+          console.log(
+            `[recognize] ${t.game} ${t.cardId} "${t.name}" score ${t.score} margin ${seen.margin} ` +
+              `lead ${printingLead(seen)} confident ${Boolean(pictured)} ` +
+              `text ${match?.identification.cardId ?? "-"}@${match?.identification.matchScore ?? "-"}`,
+          );
+        }
+        if (seen && pictured) {
+          const samePrinting = Boolean(match) && match.identification.cardId === pictured.cardId;
+          // The same CARD, whatever the printing: a catalogue spells the
+          // printing into the name ("Stussy (SP)" beside "Stussy"), so names are
+          // compared without it, and One Piece by its number.
+          const sameCard =
+            samePrinting ||
+            (Boolean(match) &&
+              cardKey({
+                game: match.identification.game ?? "",
+                name: match.identification.name,
+                number: match.identification.localId || null,
+              }) === cardKey(pictured));
+          if (samePrinting) {
+            match = {
+              ...match,
+              identification: { ...match.identification, matchScore: Math.max(match.identification.matchScore, 0.95) },
+            };
+          } else if (
+            !match ||
+            (!sameCard && match.identification.matchScore < 0.93) ||
+            (sameCard && match.identification.printingConfirmed === false)
+          ) {
+            const byPicture = await identifyFromPicture(pictured, seen, frontRes.warpedImageB64, frontRes.ocr.texts ?? []);
+            if (byPicture) match = byPicture;
+          }
+        }
+      }
+
       // arbitration: anything short of a near-certain catalog match
       // ("LARA" -> Pokemon's "Klara" scored 0.86) gets a second opinion from
       // the vision LLM; a different game verdict means false positive — drop it
@@ -592,7 +643,13 @@ export class ScansService {
         // catalogs failed — ask the vision LLM to NAME the card (identification
         // only, never condition or price). If it names a catalog-supported
         // game, loop the name back through the real catalog for verified data.
-        const llm = await identifyWithGemini(front.buffer.toString("base64"), front.mimetype);
+        const llm = await identifyWithGemini(front.buffer.toString("base64"), front.mimetype, {
+          // With no vision service there is nothing else that could name this
+          // card — no OCR text, no picture match, no catalogue to agree with.
+          // An unsure answer is the only answer, and it is still shown
+          // unconfirmed and unpriced.
+          allowUnsure: visionDisabled(),
+        });
         if (llm) {
           if (llm.printing) printingHints.push(llm.printing);
           if (llm.edition) printingHints.push(llm.edition);
@@ -1473,6 +1530,8 @@ export class ScansService {
     file: Express.Multer.File,
     kind: "front" | "back",
   ): Promise<VisionAnalyzeResponse> {
+    // VISION_URL=off: no service to ask. Gemini names the card from the photo.
+    if (visionDisabled()) return blankAnalysis();
     // Bounded, because the vision process is a single copy of a 350 MB model
     // and nothing else stands between it and however many people press the
     // button at once. Waiting for a slot is fine; waiting in an unbounded
@@ -1802,4 +1861,45 @@ export function pickDescribedName(names: string[], texts: readonly string[] = []
     }
   }
   return pick || person || names[0] || "";
+}
+
+
+/** A card named by its picture, built by the same catalogue code a text match
+ *  uses — so a picture match is priced, proven and shown exactly like one. */
+async function identifyFromPicture(
+  p: ImageMatch,
+  seen: Recognition,
+  warpedImageB64: string | null | undefined,
+  texts: string[],
+) {
+  switch (p.game) {
+    case "pokemon": {
+      // Japanese renders name the card; there is no Japanese by-id builder yet.
+      if (p.cardId.startsWith("tcgdex-ja:")) return null;
+      const proven = pictureProvesPrinting(seen);
+      return pokemonById(p.cardId, p.name, proven ? 0.94 : 0.9, proven);
+    }
+    case "onepiece": {
+      // The picture chose among EVERY printing of that number at once; when it
+      // is clearly ahead of the others it settles the printing, otherwise the
+      // pairwise picker decides as before.
+      if (!p.number) return null;
+      const imageId = p.cardId.replace(/^optcg-/, "");
+      return identifyOnePiece(
+        p.number,
+        warpedImageB64,
+        pictureProvesPrinting(seen) ? { imageId, lead: printingLead(seen) } : null,
+      );
+    }
+    case "mtg":
+      return p.name ? identifyScryfall([p.name], texts) : null;
+    case "yugioh":
+      // one artwork across every printing: the picture names the card, the set
+      // code read off the card still picks the printing
+      return p.name ? identifyYgo([p.name], texts) : null;
+    case "lorcana":
+      return p.name ? identifyLorcana([p.name], texts) : null;
+    default:
+      return null;
+  }
 }

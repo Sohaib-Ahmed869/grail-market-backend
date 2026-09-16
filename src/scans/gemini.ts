@@ -21,6 +21,9 @@ export type LlmIdentification = {
   /** The collector number. Only used to narrow a sports search, where the
    *  number is on the back and the front photo cannot show it. */
   number?: string | null;
+  /** What the model said about its own certainty. False only reaches a caller
+   *  that asked for unsure answers with `allowUnsure`. */
+  confident: boolean;
 };
 
 const PROMPT = `Identify this trading card from the photo. Respond with JSON only:
@@ -41,6 +44,16 @@ Rules:
 export async function identifyWithGemini(
   imageB64: string,
   mimeType = "image/jpeg",
+  /** `allowUnsure`: keep an answer the model flagged `confident: false`.
+   *
+   *  Normally such an answer is dropped, because something better asked it —
+   *  OCR read the card, the picture matched a render, a catalogue agreed — and
+   *  a shaky second opinion is worse than none. With VISION_URL=off none of
+   *  that exists and this call is the whole identification chain: dropping it
+   *  turns a correctly named card into a blank scan. A photo of Mega Slowbro ex
+   *  came back named, numbered and `confident: false`. It stays unpriced
+   *  either way — the caller marks it printingConfirmed: false. */
+  opts: { allowUnsure?: boolean } = {},
 ): Promise<LlmIdentification | null> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
@@ -104,10 +117,17 @@ export async function identifyWithGemini(
     if (!text) return null;
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (typeof parsed.name !== "string" || parsed.name.length < 2) return null;
-    if (parsed.confident === false) return null;
+    const confident = parsed.confident !== false;
+    if (!confident && !opts.allowUnsure) {
+      // Silent until now: the model answered, the answer was thrown away, and
+      // the log showed nothing at all for the scan.
+      console.warn(`[gemini] dropped unsure identification "${parsed.name}"`);
+      return null;
+    }
 
     const game = typeof parsed.game === "string" ? parsed.game.toLowerCase() : "other";
     return {
+      confident,
       name: parsed.name,
       game: [
         "pokemon", "mtg", "yugioh", "onepiece", "lorcana", "digimon",

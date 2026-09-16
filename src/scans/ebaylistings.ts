@@ -2,6 +2,7 @@ import { recordUsage } from "./usage.js";
 import { comparePrinting, describePrinting, readPrinting, type Printing } from "./printing.js";
 import { listingMatchesLabel } from "./labeltokens.js";
 import { TtlCache } from "./ttlcache.js";
+import { gradeFromTitle, isGradedListing } from "./graders.js";
 
 // Live eBay listings for a card, shown in-product rather than as a link out.
 //
@@ -252,16 +253,9 @@ function formNear(toks: string[], idWords: string[]): string | null {
   return `${mega ? "mega" : ""}${suffix}`;
 }
 
-/** Pull the grading company and grade out of a listing title.
- *  Sellers write "BGS 8.5", "PSA 10 GEM MINT", "CGC 9.5" — enough to tell a
- *  listing for this exact slab from one for a different grade of the same card. */
-function gradeFromTitle(title: string): { grader: string | null; grade: number | null } {
-  const m = /\b(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|BVG|BCCG)\s*(\d{1,2}(?:\.5)?)\b/i.exec(title);
-  if (!m) return { grader: null, grade: null };
-  const grader = m[1].toUpperCase() === "BECKETT" ? "BGS" : m[1].toUpperCase();
-  const grade = Number(m[2]);
-  return { grader, grade: Number.isFinite(grade) && grade >= 1 && grade <= 10 ? grade : null };
-}
+// gradeFromTitle and isGradedListing live in graders.ts: the same question is
+// asked of sold rows in thecardapi.ts, and a company known to one path and not
+// the other prices a slab as a loose card on whichever path missed it.
 
 /** An autograph, or any card a grader declined to number.
  *
@@ -758,8 +752,7 @@ export async function fetchListings(opts: {
     // It never returns to the full set, because a raw copy is not a comparable
     // for a card in a holder at any sample size.
     if (opts.grader) {
-      const isGraded = (l: Listing) =>
-        l.grader != null || /\b(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|GRADED|SLAB)\b/i.test(l.title);
+      const isGraded = (l: Listing) => l.grader != null || isGradedListing(l.title);
 
       const exact =
         opts.grade != null
@@ -803,7 +796,7 @@ export async function fetchListings(opts: {
       // listings left all four in and reported a range of $72 to $630 for a
       // raw card. One true reading beats four mixed ones.
       const looseOnly = filtered.filter(
-        (l) => l.grader == null && !/\b(PSA|BGS|BECKETT|CGC|SGC|TAG|ACE|GRADED|SLAB)\b/i.test(l.title),
+        (l) => l.grader == null && !isGradedListing(l.title),
       );
       if (looseOnly.length > 0 && looseOnly.length < filtered.length) {
         console.log(
