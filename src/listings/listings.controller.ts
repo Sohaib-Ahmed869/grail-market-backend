@@ -25,7 +25,7 @@ import { readSettings } from "../admin/settings.store.js";
 import { readStatus as readIdentity } from "../identity/store.js";
 import { autoPublish } from "./autopublish.js";
 import { publicListing } from "./publicshape.js";
-import { fillListingPoints, locateListing, parseNear, parseWithin } from "./nearby.js";
+import { fillListingPoints, locateListing, parseNear, parseWithin, suburbProblem } from "./nearby.js";
 import { storePool } from "../cards.store.js";
 
 const need = (req: Request) => callerId(req);
@@ -175,6 +175,12 @@ export class ListingsController {
     if (!b?.cardName || !(Number(b?.price) > 0)) {
       return { error: "invalid", message: "A card and a price are required." };
     }
+    // And a suburb, now. The card shop finder (GM001-65) takes the seller's
+    // side of the meet-up FROM the listing suburb, so a listing without one
+    // silently breaks the main physical safety control the no-escrow model
+    // rests on — and a buyer browsing has no distance to judge it by either.
+    const suburbFault = suburbProblem(b?.suburb);
+    if (suburbFault) return { error: "invalid", message: suburbFault };
 
     const id = await createListing({
       sellerId: me, catalogId: b.catalogId ?? null, cardName: String(b.cardName),
@@ -397,6 +403,14 @@ export class ListingsController {
   async edit(@Param("id") id: string, @Req() req: Request, @Body() b: any) {
     const me = need(req);
     if (!me) return { error: "unauthenticated" };
+
+    // Checked only when the seller is actually changing it. `undefined` here
+    // means "leave it alone", and a listing that went up before a suburb was
+    // required must not have a price edit refused over a field it never had.
+    if (b?.suburb != null) {
+      const fault = suburbProblem(b.suburb);
+      if (fault) return { error: "invalid", message: fault };
+    }
 
     const before = await getListing(id);
     const r = await editListing(id, me, {

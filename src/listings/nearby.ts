@@ -49,6 +49,37 @@ export function roundKm(v: unknown): number | null {
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
 }
 
+/** A house or unit number leading the line: "12 Smith St", "4/12 Smith St",
+ *  "Unit 4 12 Smith St", "Lot 3 Baker Road". A suburb never opens with one. */
+const HOUSE_NUMBER = /^\s*(?:unit|apt|apartment|flat|shop|lot)?\s*\d+[a-z]?\s*(?:[/-]\s*\d+[a-z]?\s*)?\s+\S/i;
+
+/** Why this suburb cannot be used, or null when it is fine.
+ *
+ *  A suburb, never an address. The whole location design rests on that: the
+ *  point we keep is the suburb's CENTRE, no more precise than the name the
+ *  seller already publishes. A street address typed into this box would be
+ *  geocoded to the seller's door, and every other privacy decision here —
+ *  coordinates never leaving the server, the viewer's point rounded and
+ *  discarded — would be beside the point.
+ *
+ *  Shape only, and deliberately so. Whether the place EXISTS is settled later
+ *  by the geocoder, off the request path: see locateListing. A submit is never
+ *  held by a map server, which on this project once took 41 seconds and then
+ *  failed (GM001-65).
+ *
+ *  A leading number is the signal, not street words. "St Kilda", "St Leonards"
+ *  and "St Marys" are suburbs, so rejecting "st" would reject real places;
+ *  "1770" is a town in Queensland, so a bare number is not an address either.
+ *  A bare "Smith Street" slips through and geocodes to a street rather than a
+ *  door — worse than a suburb, far better than a house number. */
+export function suburbProblem(raw: unknown): string | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return "A suburb is required, so buyers can see how far away the card is.";
+  if (s.length > 60) return "That looks like a full address. The suburb on its own is enough.";
+  if (HOUSE_NUMBER.test(s)) return "Enter the suburb only, not a street address.";
+  return null;
+}
+
 /** Great-circle distance from ($lat, $lon) to the listing's suburb, in SQL,
  *  so the database can order and filter a page by it. `least(1, …)` because
  *  floating point can put the haversine term a hair over 1 for two identical

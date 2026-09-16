@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { distanceSql, parseNear, parseWithin, roundKm } from "../src/listings/nearby.js";
+import { distanceSql, parseNear, parseWithin, roundKm, suburbProblem } from "../src/listings/nearby.js";
 import { publicListing } from "../src/listings/publicshape.js";
 
 test("the viewer's point is rounded to about a kilometre before anything uses it", () => {
@@ -60,4 +60,41 @@ test("a buyer sees how far, never where the listing was placed", () => {
 test("without a viewer location there is no distance field at all", () => {
   const p = publicListing({ listing_id: "l_2", suburb: "Newtown", featured_until: null });
   assert.ok(!("distance_km" in p));
+});
+
+test("a suburb is required, because the card shop finder reads the seller's side from it", () => {
+  // GM001-65 takes the seller's meet-up location FROM the listing suburb, so a
+  // listing without one silently breaks the safety feature the whole no-escrow
+  // model leans on.
+  assert.match(suburbProblem(""), /required/i);
+  assert.match(suburbProblem("   "), /required/i);
+  assert.match(suburbProblem(null), /required/i);
+  assert.match(suburbProblem(undefined), /required/i);
+  assert.equal(suburbProblem("Surry Hills"), null);
+});
+
+test("a street address is refused, so the point we store stays a suburb centre", () => {
+  for (const address of [
+    "12 Smith St", "4/12 Smith Street", "Unit 4 12 Smith St", "Lot 3 Baker Road", "7a Hill Rd",
+  ]) {
+    assert.match(suburbProblem(address), /suburb only/i, address);
+  }
+});
+
+test("real suburb names are not mistaken for addresses", () => {
+  // Why the test is a leading NUMBER and not street words: St Kilda, St
+  // Leonards and St Marys are suburbs, and 1770 is a town in Queensland.
+  for (const suburb of [
+    "St Kilda", "St Leonards", "St Marys", "Surry Hills 2010", "Eight Mile Plains",
+    "1770", "Broadway", "Kings Way",
+  ]) {
+    assert.equal(suburbProblem(suburb), null, suburb);
+  }
+});
+
+test("a whole address pasted in is refused on length before anything else", () => {
+  assert.match(
+    suburbProblem("Apartment 1201, 480 Collins Street, Melbourne VIC 3000, Australia"),
+    /full address/i,
+  );
 });
